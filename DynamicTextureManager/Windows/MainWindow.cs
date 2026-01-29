@@ -10,12 +10,12 @@ namespace DynamicTextureManager.Windows;
 
 public class MainWindow : Window, IDisposable
 {
-    private readonly Plugin plugin;
+    private readonly DynamicTextureManager dynamicTextureManager;
 
     // We give this window a hidden ID using ##.
     // The user will see "My Amazing Window" as window title,
     // but for ImGui the ID is "My Amazing Window##With a hidden ID"
-    public MainWindow(Plugin plugin)
+    public MainWindow(DynamicTextureManager dynamicTextureManager)
         : base("My Amazing Window##With a hidden ID", ImGuiWindowFlags.NoScrollbar | ImGuiWindowFlags.NoScrollWithMouse)
     {
         SizeConstraints = new WindowSizeConstraints
@@ -23,18 +23,18 @@ public class MainWindow : Window, IDisposable
             MinimumSize = new Vector2(375, 330),
             MaximumSize = new Vector2(float.MaxValue, float.MaxValue)
         };
-        this.plugin = plugin;
+        this.dynamicTextureManager = dynamicTextureManager;
     }
 
     public void Dispose() { }
 
     public override void Draw()
     {
-        ImGui.Text($"The random config bool is {plugin.Configuration.SomePropertyToBeSavedAndWithADefault}");
+        ImGui.Text($"The random config bool is {dynamicTextureManager.Configuration.SomePropertyToBeSavedAndWithADefault}");
 
         if (ImGui.Button("Show Settings"))
         {
-            plugin.ToggleConfigUi();
+            dynamicTextureManager.ToggleConfigUi();
         }
 
         ImGui.Spacing();
@@ -52,7 +52,7 @@ public class MainWindow : Window, IDisposable
                 // Example for other services that Dalamud provides.
                 // PlayerState provides a wrapper filled with information about the player character.
 
-                var playerState = Plugin.PlayerState;
+                var playerState = DynamicTextureManager.PlayerState;
                 if (!playerState.IsLoaded)
                 {
                     ImGui.Text("Our local player is currently not logged in.");
@@ -70,8 +70,8 @@ public class MainWindow : Window, IDisposable
                 ImGui.Text($"Our current job is ({playerState.ClassJob.RowId}) '{playerState.ClassJob.Value.Abbreviation}' with level {playerState.Level}");
 
                 // Example for querying Lumina, getting the name of our current area.
-                var territoryId = Plugin.ClientState.TerritoryType;
-                if (Plugin.DataManager.GetExcelSheet<TerritoryType>().TryGetRow(territoryId, out var territoryRow))
+                var territoryId = DynamicTextureManager.ClientState.TerritoryType;
+                if (DynamicTextureManager.DataManager.GetExcelSheet<TerritoryType>().TryGetRow(territoryId, out var territoryRow))
                 {
                     ImGui.Text($"We are currently in ({territoryId}) '{territoryRow.PlaceName.Value.Name}'");
                 }

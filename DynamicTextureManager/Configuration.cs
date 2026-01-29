@@ -1,11 +1,14 @@
 ﻿using Dalamud.Configuration;
 using System;
+using Dalamud.Plugin;
 
 namespace DynamicTextureManager;
 
 [Serializable]
-public class Configuration : IPluginConfiguration
+public class Configuration(IDalamudPluginInterface pluginInterface) : IPluginConfiguration
 {
+    private readonly IDalamudPluginInterface _pluginInterface = pluginInterface;
+    
     public int Version { get; set; } = 0;
 
     public bool IsConfigWindowMovable { get; set; } = true;
@@ -14,6 +17,6 @@ public class Configuration : IPluginConfiguration
     // The below exists just to make saving less cumbersome
     public void Save()
     {
-        Plugin.PluginInterface.SavePluginConfig(this);
+        _pluginInterface.SavePluginConfig(this);
     }
 }
