@@ -2,7 +2,7 @@
 <Project Sdk="Dalamud.NET.Sdk/14.0.1">
   <PropertyGroup>
     <Author>Virsta</Author>
-    <Name>DynamicTextureManager</Name>
+    <Name>Dynamic Texture Manager</Name>
     <MinimumDalamudVersion>14.0.0</MinimumDalamudVersion>
     <Version>0.0.1</Version>
     <ApplicableVersion>any</ApplicableVersion>
