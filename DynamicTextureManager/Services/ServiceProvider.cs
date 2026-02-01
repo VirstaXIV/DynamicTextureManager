@@ -1,7 +1,11 @@
 using Dalamud.Plugin;
 using Dalamud.Plugin.Services;
+using DynamicTextureManager.DTextures;
+using DynamicTextureManager.Events;
+using DynamicTextureManager.UI;
 using OtterGui.Classes;
 using OtterGui.Log;
+using OtterGui.Raii;
 using OtterGui.Services;
 
 namespace DynamicTextureManager.Services;
@@ -17,19 +21,55 @@ public static class ServiceProvider
                        .AddExistingService(log)
                        .AddDalamudServices(pluginInterface)
                        .AddMeta()
+                       .AddEvents()
+                       .AddDTextures()
+                       .AddUi()
                        .AddExistingService(dynamicTextureManager);
         
+        services.AddIServices(typeof(ImRaii).Assembly);
+        services.CreateProvider();
         return services;
     }
 
     private static ServiceManager AddDalamudServices(
         this ServiceManager services, IDalamudPluginInterface pluginInterface)
         => services.AddExistingService(pluginInterface)
-                   .AddDalamudService<ICommandManager>(pluginInterface);
+                   .AddExistingService(pluginInterface.UiBuilder)
+                   .AddDalamudService<ICommandManager>(pluginInterface)
+                   .AddDalamudService<IGameGui>(pluginInterface)
+                   .AddDalamudService<IChatGui>(pluginInterface)
+                   .AddDalamudService<IFramework>(pluginInterface)
+                   .AddDalamudService<IKeyState>(pluginInterface)
+                   .AddDalamudService<INotificationManager>(pluginInterface)
+                   .AddDalamudService<ITargetManager>(pluginInterface)
+                   .AddDalamudService<IObjectTable>(pluginInterface)
+                   .AddDalamudService<ITextureProvider>(pluginInterface)
+                   .AddDalamudService<IGameInteropProvider>(pluginInterface)
+                   .AddDalamudService<IPluginLog>(pluginInterface);
     
     private static ServiceManager AddMeta(this ServiceManager services)
         => services.AddSingleton<MessageService>()
-                   .AddSingleton<FrameworkManager>()
-                   .AddSingleton<Configuration>()
-                   .AddSingleton<CommandService>();
+                    .AddSingleton<FilenameService>()
+                    .AddSingleton<FrameworkManager>()
+                    .AddSingleton<SaveService>()
+                    .AddSingleton<Configuration>()
+                    .AddSingleton<CommandService>();
+
+    private static ServiceManager AddEvents(this ServiceManager services)
+        => services.AddSingleton<DTextureChanged>();
+    
+    private static ServiceManager AddDTextures(this ServiceManager services)
+        => services.AddSingleton<DTextureManager>()
+            .AddSingleton<DTextureStorage>()
+            .AddSingleton<DTextureFileSystem>();
+
+
+    private static ServiceManager AddUi(this ServiceManager services)
+        => services.AddSingleton<MainWindow>()
+                    .AddSingleton<MainWindowPosition>()
+                    .AddSingleton<ConfigWindow>()
+                    .AddSingleton<ConfigWindowPosition>()
+                    .AddSingleton<DTMWindowSystem>()
+                    .AddSingleton<DTMFileSystemSelector>()
+                    .AddSingleton<DTMPanel>();
 }

@@ -1,7 +1,7 @@
 using System;
 using Dalamud.Game.Command;
 using Dalamud.Plugin.Services;
-using DynamicTextureManager.Windows;
+using DynamicTextureManager.UI;
 using OtterGui.Services;
 
 namespace DynamicTextureManager.Services;
