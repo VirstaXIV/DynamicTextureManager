@@ -9,6 +9,16 @@ plugin-managed persistent mod in Penumbra.
 
 Early work in progress. Nothing here is stable yet.
 
+## Installing
+
+Add this repository to Dalamud's custom plugin repositories:
+
+1. In-game: `/xlsettings` → **Experimental** → **Custom Plugin Repositories**
+2. Add `https://raw.githubusercontent.com/VirstaXIV/DynamicTextureManager/master/repo.json`
+3. Save, then install **Dynamic Texture Manager** from the plugin installer (`/xlplugins`).
+
+Requires [Penumbra](https://github.com/xivdev/Penumbra) to be installed and enabled.
+
 ## How it works
 
 - Overlay definitions ("dTextures") are managed in a Glamourer-style file-system selector.
