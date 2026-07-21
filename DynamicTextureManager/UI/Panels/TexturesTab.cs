@@ -45,6 +45,9 @@ public sealed class TexturesTab(
 {
     private const long  SlotPreviewDebounceMs = 400;
 
+    /// <summary> Darkening applied to a shade-partner row: the benign blend target for a pair's unused half. </summary>
+    private const float ShadeFactor = 0.6f;
+
     private bool           _slotPreviewDirty;
     private long           _slotPreviewMs;
     private TextureOption? _slotPreviewOption;
@@ -429,8 +432,16 @@ public sealed class TexturesTab(
         var changed = false;
 
         // Old saves and layers whose allocation was cleared claim their rows on first draw.
-        if (decal is { Enabled: true, RowError: null } && decal.PaletteRows.Count == 0)
-            changed |= ReallocateDecal(dTexture, option, table, decal);
+        // A pair shared with another decal (possible in saves from the row-granular scheme)
+        // fringes at decal edges — heal it by reallocating onto fully owned pairs.
+        if (decal is { Enabled: true, RowError: null })
+        {
+            var conflict = decal.PaletteRows.Count > 0
+             && ClaimedRowsForMaterial(dTexture, option.MaterialGamePath, decal) is var otherRows
+             && decal.PaletteRows.Any(otherRows.Contains);
+            if (decal.PaletteRows.Count == 0 || conflict)
+                changed |= ReallocateDecal(dTexture, option, table, decal);
+        }
 
         ImGui.SetNextItemWidth(220 * ImUtf8.GlobalScale);
         var maxColors = decal.MaxColors;
@@ -439,7 +450,7 @@ public sealed class TexturesTab(
         if (ImGui.IsItemDeactivatedAfterEdit())
             changed |= ReallocateDecal(dTexture, option, table, decal);
         ImUtf8.HoverTooltip(
-            "The decal is reduced to at most this many colors — similar colors merge.\nEach color claims one free colorset row (a pair holds two), so higher values need more free rows on the material."u8);
+            "The decal is reduced to at most this many colors — similar colors merge.\nColors claim whole free colorset slots, two colors per slot (its A and B rows), so 6 colors need 3 fully free slots.\nSlots are never shared between decals — the game blends a slot's A and B rows at every decal edge, so foreign colors would fringe."u8);
 
         ImGui.SameLine();
         if (ImUtf8.SmallButton("Re-extract Colors"u8))
@@ -458,6 +469,12 @@ public sealed class TexturesTab(
 
         var edit = GetOrAddMaterialEdit(dTexture, option);
         var rows = decal.PaletteRows.Select(r => GetOrSeedRow(edit, table, r)).ToList();
+
+        // The decal owns whole pairs; an odd color count leaves a shade-partner half that
+        // follows the decal's dye and reset behavior without being an editable color.
+        var claimedIndices = decal.PaletteRows.SelectMany(r => new[] { r, r ^ 1 }).Distinct()
+            .Where(r => edit.Rows.ContainsKey(r)).ToList();
+        var claimedRows = claimedIndices.Select(r => edit.Rows[r]).ToList();
 
         // One editable color per claimed row; the extracted swatch stays as reference so
         // recoloring never loses which image color the row renders.
@@ -498,7 +515,7 @@ public sealed class TexturesTab(
         {
             // Re-seed the claimed rows from an authored source row, keeping only the colors —
             // recovers rows that carry stale or filler values from earlier edits.
-            foreach (var row in decal.PaletteRows)
+            foreach (var row in claimedIndices)
             {
                 var keep = edit.Rows.TryGetValue(row, out var old) ? old.Diffuse : null;
                 edit.Rows.Remove(row);
@@ -522,7 +539,7 @@ public sealed class TexturesTab(
             if (dyeable)
             {
                 var garmentDye = DetectGarmentDye(option.Mtrl);
-                foreach (var row in rows)
+                foreach (var row in claimedRows)
                 {
                     row.DyeMode = ColorRowEdit.RowDyeMode.Custom;
                     if (garmentDye is { } dye)
@@ -544,7 +561,7 @@ public sealed class TexturesTab(
             }
             else
             {
-                foreach (var row in rows)
+                foreach (var row in claimedRows)
                     row.DyeMode = ColorRowEdit.RowDyeMode.Disable;
             }
 
@@ -558,7 +575,7 @@ public sealed class TexturesTab(
             ImGui.SetNextItemWidth(100 * ImUtf8.GlobalScale);
             if (ImUtf8.Slider("Dye Channel"u8, ref channel, "%d"u8, 1, 2))
             {
-                foreach (var row in rows)
+                foreach (var row in claimedRows)
                     row.DyeChannel = (byte)(channel - 1);
                 changed = true;
             }
@@ -568,7 +585,7 @@ public sealed class TexturesTab(
             ImGui.SetNextItemWidth(100 * ImUtf8.GlobalScale);
             if (ImUtf8.InputScalar("Dye Template"u8, ref template) && template is >= 0 and <= 2047)
             {
-                foreach (var row in rows)
+                foreach (var row in claimedRows)
                     row.DyeTemplate = (ushort)template;
                 changed = true;
             }
@@ -616,8 +633,9 @@ public sealed class TexturesTab(
         var edit   = GetOrAddMaterialEdit(dTexture, option);
         var others = ClaimedRowsForMaterial(dTexture, option.MaterialGamePath, decal);
 
-        // Release the previous claim first; rows other layers still use stay.
-        foreach (var row in decal.PaletteRows.Where(r => !others.Contains(r)))
+        // Release the previous claim (whole pairs, including shade partners) first; rows
+        // other layers still use stay.
+        foreach (var row in decal.PaletteRows.SelectMany(r => new[] { r, r ^ 1 }).Distinct().Where(r => !others.Contains(r)))
             edit.Rows.Remove(row);
         decal.PaletteRows.Clear();
 
@@ -651,6 +669,18 @@ public sealed class TexturesTab(
                     edit.Rows.Remove(result.Rows[i]);
                     GetOrSeedRow(edit, table, result.Rows[i]).Diffuse = [color.R / 255f, color.G / 255f, color.B / 255f];
                 }
+
+                // An odd color count leaves the last pair's B half unused — seed it as a
+                // darkened shade of its A partner so edge texels blending toward it (the id
+                // map's G channel always mixes a pair's halves) darken instead of fringing.
+                if (result.Rows.Count % 2 == 1)
+                {
+                    var last = new Rgba32(palette[^1]);
+                    var shadeRow = result.Rows[^1] ^ 1;
+                    edit.Rows.Remove(shadeRow);
+                    GetOrSeedRow(edit, table, shadeRow).Diffuse =
+                        [last.R / 255f * ShadeFactor, last.G / 255f * ShadeFactor, last.B / 255f * ShadeFactor];
+                }
             }
             else
             {
@@ -664,7 +694,12 @@ public sealed class TexturesTab(
         return true;
     }
 
-    /// <summary> All colorset rows claimed by colorset decals on any texture of this material. </summary>
+    /// <summary>
+    /// All colorset rows claimed by colorset decals on any texture of this material. A decal
+    /// owns the WHOLE pair of every row it renders — the pair's other half either renders
+    /// another of its colors or carries its shade partner, and must never go to another decal
+    /// (the id map's G channel blends the two halves at every edge texel).
+    /// </summary>
     private HashSet<int> ClaimedRowsForMaterial(DTexture dTexture, string materialGamePath, DecalLayer? except)
     {
         var ret = new HashSet<int>();
@@ -676,7 +711,11 @@ public sealed class TexturesTab(
 
             foreach (var layer in layers.OfType<DecalLayer>())
                 if (layer.IdRemap && !ReferenceEquals(layer, except))
-                    ret.UnionWith(layer.PaletteRows);
+                    foreach (var row in layer.PaletteRows)
+                    {
+                        ret.Add(row);
+                        ret.Add(row ^ 1);
+                    }
         }
 
         return ret;
@@ -735,6 +774,19 @@ public sealed class TexturesTab(
             }
 
             ImUtf8.HoverTooltip("How the surface responds to light under the decal, written into the material's mask map.\nMatte suits cloth prints, Glossy suits stickers/vinyl. Experimental — mask channel meanings are still being verified."u8);
+        }
+
+        if (decal.HasMaterialEffects)
+        {
+            ImGui.SetNextItemWidth(220 * ImUtf8.GlobalScale);
+            var effectScale = decal.EffectScale;
+            if (ImUtf8.Slider("Effect Scale"u8, ref effectScale, "%.2f"u8, 0.25f, 3f))
+            {
+                decal.EffectScale = Math.Clamp(effectScale, 0.25f, 3f);
+                changed           = true;
+            }
+
+            ImUtf8.HoverTooltip("Size of the affected area relative to the decal — above 1 the smoothing/finish extends past the decal's edge, below 1 it stays inside it."u8);
         }
 
         return changed;
@@ -818,7 +870,7 @@ public sealed class TexturesTab(
             return;
 
         var others = ClaimedRowsForMaterial(dTexture, option.MaterialGamePath, removed);
-        foreach (var row in removed.PaletteRows.Where(r => !others.Contains(r)))
+        foreach (var row in removed.PaletteRows.SelectMany(r => new[] { r, r ^ 1 }).Distinct().Where(r => !others.Contains(r)))
             edit.Rows.Remove(row);
         if (edit.IsEmpty)
             dTexture.Data.Materials.Remove(option.MaterialGamePath);

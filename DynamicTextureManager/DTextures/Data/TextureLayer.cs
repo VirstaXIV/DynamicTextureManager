@@ -116,6 +116,9 @@ public sealed class DecalLayer : TextureLayer
     /// <summary> Surface-finish preset written into the material's mask map inside the decal footprint. </summary>
     public DecalMaskPreset MaskPreset = DecalMaskPreset.Keep;
 
+    /// <summary> Size of the material-effect footprint relative to the decal (1 = exactly the decal shape). </summary>
+    public float EffectScale = 1f;
+
     /// <summary> Whether this layer also edits the material's sibling textures (normal/mask). </summary>
     public bool HasMaterialEffects
         => NormalSmooth > 0f || MaskPreset != DecalMaskPreset.Keep;
@@ -170,6 +173,7 @@ public sealed class DecalLayer : TextureLayer
         json["AlphaThreshold"] = AlphaThreshold;
         json["NormalSmooth"]   = NormalSmooth;
         json["MaskPreset"]     = (int)MaskPreset;
+        json["EffectScale"]    = EffectScale;
         json["Surface"]        = Surface;
         json["AnchorX"]        = AnchorX;
         json["AnchorY"]        = AnchorY;
@@ -202,6 +206,7 @@ public sealed class DecalLayer : TextureLayer
             AlphaThreshold = json["AlphaThreshold"]?.ToObject<float>() ?? 0.5f,
             NormalSmooth   = json["NormalSmooth"]?.ToObject<float>() ?? 0f,
             MaskPreset     = (DecalMaskPreset)(json["MaskPreset"]?.ToObject<int>() ?? 0),
+            EffectScale    = json["EffectScale"]?.ToObject<float>() ?? 1f,
             Surface        = json["Surface"]?.ToObject<bool>() ?? false,
             AnchorX        = json["AnchorX"]?.ToObject<float>() ?? 0f,
             AnchorY        = json["AnchorY"]?.ToObject<float>() ?? 0f,
