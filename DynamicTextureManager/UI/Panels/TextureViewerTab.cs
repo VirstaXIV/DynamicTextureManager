@@ -43,7 +43,8 @@ public sealed class TextureViewerTab(
     private Vector2 _pan = Vector2.Zero;
 
     private IDalamudTextureWrap? _colorizedWrap;
-    private (string Path, bool Composited, int EntryVersion, long EditTicks) _colorizedKey = (string.Empty, false, -1, 0);
+    private (string Path, bool Composited, int EntryVersion) _colorizedKey = (string.Empty, false, -1);
+    private Vector3[]?           _colorizedRows;
 
     public void Dispose()
         => _colorizedWrap?.Dispose();
@@ -127,7 +128,7 @@ public sealed class TextureViewerTab(
 
             using var group = ImUtf8.Group();
             var entry = previewCache.Get(dTexture, option.GamePath);
-            var wrap  = _showComposited ? entry.CompositedWrap ?? entry.PristineWrap : entry.PristineWrap;
+            var wrap  = DisplayWrap(entry);
 
             var selected = string.Equals(option.GamePath, _selectedTexture, StringComparison.OrdinalIgnoreCase);
             using (ImRaii.PushColor(ImGuiCol.Button, ImGui.GetColorU32(ImGuiCol.ButtonActive), selected))
@@ -145,7 +146,7 @@ public sealed class TextureViewerTab(
             if (ImGui.IsItemHovered())
                 ImUtf8.HoverTooltip($"{TextureOptions.SlotLabel(option)}\n{option.GamePath}");
 
-            ImUtf8.Text(option.Slot is TextureSlot.Index ? "Colorset (ID)" : option.Slot.ToString());
+            ImUtf8.Text(TextureOptions.SlotLabel(option));
         }
     }
 
@@ -199,14 +200,14 @@ public sealed class TextureViewerTab(
         DrawCanvas(dTexture, option, wrap);
     }
 
+    private IDalamudTextureWrap? DisplayWrap(CompositePreviewCache.Entry entry)
+        => _showComposited ? entry.CompositedWrap ?? entry.PristineWrap : entry.PristineWrap;
+
     /// <summary> The wrap to display: pristine, composited, or the colorized id-map derivative. </summary>
     private IDalamudTextureWrap? SelectWrap(DTexture dTexture, TextureOption option, CompositePreviewCache.Entry entry)
-    {
-        if (option.Slot is TextureSlot.Index && _colorizeIdMap)
-            return GetColorizedWrap(dTexture, option, entry) ?? (_showComposited ? entry.CompositedWrap ?? entry.PristineWrap : entry.PristineWrap);
-
-        return _showComposited ? entry.CompositedWrap ?? entry.PristineWrap : entry.PristineWrap;
-    }
+        => option.Slot is TextureSlot.Index && _colorizeIdMap
+            ? GetColorizedWrap(dTexture, option, entry) ?? DisplayWrap(entry)
+            : DisplayWrap(entry);
 
     /// <summary>
     /// The id map rendered through the resolved colorset: each texel shows the diffuse color
@@ -219,23 +220,23 @@ public sealed class TextureViewerTab(
         if (source == null || entry.Pristine == null)
             return null;
 
-        var key = (option.GamePath, _showComposited, entry.Version, dTexture.LastEdit.Ticks);
-        if (_colorizedWrap != null && _colorizedKey == key)
-            return _colorizedWrap;
-
         var rows = MaterialEditApplier.ResolveRowDiffuse(option.Mtrl,
             dTexture.Data.Materials.GetValueOrDefault(option.MaterialGamePath));
         if (rows == null)
             return null;
+
+        // Rebuild only when the buffer or the resolved row colors actually changed —
+        // comparing 32 colors is nothing next to recolorizing millions of texels.
+        var key = (option.GamePath, _showComposited, entry.Version);
+        if (_colorizedWrap != null && _colorizedKey == key && _colorizedRows != null && rows.AsSpan().SequenceEqual(_colorizedRows))
+            return _colorizedWrap;
 
         var width  = entry.Pristine.Width;
         var height = entry.Pristine.Height;
         var rgba   = new byte[width * height * 4];
         for (var i = 0; i < width * height; ++i)
         {
-            var pair  = Math.Clamp((int)Math.Round(source[i * 4] / 17f), 0, 15);
-            var blend = source[i * 4 + 1] / 255f;
-            var color = Vector3.Lerp(rows[pair * 2 + 1], rows[pair * 2], blend);
+            var color = IdMapTexel.BlendedRowColor(rows, source[i * 4], source[i * 4 + 1]);
             rgba[i * 4]     = (byte)Math.Clamp((int)(color.X * 255f), 0, 255);
             rgba[i * 4 + 1] = (byte)Math.Clamp((int)(color.Y * 255f), 0, 255);
             rgba[i * 4 + 2] = (byte)Math.Clamp((int)(color.Z * 255f), 0, 255);
@@ -245,7 +246,8 @@ public sealed class TextureViewerTab(
         _colorizedWrap?.Dispose();
         _colorizedWrap = textureProvider.CreateFromRaw(RawImageSpecification.Rgba32(width, height), rgba,
             $"DTM Colorized {option.GamePath}");
-        _colorizedKey = key;
+        _colorizedKey  = key;
+        _colorizedRows = rows;
         return _colorizedWrap;
     }
 

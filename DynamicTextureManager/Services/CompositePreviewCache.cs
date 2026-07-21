@@ -59,7 +59,10 @@ public sealed class CompositePreviewCache : IService, IDisposable
     private readonly ITextureProvider      _textureProvider;
     private readonly DTextureChanged       _dTextureChanged;
 
-    private readonly Dictionary<(Guid, string), Entry> _entries = [];
+    /// <summary> Exclude compares by reference — a layer's identity, not its (mutable) values. </summary>
+    private readonly record struct Key(Guid Id, string Path, DTextures.Data.DecalLayer? Exclude);
+
+    private readonly Dictionary<Key, Entry> _entries = [];
 
     public CompositePreviewCache(TextureIO textureIO, TextureCompositor compositor, OverlayModManager overlayMods,
         ModelUvReader uvReader, SourceFileProvider sourceFiles, ShaderHandlerRegistry shaderHandlers,
@@ -94,12 +97,14 @@ public sealed class CompositePreviewCache : IService, IDisposable
 
     /// <summary>
     /// The cached entry for one texture of a dTexture, kicking off a debounced background
-    /// composite when stale. Must be called from the draw thread — wraps are (re)created here.
+    /// composite when stale. Must be called from the draw thread — wraps are (re)created
+    /// here. With <paramref name="excludeLayer"/> the composite leaves that layer out — the
+    /// placement base of a decal being dragged, so its baked copy cannot ghost.
     /// </summary>
-    public Entry Get(DTexture dTexture, string gamePath)
+    public Entry Get(DTexture dTexture, string gamePath, DTextures.Data.DecalLayer? excludeLayer = null)
     {
         var now = Environment.TickCount64;
-        var key = (dTexture.Identifier, gamePath.ToLowerInvariant());
+        var key = new Key(dTexture.Identifier, gamePath.ToLowerInvariant(), excludeLayer);
         if (!_entries.TryGetValue(key, out var entry))
         {
             EvictIfFull();
@@ -111,7 +116,7 @@ public sealed class CompositePreviewCache : IService, IDisposable
         entry.LastUsedMs = now;
 
         if (entry is { Building: false, StaleSinceMs: > 0 } && now - entry.StaleSinceMs >= DebounceMs)
-            StartBuild(dTexture, gamePath, entry);
+            StartBuild(dTexture, gamePath, entry, excludeLayer);
 
         if (entry.WrapVersion != entry.Version)
         {
@@ -136,20 +141,23 @@ public sealed class CompositePreviewCache : IService, IDisposable
     {
         var now = Environment.TickCount64;
         foreach (var (key, entry) in _entries)
-            if (key.Item1 == dTextureId)
+            if (key.Id == dTextureId)
                 entry.StaleSinceMs = now;
     }
 
-    /// <summary> Mark one cached texture of a dTexture stale. </summary>
+    /// <summary> Mark one cached texture of a dTexture stale (all variants, including exclude-layer bases). </summary>
     public void Invalidate(Guid dTextureId, string gamePath)
     {
-        if (_entries.TryGetValue((dTextureId, gamePath.ToLowerInvariant()), out var entry))
-            entry.StaleSinceMs = Environment.TickCount64;
+        var now  = Environment.TickCount64;
+        var path = gamePath.ToLowerInvariant();
+        foreach (var (key, entry) in _entries)
+            if (key.Id == dTextureId && key.Path == path)
+                entry.StaleSinceMs = now;
     }
 
     private void Drop(Guid dTextureId)
     {
-        foreach (var key in _entries.Keys.Where(k => k.Item1 == dTextureId).ToList())
+        foreach (var key in _entries.Keys.Where(k => k.Id == dTextureId).ToList())
         {
             _entries[key].DisposeWraps();
             _entries.Remove(key);
@@ -170,7 +178,7 @@ public sealed class CompositePreviewCache : IService, IDisposable
     /// Gather all inputs on the calling (framework) thread — source capture is Penumbra IPC,
     /// mesh reads are cached — then decode and composite in the background.
     /// </summary>
-    private void StartBuild(DTexture dTexture, string gamePath, Entry entry)
+    private void StartBuild(DTexture dTexture, string gamePath, Entry entry, DTextures.Data.DecalLayer? excludeLayer)
     {
         entry.Building     = true;
         entry.StaleSinceMs = 0;
@@ -183,17 +191,22 @@ public sealed class CompositePreviewCache : IService, IDisposable
         try
         {
             diskPath = _overlayMods.GetOrCaptureTextureSource(dTexture, gamePath);
-            if (diskPath is { Length: 0 })
-                diskPath = null; // vanilla
+            layers = dTexture.Data.Textures.GetValueOrDefault(gamePath)?
+                    .Where(l => !ReferenceEquals(l, excludeLayer)).ToList()
+             ?? [];
 
-            layers = dTexture.Data.Textures.GetValueOrDefault(gamePath)?.ToList() ?? [];
-
-            var target = CompositePlanner.SiblingEffectTargets(dTexture.Data, _shaderHandlers, _sourceFiles)
-                .FirstOrDefault(t => string.Equals(t.GamePath, gamePath, StringComparison.OrdinalIgnoreCase));
+            // Sibling-target discovery parses materials — skip it entirely unless some layer
+            // actually carries material effects.
+            var anyEffects = dTexture.Data.Textures.Values
+                .Any(ls => ls.Any(l => l is DTextures.Data.DecalLayer { Enabled: true, HasMaterialEffects: true }));
+            var target = anyEffects
+                ? CompositePlanner.SiblingEffectTargets(dTexture.Data, _shaderHandlers, _sourceFiles)
+                    .FirstOrDefault(t => string.Equals(t.GamePath, gamePath, StringComparison.OrdinalIgnoreCase))
+                : null;
             if (target != null)
             {
                 effectSlot   = target.Slot;
-                effectLayers = target.Layers.ToList();
+                effectLayers = target.Layers.Where(l => !ReferenceEquals(l, excludeLayer)).ToList();
             }
 
             var needsMesh = layers.Any(l => l is DTextures.Data.DecalLayer { Surface: true, Enabled: true })
@@ -222,13 +235,8 @@ public sealed class CompositePreviewCache : IService, IDisposable
                     return;
                 }
 
-                var rgba = _compositor.Composite(decoded, layers, mesh);
-                if (effectLayers.Count > 0)
-                    rgba = _compositor.CompositeSiblingEffects(new DecodedTexture(rgba, decoded.Width, decoded.Height),
-                        effectLayers, effectSlot, mesh);
-
                 entry.Pristine   = decoded;
-                entry.Composited = rgba;
+                entry.Composited = _compositor.CompositeFull(decoded, layers, effectLayers, effectSlot, mesh);
                 ++entry.Version;
             }
             catch (Exception ex)

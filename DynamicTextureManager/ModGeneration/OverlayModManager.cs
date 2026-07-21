@@ -478,7 +478,12 @@ public sealed class OverlayModManager : IService, IDisposable
         }
 
         var textures = new List<TextureJob>();
-        foreach (var (gamePath, layers) in dTexture.Data.Textures.Where(kvp => kvp.Value.Any(l => l.Enabled)))
+        // A texture needs a job when any layer stamps onto it — or when an extraction
+        // redirected its source to a cleaned copy: that base must ship even with every
+        // layer disabled, otherwise the source mod's file (baked decal included) resolves
+        // again and "disabled" would un-hide the extracted decal.
+        foreach (var (gamePath, layers) in dTexture.Data.Textures.Where(kvp
+                     => kvp.Value.Any(l => l.Enabled || l is DTextures.Data.DecalLayer { Extracted: true, PreExtractionSource: not null })))
         {
             // Always bake from the pristine source captured when the layer was added — a
             // build-time resolve would return our own generated file and compound the bake.
@@ -624,10 +629,7 @@ public sealed class OverlayModManager : IService, IDisposable
             if (decoded == null)
                 continue;
 
-            var rgba = compositor.Composite(decoded, job.Layers, job.Mesh);
-            if (job.EffectLayers.Count > 0)
-                rgba = compositor.CompositeSiblingEffects(new DecodedTexture(rgba, decoded.Width, decoded.Height),
-                    job.EffectLayers, job.EffectSlot, job.Mesh);
+            var rgba = compositor.CompositeFull(decoded, job.Layers, job.EffectLayers, job.EffectSlot, job.Mesh);
 
             var outFile = build.PrepareFile(job.GamePath);
             await penumbra.ConvertTextureData(rgba, decoded.Width, outFile, TextureType.Bc7Tex).ConfigureAwait(false);

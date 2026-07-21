@@ -60,9 +60,6 @@ public sealed class DecalViewport(ITextureProvider textureProvider) : IDisposabl
     public void Dispose()
         => _wrap?.Dispose();
 
-    public bool IsOpen
-        => _open;
-
     public bool IsOpenFor(DecalLayer layer)
         => _open && ReferenceEquals(_layer, layer);
 
@@ -469,11 +466,11 @@ public sealed class DecalViewport(ITextureProvider textureProvider) : IDisposabl
     }
 
     /// <summary> The material's base color at a UV coordinate: diffuse sample times colorset row color. </summary>
-    private Vector3 SampleAlbedo(Vector2 uv)
+    private static Vector3 SampleAlbedo(DecodedTexture? diffuse, DecodedTexture? idMap, Vector3[]? rows, Vector2 uv)
     {
         var albedo = Vector3.One;
         var shaded = false;
-        if (_shading?.Diffuse is { } diffuse)
+        if (diffuse != null)
         {
             var x = Math.Clamp((int)(uv.X * diffuse.Width), 0, diffuse.Width - 1);
             var y = Math.Clamp((int)(uv.Y * diffuse.Height), 0, diffuse.Height - 1);
@@ -482,20 +479,23 @@ public sealed class DecalViewport(ITextureProvider textureProvider) : IDisposabl
             shaded  = true;
         }
 
-        if (_shading is { IdMap: { } idMap, RowDiffuse: { } rows })
+        if (idMap != null && rows != null)
         {
             // Nearest texel: bilinear on the pair byte would blend unrelated pairs.
             var x = Math.Clamp((int)(uv.X * idMap.Width), 0, idMap.Width - 1);
             var y = Math.Clamp((int)(uv.Y * idMap.Height), 0, idMap.Height - 1);
             var i = (y * idMap.Width + x) * 4;
-            var pair  = Math.Clamp((int)Math.Round(idMap.Rgba[i] / 17f), 0, 15);
-            var blend = idMap.Rgba[i + 1] / 255f;
-            albedo *= Vector3.Lerp(rows[pair * 2 + 1], rows[pair * 2], blend);
+            albedo *= IdMapTexel.BlendedRowColor(rows, idMap.Rgba[i], idMap.Rgba[i + 1]);
             shaded  = true;
         }
 
         return shaded ? albedo : new Vector3(190f / 255f);
     }
+
+    // Fixed-size render targets, reused across frames — a drag re-renders every frame and
+    // fresh 2.3 MB + 2.3 MB arrays per frame would churn the large-object heap.
+    private readonly byte[]  _renderRgba  = new byte[RenderSize * RenderSize * 4];
+    private readonly float[] _renderDepth = new float[RenderSize * RenderSize];
 
     /// <summary> Software-render the mesh with the material's shading and the bound decal projected live. </summary>
     private void Render()
@@ -504,8 +504,8 @@ public sealed class DecalViewport(ITextureProvider textureProvider) : IDisposabl
             return;
 
         const int size = RenderSize;
-        var rgba  = new byte[size * size * 4];
-        var depth = new float[size * size];
+        var rgba  = _renderRgba;
+        var depth = _renderDepth;
         Array.Fill(depth, float.MaxValue);
         for (var i = 0; i < size * size; ++i)
         {
@@ -514,6 +514,11 @@ public sealed class DecalViewport(ITextureProvider textureProvider) : IDisposabl
             rgba[i * 4 + 2] = 34;
             rgba[i * 4 + 3] = 255;
         }
+
+        // Hoisted out of the per-pixel path — invariant for the whole render.
+        var shadingDiffuse = _shading?.Diffuse;
+        var shadingIdMap   = _shading?.IdMap;
+        var shadingRows    = _shading?.RowDiffuse;
 
         var viewProjection = ViewProjection();
         _lastViewProjection = viewProjection;
@@ -529,7 +534,7 @@ public sealed class DecalViewport(ITextureProvider textureProvider) : IDisposabl
         if (normalDir.LengthSquared() > 1e-6f)
             normalDir = Vector3.Normalize(normalDir);
         var maxDepth  = layer == null ? 0f : MathF.Max(layer.WorldWidth, layer.WorldHeight) * 0.4f;
-        var threshold = (byte)Math.Clamp((int)Math.Round((layer?.AlphaThreshold ?? 0.5f) * 255f), 1, 255);
+        var threshold = layer?.AlphaThresholdByte ?? (byte)128;
         var rows      = _shading?.RowDiffuse;
         var realColor = !_highlightDecal && layer != null
          && (!layer.IdRemap || (rows != null && layer.PaletteRows.Count > 0 && layer.PaletteRows.Count == layer.PaletteColors.Count));
@@ -603,7 +608,7 @@ public sealed class DecalViewport(ITextureProvider textureProvider) : IDisposabl
                         : 0.6f;
 
                     var uv    = _mesh.Uvs[i0] * w0 + _mesh.Uvs[i1] * w1 + _mesh.Uvs[i2] * w2;
-                    var color = SampleAlbedo(uv) * 255f;
+                    var color = SampleAlbedo(shadingDiffuse, shadingIdMap, shadingRows, uv) * 255f;
                     if (dimmed)
                         color *= 0.4f;
 
