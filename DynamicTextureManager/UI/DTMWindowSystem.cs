@@ -10,11 +10,12 @@ public class DTMWindowSystem: IDisposable
     private readonly IUiBuilder _uiBuilder;
     private readonly MainWindow _mainWindow;
     private readonly ConfigWindow _configWindow;
-    
+
     public DTMWindowSystem(
         IUiBuilder uiBuilder,
         MainWindow mainWindow,
-        ConfigWindow configWindow)
+        ConfigWindow configWindow,
+        DecalLibraryWindow decalLibraryWindow)
     {
         _uiBuilder = uiBuilder;
         _mainWindow = mainWindow;
@@ -22,6 +23,7 @@ public class DTMWindowSystem: IDisposable
 
         _windowSystem.AddWindow(mainWindow);
         _windowSystem.AddWindow(configWindow);
+        _windowSystem.AddWindow(decalLibraryWindow);
         
         _uiBuilder.OpenMainUi += _mainWindow.Toggle;
         _uiBuilder.Draw += _windowSystem.Draw;

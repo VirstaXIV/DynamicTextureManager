@@ -27,7 +27,8 @@ public class MainWindow : Window, IDisposable
     private readonly RowHighlighter _highlighter;
 
     public MainWindow(DTMFileSystemSelector selector, DTMPanel panel, Configuration configuration,
-        MainWindowPosition position, ConfigWindow configWindow, EditPreviewer previewer, RowHighlighter highlighter)
+        MainWindowPosition position, ConfigWindow configWindow, DecalLibraryWindow decalLibraryWindow,
+        EditPreviewer previewer, RowHighlighter highlighter)
         : base("Dynamic Texture Manager")
     {
         _previewer   = previewer;
@@ -54,6 +55,18 @@ public class MainWindow : Window, IDisposable
                 {
                     ImGui.BeginTooltip();
                     ImGui.Text("Show Config");
+                    ImGui.EndTooltip();
+                }
+            },
+            new TitleBarButton()
+            {
+                Icon = FontAwesomeIcon.Images,
+                Click = (msg) => { decalLibraryWindow.Toggle(); },
+                IconOffset = new(2, 1),
+                ShowTooltip = () =>
+                {
+                    ImGui.BeginTooltip();
+                    ImGui.Text("Decal Library");
                     ImGui.EndTooltip();
                 }
             }

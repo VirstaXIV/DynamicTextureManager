@@ -69,7 +69,7 @@ public static class CompositePlanner
 
                 // Only layers whose effect actually touches this slot.
                 var slotLayers = effectLayers
-                    .Where(d => info.Slot == TextureSlot.Normal ? d.NormalSmooth > 0f : d.MaskPreset != DecalMaskPreset.Keep)
+                    .Where(d => info.Slot == TextureSlot.Normal ? d.NormalSmooth > 0f : d.WantsMaskEffect)
                     .Cast<TextureLayer>()
                     .ToList();
                 if (slotLayers.Count == 0)

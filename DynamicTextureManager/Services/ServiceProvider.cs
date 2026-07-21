@@ -90,6 +90,8 @@ public static class ServiceProvider
                     .AddSingleton<MainWindowPosition>()
                     .AddSingleton<ConfigWindow>()
                     .AddSingleton<ConfigWindowPosition>()
+                    .AddSingleton<DecalLibraryPanel>()
+                    .AddSingleton<DecalLibraryWindow>()
                     .AddSingleton<DTMWindowSystem>()
                     .AddSingleton<DTMFileSystemSelector>()
                     .AddSingleton<UI.Panels.SourceTab>()

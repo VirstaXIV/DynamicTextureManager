@@ -28,6 +28,16 @@ public class Configuration: IPluginConfiguration, ISavable
     public float DTMSelectorMinimumScale { get; set; } = 0.1f;
     public float DTMSelectorMaximumScale { get; set; } = 0.5f;
     public DoubleModifier DeleteDTextureModifier { get; set; } = new(ModifierHotkey.Control, ModifierHotkey.Shift);
+
+    /// <summary> Folder decal images are stored in; empty uses the default inside the plugin config directory. </summary>
+    public string DecalStorageFolder { get; set; } = string.Empty;
+
+    /// <summary> Debug tunables for the empirical mask-map finish semantics, see ModGeneration.FinishMapping. </summary>
+    public int MaskRoughnessChannel { get; set; } = 1;
+
+    public bool MaskInvertRoughness { get; set; } = false;
+
+    public bool MaskWriteSpec { get; set; } = false;
     
     [JsonConverter(typeof(SortModeConverter))]
     [JsonProperty(Order = int.MaxValue)]
