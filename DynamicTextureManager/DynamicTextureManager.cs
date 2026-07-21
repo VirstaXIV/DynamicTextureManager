@@ -31,6 +31,7 @@ public sealed class DynamicTextureManager : IDalamudPlugin
             Messager  = _services.GetService<MessageService>();
 
             _services.EnsureRequiredServices();
+            Colors.SetColors(_services.GetService<Configuration>());
             _services.GetService<DTMWindowSystem>();
             _services.GetService<CommandService>();
             Log.Information($"Dynamic Texture Manager v{Version} loaded successfully.");

@@ -5,6 +5,7 @@ namespace DynamicTextureManager.UI;
 public enum ColorId
 {
     HeaderButtons,
+    DisabledMod,
 }
 
 public static class Colors
@@ -16,6 +17,7 @@ public static class Colors
         {
             // @formatter:off
             ColorId.HeaderButtons              => (0xFFFFF0C0, "Header Buttons", "The text and border color of buttons in the header."),
+            ColorId.DisabledMod                => (0xFF808080, "Disabled Mod", "The text color of dTextures whose generated mod is currently disabled in Penumbra."),
             _                                  => (0x00000000, string.Empty, string.Empty),
             // @formatter:on
         };

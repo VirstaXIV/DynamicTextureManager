@@ -25,7 +25,7 @@ public sealed class DTexture : DTextureBase, ISavable
         Description            = other.Description;
     }
     
-    public new const int FileVersion = 1;
+    public new const int FileVersion = 2;
 
     public Guid                         Identifier             { get; internal init; }
     public DateTimeOffset               CreationDate           { get; internal init; }
@@ -50,7 +50,9 @@ public sealed class DTexture : DTextureBase, ISavable
             ["CreationDate"]           = CreationDate,
             ["LastEdit"]               = LastEdit,
             ["Name"]                   = Name.Text,
-            ["Description"]            = Description
+            ["Description"]            = Description,
+            ["WriteProtected"]         = WriteProtected(),
+            ["Data"]                   = Data.Serialize()
         };
         return ret;
     }
@@ -76,6 +78,8 @@ public sealed class DTexture : DTextureBase, ISavable
             dTexture.LastEdit = creationDate;
         
         dTexture.SetWriteProtected(json["WriteProtected"]?.ToObject<bool>() ?? false);
+        // Version 1 files carry no payload and load with empty data.
+        dTexture.SetDTextureData(DTextureData.Load(json["Data"] as JObject));
         return dTexture;
     }
     

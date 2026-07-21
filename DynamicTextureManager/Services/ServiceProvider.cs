@@ -2,6 +2,9 @@ using Dalamud.Plugin;
 using Dalamud.Plugin.Services;
 using DynamicTextureManager.DTextures;
 using DynamicTextureManager.Events;
+using DynamicTextureManager.Interop;
+using DynamicTextureManager.ModGeneration;
+using DynamicTextureManager.ModGeneration.Shaders;
 using DynamicTextureManager.UI;
 using OtterGui.Classes;
 using OtterGui.Log;
@@ -21,6 +24,7 @@ public static class ServiceProvider
                        .AddExistingService(log)
                        .AddDalamudServices(pluginInterface)
                        .AddMeta()
+                       .AddInterop()
                        .AddEvents()
                        .AddDTextures()
                        .AddUi()
@@ -44,6 +48,7 @@ public static class ServiceProvider
                    .AddDalamudService<ITargetManager>(pluginInterface)
                    .AddDalamudService<IObjectTable>(pluginInterface)
                    .AddDalamudService<ITextureProvider>(pluginInterface)
+                   .AddDalamudService<IDataManager>(pluginInterface)
                    .AddDalamudService<IGameInteropProvider>(pluginInterface)
                    .AddDalamudService<IPluginLog>(pluginInterface);
     
@@ -54,6 +59,21 @@ public static class ServiceProvider
                     .AddSingleton<SaveService>()
                     .AddSingleton<Configuration>()
                     .AddSingleton<CommandService>();
+
+    private static ServiceManager AddInterop(this ServiceManager services)
+        => services.AddSingleton<PenumbraService>()
+                   .AddSingleton<CharacterModelState>()
+                   .AddSingleton<TargetResolver>()
+                   .AddSingleton<ShaderHandlerRegistry>()
+                   .AddSingleton<SourceFileProvider>()
+                   .AddSingleton<ModWriter>()
+                   .AddSingleton<OverlayModManager>()
+                   .AddSingleton<RowHighlighter>()
+                   .AddSingleton<EditPreviewer>()
+                   .AddSingleton<TextureIO>()
+                   .AddSingleton<TextureCompositor>()
+                   .AddSingleton<ModelUvReader>()
+                   .AddSingleton<DecalLibrary>();
 
     private static ServiceManager AddEvents(this ServiceManager services)
         => services.AddSingleton<DTextureChanged>();
@@ -71,5 +91,7 @@ public static class ServiceProvider
                     .AddSingleton<ConfigWindowPosition>()
                     .AddSingleton<DTMWindowSystem>()
                     .AddSingleton<DTMFileSystemSelector>()
+                    .AddSingleton<UI.Panels.SourceTab>()
+                    .AddSingleton<UI.Panels.TexturesTab>()
                     .AddSingleton<DTMPanel>();
 }

@@ -1,3 +1,15 @@
 [submodule "OtterGui"]
 	path = OtterGui
 	url = https://github.com/Ottermandias/OtterGui
+[submodule "Penumbra.String"]
+	path = Penumbra.String
+	url = https://github.com/Ottermandias/Penumbra.String
+[submodule "Penumbra.Api"]
+	path = Penumbra.Api
+	url = https://github.com/Ottermandias/Penumbra.Api
+[submodule "Penumbra.GameData"]
+	path = Penumbra.GameData
+	url = https://github.com/Ottermandias/Penumbra.GameData
+[submodule "Luna"]
+	path = Luna
+	url = https://github.com/Ottermandias/Luna

@@ -111,6 +111,47 @@ public sealed class DTextureManager : DTextureEditor
         return failed;
     }
     
+    /// <summary> Create a new empty dTexture of the given name, saved and added to storage. </summary>
+    public DTexture CreateEmpty(string name, string? path = null)
+    {
+        var dTexture = new DTexture
+        {
+            Identifier   = Guid.NewGuid(),
+            CreationDate = DateTimeOffset.UtcNow,
+            Name         = name,
+            Index        = DTextures.Count,
+        };
+        dTexture.LastEdit = dTexture.CreationDate;
+
+        DTextures.Add(dTexture);
+        SaveService.ImmediateSave(dTexture);
+        DynamicTextureManager.Log.Debug($"Added new dTexture {dTexture.Identifier}.");
+        DTextureChanged.Invoke(DTextureChanged.Type.Created, dTexture, new CreationTransaction(name, path));
+        return dTexture;
+    }
+
+    /// <summary> Create a copy of an existing dTexture under a new name. </summary>
+    public DTexture CreateClone(DTexture other, string name, string? path = null)
+    {
+        var dTexture = new DTexture(other)
+        {
+            Identifier   = Guid.NewGuid(),
+            CreationDate = DateTimeOffset.UtcNow,
+            Name         = name,
+            Index        = DTextures.Count,
+        };
+        dTexture.LastEdit = dTexture.CreationDate;
+        // The clone gets its own generated mod, so do not inherit build state.
+        dTexture.Data.OutputModDirectory = string.Empty;
+        dTexture.Data.LastBuiltHash      = string.Empty;
+
+        DTextures.Add(dTexture);
+        SaveService.ImmediateSave(dTexture);
+        DynamicTextureManager.Log.Debug($"Added new dTexture {dTexture.Identifier} by cloning {other.Identifier}.");
+        DTextureChanged.Invoke(DTextureChanged.Type.Created, dTexture, new CreationTransaction(name, path));
+        return dTexture;
+    }
+
     public void Delete(DTexture dTexture)
     {
         foreach (var d in DTextures.Skip(dTexture.Index + 1))

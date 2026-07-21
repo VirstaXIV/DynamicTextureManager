@@ -7,18 +7,22 @@ public class DTextureBase
     public const int FileVersion = 1;
     
     private DTextureData _dTextureData = new();
-    
+
+    /// <summary> The payload of this dTexture. </summary>
+    public DTextureData Data
+        => _dTextureData;
+
     internal DTextureBase()
     {
         //
     }
-    
+
     internal DTextureBase(DTextureBase clone)
     {
-        _dTextureData  = clone._dTextureData;
+        _dTextureData = clone._dTextureData.Clone();
     }
-    
-    internal void SetDTextureData(in DTextureData other)
+
+    internal void SetDTextureData(DTextureData other)
     {
         _dTextureData = other;
     }
