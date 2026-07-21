@@ -4,11 +4,11 @@ using System.Linq;
 namespace DynamicTextureManager.ModGeneration;
 
 /// <summary>
-/// Assigns free colorset rows to a multi-color decal. The ID map's G channel BLENDS a pair's
-/// A row toward its B row and the game samples it with interpolation, so edge texels always
-/// mix the two halves of a pair — a pair must therefore never hold colors of two different
-/// decals, or edges fringe with a foreign color. Each decal claims whole pairs: two of its
-/// own (luminance-adjacent, hence similar) colors per pair, so edge blending stays subtle.
+/// Assigns free colorset slots to a multi-color decal. The ID map's G channel BLENDS a
+/// pair's A row toward its B row and the game samples it with interpolation, so edge texels
+/// always mix the two halves of a pair — a pair can only ever hold ONE color: its A row
+/// carries it and its B row a darkened shade, making the blend a benign darkening. Each
+/// color therefore claims one whole free pair.
 /// </summary>
 public static class ColorRowAllocator
 {
@@ -22,10 +22,10 @@ public static class ColorRowAllocator
     }
 
     /// <summary>
-    /// Pick whole free pairs for <paramref name="colorCount"/> colors (two per pair, A first).
-    /// Pairs the gear renders are blocked entirely — their texels carry intermediate G blends
-    /// between both halves, so claiming either half would recolor the garment. Pairs any half
-    /// of which another decal claims are blocked too.
+    /// Pick one whole free pair per color, returning the A rows. Pairs the gear renders are
+    /// blocked entirely — their texels carry intermediate G blends between both halves, so
+    /// claiming either half would recolor the garment. Pairs any half of which another decal
+    /// claims are blocked too.
     /// </summary>
     public static AllocationResult Allocate(int colorCount, IReadOnlySet<int> gearUsedPairs, IReadOnlySet<int> claimedRows)
     {
@@ -39,15 +39,10 @@ public static class ColorRowAllocator
             freePairs.Add(pair);
         }
 
-        var needed = (colorCount + 1) / 2;
-        if (freePairs.Count < needed)
+        if (freePairs.Count < colorCount)
             return new AllocationResult([],
-                $"Decal needs {colorCount} color(s) ({needed} free colorset pair(s)) but only {freePairs.Count} pair(s) are fully free on this material — lower Max Colors or remove other decals.");
+                $"Decal needs {colorCount} free colorset slot(s) but only {freePairs.Count} are fully free on this material — lower Max Colors or remove other decals.");
 
-        var rows = freePairs.Take(needed)
-            .SelectMany(pair => new[] { (pair - 1) * 2, (pair - 1) * 2 + 1 })
-            .Take(colorCount)
-            .ToList();
-        return new AllocationResult(rows, null);
+        return new AllocationResult(freePairs.Take(colorCount).Select(pair => (pair - 1) * 2).ToList(), null);
     }
 }

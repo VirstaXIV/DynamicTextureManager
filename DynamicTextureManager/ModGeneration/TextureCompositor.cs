@@ -174,10 +174,10 @@ public sealed class TextureCompositor(DecalLibrary decals) : IService
 
     /// <summary>
     /// Colorset decal: each opaque decal pixel is nearest-mapped to the layer's extracted
-    /// palette and its ID texel remapped to the claimed row rendering that color — R selects
-    /// the row pair, G selects the half (255 = A, 0 = B). Writing G flattens the garment's
-    /// baked shading inside the decal, which is the price of using both halves as
-    /// independent colors.
+    /// palette and its ID texel remapped to the claimed slot rendering that color by writing
+    /// ONLY the R channel (pair index). G carries the garment's baked shading — it blends
+    /// the slot's A row (the color) toward its B row (the darkened shade partner), so the
+    /// cloth shading stays visible on the decal and edge interpolation only darkens.
     /// </summary>
     private static void ApplyIdRemap(Image<Rgba32> target, Image<Rgba32> decal, DecalLayer layer, int offsetX, int offsetY)
     {
@@ -208,7 +208,6 @@ public sealed class TextureCompositor(DecalLibrary decals) : IService
                 var row        = layer.PaletteRows[DecalQuantizer.NearestIndex(source, layer.PaletteColors)];
                 var pixel      = target[tx, ty];
                 pixel.R        = (byte)(row / 2 * 17);
-                pixel.G        = row % 2 == 0 ? (byte)255 : (byte)0;
                 target[tx, ty] = pixel;
             }
         }

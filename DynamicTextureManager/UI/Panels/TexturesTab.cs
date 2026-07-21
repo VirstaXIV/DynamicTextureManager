@@ -432,13 +432,15 @@ public sealed class TexturesTab(
         var changed = false;
 
         // Old saves and layers whose allocation was cleared claim their rows on first draw.
-        // A pair shared with another decal (possible in saves from the row-granular scheme)
-        // fringes at decal edges — heal it by reallocating onto fully owned pairs.
+        // Saves from older schemes (a slot shared with another decal, or a slot's B half used
+        // as its own color) fringe at decal edges — heal them by reallocating onto whole,
+        // exclusively owned slots.
         if (decal is { Enabled: true, RowError: null })
         {
             var conflict = decal.PaletteRows.Count > 0
-             && ClaimedRowsForMaterial(dTexture, option.MaterialGamePath, decal) is var otherRows
-             && decal.PaletteRows.Any(otherRows.Contains);
+             && (decal.PaletteRows.Any(r => r % 2 == 1)
+                 || (ClaimedRowsForMaterial(dTexture, option.MaterialGamePath, decal) is var otherRows
+                     && decal.PaletteRows.Any(otherRows.Contains)));
             if (decal.PaletteRows.Count == 0 || conflict)
                 changed |= ReallocateDecal(dTexture, option, table, decal);
         }
@@ -450,7 +452,7 @@ public sealed class TexturesTab(
         if (ImGui.IsItemDeactivatedAfterEdit())
             changed |= ReallocateDecal(dTexture, option, table, decal);
         ImUtf8.HoverTooltip(
-            "The decal is reduced to at most this many colors — similar colors merge.\nColors claim whole free colorset slots, two colors per slot (its A and B rows), so 6 colors need 3 fully free slots.\nSlots are never shared between decals — the game blends a slot's A and B rows at every decal edge, so foreign colors would fringe."u8);
+            "The decal is reduced to at most this many colors — similar colors merge.\nEach color claims one whole free colorset slot: its A row carries the color, its B row a darker shade the game blends toward where the gear baked its cloth shading.\nSo 6 colors need 6 fully free slots, and slots are never shared."u8);
 
         ImGui.SameLine();
         if (ImUtf8.SmallButton("Re-extract Colors"u8))
@@ -492,10 +494,13 @@ public sealed class TexturesTab(
             ImGui.SameLine();
             var color = new Vector3(rowEdit.Diffuse[0], rowEdit.Diffuse[1], rowEdit.Diffuse[2]);
             ImGui.SetNextItemWidth(250 * ImUtf8.GlobalScale);
-            if (ImUtf8.ColorEdit($"Row {RowName(row)}", ref color, ImGuiColorEditFlags.Float))
+            if (ImUtf8.ColorEdit($"Slot {row / 2 + 1}", ref color, ImGuiColorEditFlags.Float))
             {
                 rowEdit.Diffuse = [color.X, color.Y, color.Z];
-                changed         = true;
+                // Keep the slot's B row a darkened copy so the baked shading blend darkens.
+                GetOrSeedRow(edit, table, row + 1).Diffuse =
+                    [color.X * ShadeFactor, color.Y * ShadeFactor, color.Z * ShadeFactor];
+                changed = true;
             }
 
             if (ImGui.IsItemHovered())
@@ -665,21 +670,15 @@ public sealed class TexturesTab(
                 decal.PaletteRows = result.Rows;
                 for (var i = 0; i < result.Rows.Count; ++i)
                 {
+                    // The slot's A row carries the color; its B row gets a darkened copy —
+                    // the id map's G channel blends A toward B exactly where the garment
+                    // baked its cloth shading, so the shading stays visible on the decal.
                     var color = new Rgba32(palette[i]);
                     edit.Rows.Remove(result.Rows[i]);
+                    edit.Rows.Remove(result.Rows[i] + 1);
                     GetOrSeedRow(edit, table, result.Rows[i]).Diffuse = [color.R / 255f, color.G / 255f, color.B / 255f];
-                }
-
-                // An odd color count leaves the last pair's B half unused — seed it as a
-                // darkened shade of its A partner so edge texels blending toward it (the id
-                // map's G channel always mixes a pair's halves) darken instead of fringing.
-                if (result.Rows.Count % 2 == 1)
-                {
-                    var last = new Rgba32(palette[^1]);
-                    var shadeRow = result.Rows[^1] ^ 1;
-                    edit.Rows.Remove(shadeRow);
-                    GetOrSeedRow(edit, table, shadeRow).Diffuse =
-                        [last.R / 255f * ShadeFactor, last.G / 255f * ShadeFactor, last.B / 255f * ShadeFactor];
+                    GetOrSeedRow(edit, table, result.Rows[i] + 1).Diffuse =
+                        [color.R / 255f * ShadeFactor, color.G / 255f * ShadeFactor, color.B / 255f * ShadeFactor];
                 }
             }
             else

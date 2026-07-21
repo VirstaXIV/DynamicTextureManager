@@ -160,11 +160,11 @@ public static class SurfaceDecalBaker
                         continue;
                     }
 
-                    // R selects the claimed row's pair, G the half (255 = A, 0 = B).
+                    // Write only the claimed slot's pair index; G keeps the garment's baked
+                    // shading blend between the slot's color (A) and its shade partner (B).
                     var row   = layer.PaletteRows[DecalQuantizer.NearestIndex(sample, layer.PaletteColors)];
                     var pixel = target[x, y];
                     pixel.R      = (byte)(row / 2 * 17);
-                    pixel.G      = row % 2 == 0 ? (byte)255 : (byte)0;
                     target[x, y] = pixel;
                 }
                 else
