@@ -488,7 +488,7 @@ public sealed class OverlayModManager : IService, IDisposable
             MaterialMesh? mesh = null;
             if (layers.Any(l => l is DTextures.Data.DecalLayer { Surface: true, Enabled: true }))
             {
-                var owner = FindTextureOwner(dTexture, gamePath);
+                var owner = CompositePlanner.FindTextureOwner(dTexture.Data, gamePath, shaderHandlers, sourceFiles);
                 mesh = owner != null ? uvReader.GetMesh(owner) : null;
                 if (mesh == null)
                     DynamicTextureManager.Log.Warning(
@@ -507,87 +507,45 @@ public sealed class OverlayModManager : IService, IDisposable
     /// All textures of a material are related: decals with material effects (normal
     /// smoothing, mask finish) replay their footprint onto the material's normal/mask
     /// textures, which usually have no layers of their own — synthesize jobs for them.
+    /// The discovery itself is shared with the preview cache via <see cref="CompositePlanner"/>.
     /// </summary>
     private void AddSiblingEffectJobs(DTexture dTexture, List<TextureJob> textures)
     {
         var meshCache = new Dictionary<string, MaterialMesh?>(StringComparer.OrdinalIgnoreCase);
-        foreach (var (gamePath, layers) in dTexture.Data.Textures)
+        foreach (var target in CompositePlanner.SiblingEffectTargets(dTexture.Data, shaderHandlers, sourceFiles))
         {
-            var effectLayers = layers.OfType<DTextures.Data.DecalLayer>()
-                .Where(l => l.Enabled && l.HasMaterialEffects)
-                .Cast<DTextures.Data.TextureLayer>()
-                .ToList();
-            if (effectLayers.Count == 0)
-                continue;
-
-            var owner = FindTextureOwner(dTexture, gamePath);
-            var mtrl  = owner != null ? sourceFiles.GetMaterial(owner, null) : null;
-            if (owner == null || mtrl == null)
-                continue;
-
             MaterialMesh? mesh = null;
-            if (effectLayers.Any(l => l is DTextures.Data.DecalLayer { Surface: true }))
+            if (target.NeedsMesh)
             {
-                if (!meshCache.TryGetValue(owner.GamePath, out mesh))
-                    meshCache[owner.GamePath] = mesh = uvReader.GetMesh(owner);
+                if (!meshCache.TryGetValue(target.Owner.GamePath, out mesh))
+                    meshCache[target.Owner.GamePath] = mesh = uvReader.GetMesh(target.Owner);
                 if (mesh == null)
                     DynamicTextureManager.Log.Warning(
-                        $"No mesh geometry for {owner.GamePath} — surface decal material effects will be skipped this build.");
+                        $"No mesh geometry for {target.Owner.GamePath} — surface decal material effects will be skipped this build.");
             }
 
-            foreach (var info in shaderHandlers.For(mtrl).ClassifyTextures(mtrl))
+            var existing = textures.FindIndex(j => string.Equals(j.GamePath, target.GamePath, StringComparison.OrdinalIgnoreCase));
+            if (existing >= 0)
             {
-                if (info.Slot is not (Shaders.TextureSlot.Normal or Shaders.TextureSlot.Mask)
-                 || string.Equals(info.GamePath, gamePath, StringComparison.OrdinalIgnoreCase))
-                    continue;
-
-                // Only layers whose effect actually touches this slot.
-                var slotLayers = effectLayers.Where(l => l is DTextures.Data.DecalLayer d
-                     && (info.Slot == Shaders.TextureSlot.Normal ? d.NormalSmooth > 0f : d.MaskPreset != DTextures.Data.DecalMaskPreset.Keep))
-                    .ToList();
-                if (slotLayers.Count == 0)
-                    continue;
-
-                var existing = textures.FindIndex(j => string.Equals(j.GamePath, info.GamePath, StringComparison.OrdinalIgnoreCase));
-                if (existing >= 0)
+                var job = textures[existing];
+                textures[existing] = job with
                 {
-                    var job = textures[existing];
-                    textures[existing] = job with
-                    {
-                        EffectSlot = info.Slot,
-                        EffectLayers = [.. job.EffectLayers, .. slotLayers],
-                        Mesh = job.Mesh ?? mesh,
-                    };
-                    continue;
-                }
-
-                // Capture the sibling's pristine source BEFORE our own mod first claims its
-                // resolution — later resolves would return our generated file and compound.
-                var diskPath = GetOrCaptureTextureSource(dTexture, info.GamePath);
-                textures.Add(new TextureJob(info.GamePath, diskPath is { Length: > 0 } ? diskPath : null, [], mesh)
-                {
-                    EffectSlot   = info.Slot,
-                    EffectLayers = slotLayers,
-                });
-            }
-        }
-    }
-
-    /// <summary> The source material whose shader exposes a given texture game path. </summary>
-    private DTextures.Data.SourcePath? FindTextureOwner(DTexture dTexture, string textureGamePath)
-    {
-        foreach (var source in dTexture.Data.Source.Materials)
-        {
-            var mtrl = sourceFiles.GetMaterial(source, null);
-            if (mtrl == null)
+                    EffectSlot = target.Slot,
+                    EffectLayers = [.. job.EffectLayers, .. target.Layers],
+                    Mesh = job.Mesh ?? mesh,
+                };
                 continue;
+            }
 
-            if (shaderHandlers.For(mtrl).ClassifyTextures(mtrl)
-                .Any(info => string.Equals(info.GamePath, textureGamePath, StringComparison.OrdinalIgnoreCase)))
-                return source;
+            // Capture the sibling's pristine source BEFORE our own mod first claims its
+            // resolution — later resolves would return our generated file and compound.
+            var diskPath = GetOrCaptureTextureSource(dTexture, target.GamePath);
+            textures.Add(new TextureJob(target.GamePath, diskPath is { Length: > 0 } ? diskPath : null, [], mesh)
+            {
+                EffectSlot   = target.Slot,
+                EffectLayers = target.Layers,
+            });
         }
-
-        return null;
     }
 
     /// <summary>

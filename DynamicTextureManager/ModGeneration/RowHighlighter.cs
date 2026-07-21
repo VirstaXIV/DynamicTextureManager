@@ -40,13 +40,32 @@ public sealed class RowHighlighter : IService, IDisposable
     /// <summary> Highlight one colorset row of a source material on the model. </summary>
     public void Highlight(string gamePath, MtrlFile sourceMaterial, int rowIndex)
     {
-        var key = Key(gamePath, rowIndex);
+        if (rowIndex < 0 || rowIndex >= ColorTable.NumRows)
+            return;
+
+        ApplyHighlight(Key(gamePath, rowIndex), gamePath, sourceMaterial, [rowIndex]);
+    }
+
+    /// <summary>
+    /// Highlight BOTH rows of a colorset pair — texels blend the A and B halves by their G
+    /// value, so a region authored fully on the B half is invisible to a single-row highlight.
+    /// </summary>
+    public void HighlightPair(string gamePath, MtrlFile sourceMaterial, int pair)
+    {
+        if (pair < 0 || pair >= ColorTable.NumRows / 2)
+            return;
+
+        ApplyHighlight($"{gamePath}#pair{pair}", gamePath, sourceMaterial, [pair * 2, pair * 2 + 1]);
+    }
+
+    private void ApplyHighlight(string key, string gamePath, MtrlFile sourceMaterial, int[] rowIndices)
+    {
         if (_activeKey == key || !_penumbra.Available)
             return;
 
         try
         {
-            if (sourceMaterial.Table is not ColorTable sourceTable || rowIndex < 0 || rowIndex >= ColorTable.NumRows)
+            if (sourceMaterial.Table is not ColorTable sourceTable)
                 return;
 
             var mtrl = sourceMaterial.Clone();
@@ -54,9 +73,12 @@ public sealed class RowHighlighter : IService, IDisposable
             var table = new ColorTable(sourceTable);
             mtrl.Table = table;
 
-            ref var row = ref table[rowIndex];
-            row.DiffuseColor  = HighlightColor;
-            row.EmissiveColor = HighlightColor;
+            foreach (var rowIndex in rowIndices)
+            {
+                ref var row = ref table[rowIndex];
+                row.DiffuseColor  = HighlightColor;
+                row.EmissiveColor = HighlightColor;
+            }
 
             Directory.CreateDirectory(_highlightDirectory);
             var file = Path.Combine(_highlightDirectory, "highlight.mtrl");
@@ -68,7 +90,7 @@ public sealed class RowHighlighter : IService, IDisposable
         }
         catch (Exception ex)
         {
-            DynamicTextureManager.Log.Warning($"Could not highlight row {rowIndex} of {gamePath}: {ex.Message}");
+            DynamicTextureManager.Log.Warning($"Could not highlight rows of {gamePath}: {ex.Message}");
         }
     }
 

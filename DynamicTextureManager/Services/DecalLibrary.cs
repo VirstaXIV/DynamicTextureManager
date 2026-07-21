@@ -63,6 +63,27 @@ public sealed class DecalLibrary : IService
         }
     }
 
+    /// <summary> Import a generated in-memory image (e.g. an extracted colorset footprint) into the library. </summary>
+    public DecalEntry? ImportGenerated(Image<SixLabors.ImageSharp.PixelFormats.Rgba32> image, string name)
+    {
+        try
+        {
+            var id = Guid.NewGuid();
+            Directory.CreateDirectory(_filenames.DecalDirectory);
+            image.SaveAsPng(_filenames.DecalFile(id));
+
+            var entry = new DecalEntry(id, name, string.Empty);
+            _decals.Add(entry);
+            Save();
+            return entry;
+        }
+        catch (Exception ex)
+        {
+            DynamicTextureManager.Log.Error($"Could not import generated decal \"{name}\":\n{ex}");
+            return null;
+        }
+    }
+
     public void Rename(Guid id, string newName)
     {
         var index = _decals.FindIndex(d => d.Id == id);

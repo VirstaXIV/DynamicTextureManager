@@ -161,10 +161,14 @@ public static class SurfaceDecalBaker
                     }
 
                     // Write only the claimed slot's pair index; G keeps the garment's baked
-                    // shading blend between the slot's color (A) and its shade partner (B).
+                    // shading blend between the slot's color (A) and its shade partner (B) —
+                    // unless the layer carries its own blend weight in the stamp's alpha
+                    // (relocated extracted decals).
                     var row   = layer.PaletteRows[DecalQuantizer.NearestIndex(sample, layer.PaletteColors)];
                     var pixel = target[x, y];
-                    pixel.R      = (byte)(row / 2 * 17);
+                    pixel.R   = (byte)(row / 2 * 17);
+                    if (layer.WriteBlendFromAlpha)
+                        pixel.G = sample.A;
                     target[x, y] = pixel;
                 }
                 else
@@ -206,7 +210,8 @@ public static class SurfaceDecalBaker
     private static float Cross(Vector2 a, Vector2 b)
         => a.X * b.Y - a.Y * b.X;
 
-    private static Rgba32 SampleBilinear(Rgba32[] pixels, int width, int height, float u, float v)
+    /// <summary> Bilinear RGBA sample of a pixel buffer at normalized coordinates, shared with the 3D viewport. </summary>
+    public static Rgba32 SampleBilinear(Rgba32[] pixels, int width, int height, float u, float v)
     {
         var fx = u * (width - 1);
         var fy = v * (height - 1);

@@ -3,10 +3,9 @@ using System.Collections.Generic;
 using System.IO;
 using System.Linq;
 using System.Numerics;
+using System.Threading.Tasks;
 using Dalamud.Bindings.ImGui;
 using Dalamud.Interface.ImGuiFileDialog;
-using Dalamud.Interface.Textures;
-using Dalamud.Interface.Textures.TextureWraps;
 using Dalamud.Plugin.Services;
 using DynamicTextureManager.DTextures;
 using DynamicTextureManager.DTextures.Data;
@@ -20,12 +19,20 @@ using OtterGui.Services;
 using OtterGui.Text;
 using Penumbra.GameData.Files;
 using Penumbra.GameData.Files.MaterialStructs;
+using SixLabors.ImageSharp;
 using SixLabors.ImageSharp.PixelFormats;
 
 namespace DynamicTextureManager.UI.Panels;
 
-/// <summary> Tab for stamping decals onto the textures of the selected source materials. </summary>
-public sealed class TexturesTab(
+/// <summary>
+/// Tab for stamping decals onto the selected source materials. Selection is per MATERIAL —
+/// a decal automatically targets the right texture (the colorset id map on colorset-driven
+/// gear, else the diffuse) and its material effects touch the normal/mask siblings, so
+/// there is no per-texture selection. The embedded 3D viewport is the main preview: it
+/// renders the gear with the composited textures and the live colorset colors, and doubles
+/// as the placement surface. The finished textures are viewable in the Textures tab.
+/// </summary>
+public sealed class DecalsTab(
     SourceFileProvider sourceFiles,
     ShaderHandlerRegistry shaderHandlers,
     DecalLibrary decals,
@@ -40,10 +47,13 @@ public sealed class TexturesTab(
     CharacterModelState modelState,
     TextureCompositor compositor,
     PenumbraService penumbra,
+    CompositePreviewCache previewCache,
+    FilenameService filenames,
     Configuration config)
     : IService, IDisposable
 {
-    private const long  SlotPreviewDebounceMs = 400;
+    private const long SlotPreviewDebounceMs   = 400;
+    private const long PlacementBakeDebounceMs = 400;
 
     /// <summary> Darkening applied to a shade-partner row: the benign blend target for a pair's unused half. </summary>
     private const float ShadeFactor = 0.6f;
@@ -52,35 +62,22 @@ public sealed class TexturesTab(
     private long           _slotPreviewMs;
     private TextureOption? _slotPreviewOption;
 
-    private sealed record TextureOption(
-        string GamePath,
-        TextureSlot Slot,
-        string MaterialLabel,
-        bool DecalRecommended,
-        string MaterialGamePath,
-        MtrlFile Mtrl);
-
     private readonly FileDialogManager _fileDialog = new();
 
     private Guid                 _cacheOwner = Guid.Empty;
     private string               _sourceFingerprint = string.Empty;
     private List<TextureOption>? _options;
-    private string               _selectedTexture = string.Empty;
+    private string               _selectedMaterial = string.Empty;
     private bool                 _highlightHovered;
 
     private readonly DecalViewport _viewport = new(textureProvider);
 
-    private string                _previewPath = string.Empty;
-    private IDalamudTextureWrap?  _previewWrap;
-    private string                _statsTexture = string.Empty;
-    private readonly HashSet<int> _usedRowPairs   = [];
+    private string                        _statsTexture = string.Empty;
+    private readonly HashSet<int>         _usedRowPairs = [];
     private readonly Dictionary<int, int> _rowUsageCounts = [];
 
     public void Dispose()
-    {
-        _previewWrap?.Dispose();
-        _viewport.Dispose();
-    }
+        => _viewport.Dispose();
 
     public void Draw(DTexture dTexture)
     {
@@ -101,9 +98,11 @@ public sealed class TexturesTab(
             _cacheOwner        = dTexture.Identifier;
             _sourceFingerprint = fingerprint;
             _options           = null;
-            _selectedTexture   = string.Empty;
+            _selectedMaterial  = string.Empty;
+            _statsTexture      = string.Empty;
             _mdlHealAttempted  = false;
-            _previewDecoded    = null;
+            _extractRows.Clear();
+            ResetShadingState();
             _viewport.Close();
             previewer.Clear();
         }
@@ -114,56 +113,64 @@ public sealed class TexturesTab(
             return;
         }
 
-        _options ??= CollectOptions(dTexture);
-
-        var showAll = config.ShowAllTextures;
-        if (ImUtf8.Checkbox("Show All Textures (Advanced)"u8, ref showAll))
+        _options ??= TextureOptions.Collect(dTexture.Data, sourceFiles, shaderHandlers);
+        if (_options.Count == 0)
         {
-            config.ShowAllTextures = showAll;
-            config.Save();
-        }
-
-        ImGui.SameLine();
-        ImUtf8.LabeledHelpMarker(""u8,
-            "Decals are meant for color (diffuse/base) textures.\nThis also lists normal, mask, index and specular maps — stamping a color image onto those usually produces wrong shading, but can be useful if you know what you are doing."u8);
-
-        var visible = showAll ? _options : _options.Where(o => o.DecalRecommended).ToList();
-        if (visible.Count == 0)
-        {
-            if (_options.Count == 0)
-                ImUtf8.Text("The source materials expose no textures."u8);
-            else
-                ImUtf8.Text("The source materials expose neither a color (diffuse/base) nor an ID texture — \"Show All Textures\" above lists the remaining maps."u8);
-
+            ImUtf8.Text("The source materials expose no textures."u8);
             return;
         }
 
-        DrawTextureSelector(dTexture, visible);
+        ImGui.SetNextItemWidth(350 * ImUtf8.GlobalScale);
+        TextureOptions.DrawMaterialCombo(_options, ref _selectedMaterial);
+        ImGui.SameLine();
+        ImUtf8.LabeledHelpMarker("Material"u8,
+            "Decals work per material: they stamp onto the right texture automatically (the colorset id map on colorset-driven gear, else the color texture) and their material effects touch the normal/mask maps.\nThe finished textures are viewable in the Textures tab."u8);
 
         // Colorset decals only work on current gear materials; other setups (legacy gear,
         // skin, hair, vfx) need their own flows and are gated off until those exist.
-        var selected = _options.Find(o => string.Equals(o.GamePath, _selectedTexture, StringComparison.OrdinalIgnoreCase));
-        if (selected is { Slot: TextureSlot.Index, DecalRecommended: false })
+        if (DefaultTargetOption() == null)
         {
-            ImUtf8.Text(
-                "Colorset decals require a current (Dawntrail) gear material — legacy gear, skin and other texture types are not supported yet."u8);
-            return;
+            var legacyIndex = MaterialOptions().Any(o => o is { Slot: TextureSlot.Index, DecalRecommended: false });
+            ImUtf8.Text(legacyIndex
+                ? "Colorset decals require a current (Dawntrail) gear material — legacy gear, skin and other texture types are not supported yet."u8
+                : "This material exposes no texture decals can stamp onto."u8);
         }
 
         ImGui.Separator();
         DrawDecalLibrary(dTexture);
-
-        if (_selectedTexture.Length == 0)
-            return;
-
         ImGui.Separator();
         DrawLayers(dTexture);
+        DrawExtractionSection(dTexture);
         DrawStrayRows(dTexture);
-        ImGui.Separator();
-        DrawPreview(dTexture);
         UpdateSlotPreview(dTexture);
-        _viewport.Draw(dTexture);
+        ImGui.Separator();
+        DrawViewport(dTexture);
     }
+
+    private List<TextureOption> MaterialOptions()
+        => _options == null
+            ? []
+            : _options.Where(o => string.Equals(o.MaterialGamePath, _selectedMaterial, StringComparison.OrdinalIgnoreCase)).ToList();
+
+    /// <summary> The material's colorset id map, when the shader supports colorset decals on it. </summary>
+    private TextureOption? IndexOption()
+        => _options?.Find(o => string.Equals(o.MaterialGamePath, _selectedMaterial, StringComparison.OrdinalIgnoreCase)
+         && o is { Slot: TextureSlot.Index, DecalRecommended: true });
+
+    private TextureOption? DiffuseOption()
+        => _options?.Find(o => string.Equals(o.MaterialGamePath, _selectedMaterial, StringComparison.OrdinalIgnoreCase)
+         && o.Slot is TextureSlot.Diffuse);
+
+    /// <summary> Where a new decal goes: the colorset id map when supported, else the diffuse. </summary>
+    private TextureOption? DefaultTargetOption()
+        => IndexOption() ?? DiffuseOption();
+
+    private TextureOption? OptionFor(string gamePath)
+        => _options?.Find(o => string.Equals(o.GamePath, gamePath, StringComparison.OrdinalIgnoreCase));
+
+    /// <summary> The texture a layer lives on, by scanning the layer stacks. </summary>
+    private static string? LayerOwnerPath(DTexture dTexture, TextureLayer layer)
+        => dTexture.Data.Textures.FirstOrDefault(kvp => kvp.Value.Contains(layer)).Key;
 
     /// <summary>
     /// Edited colorset rows on this material that no decal slot owns still affect the gear
@@ -171,11 +178,10 @@ public sealed class TexturesTab(
     /// </summary>
     private void DrawStrayRows(DTexture dTexture)
     {
-        var option = _options?.Find(o => string.Equals(o.GamePath, _selectedTexture, StringComparison.OrdinalIgnoreCase));
-        if (option == null || !dTexture.Data.Materials.TryGetValue(option.MaterialGamePath, out var edit) || edit.IsEmpty)
+        if (!dTexture.Data.Materials.TryGetValue(_selectedMaterial, out var edit) || edit.IsEmpty)
             return;
 
-        var claimed = ClaimedRowsForMaterial(dTexture, option.MaterialGamePath, null);
+        var claimed = ClaimedRowsForMaterial(dTexture, _selectedMaterial, null);
         var strays  = edit.Rows.Keys.Where(r => !claimed.Contains(r)).OrderBy(r => r).ToList();
         if (strays.Count == 0)
             return;
@@ -188,7 +194,7 @@ public sealed class TexturesTab(
             foreach (var row in strays)
                 edit.Rows.Remove(row);
             if (edit.IsEmpty)
-                dTexture.Data.Materials.Remove(option.MaterialGamePath);
+                dTexture.Data.Materials.Remove(_selectedMaterial);
             Save(dTexture);
         }
 
@@ -216,50 +222,6 @@ public sealed class TexturesTab(
             previewer.Preview(_slotPreviewOption.MaterialGamePath, clone.Write());
     }
 
-    /// <summary> All textures of the source materials, classified by shader handler. </summary>
-    private List<TextureOption> CollectOptions(DTexture dTexture)
-    {
-        var ret = new List<TextureOption>();
-        foreach (var source in dTexture.Data.Source.Materials)
-        {
-            var mtrl = sourceFiles.GetMaterial(source, null);
-            if (mtrl == null)
-                continue;
-
-            foreach (var info in shaderHandlers.For(mtrl).ClassifyTextures(mtrl))
-            {
-                if (!ret.Any(o => string.Equals(o.GamePath, info.GamePath, StringComparison.OrdinalIgnoreCase)))
-                    ret.Add(new TextureOption(info.GamePath, info.Slot, source.Label, info.SupportsDecals, source.GamePath, mtrl));
-            }
-        }
-
-        return ret;
-    }
-
-    private void DrawTextureSelector(DTexture dTexture, List<TextureOption> visible)
-    {
-        var current = visible.Find(o => string.Equals(o.GamePath, _selectedTexture, StringComparison.OrdinalIgnoreCase));
-        var preview = current == null ? "Select Texture..." : $"{current.MaterialLabel} — {current.Slot}";
-        using var combo = ImUtf8.Combo("##texture"u8, preview);
-        if (!combo)
-            return;
-
-        foreach (var option in visible)
-        {
-            var layerCount = dTexture.Data.Textures.GetValueOrDefault(option.GamePath)?.Count ?? 0;
-            var slotLabel  = option.Slot is TextureSlot.Index ? "Colorset Decal (ID map)" : option.Slot.ToString();
-            var caution    = option.DecalRecommended ? string.Empty : "  (not recommended)";
-            var label      = $"{option.MaterialLabel} — {slotLabel}{caution}{(layerCount > 0 ? $" ({layerCount} layer(s))" : string.Empty)}";
-            if (ImUtf8.Selectable($"{label}##{option.GamePath}",
-                    string.Equals(option.GamePath, _selectedTexture, StringComparison.OrdinalIgnoreCase)))
-                _selectedTexture = option.GamePath;
-            if (ImGui.IsItemHovered())
-                ImUtf8.HoverTooltip(option.DecalRecommended
-                    ? option.GamePath
-                    : $"{option.GamePath}\nThis is a {option.Slot} map, not a color texture — stamping a color decal here usually produces wrong shading.");
-        }
-    }
-
     private void DrawDecalLibrary(DTexture dTexture)
     {
         if (ImUtf8.Button("Import Decal..."u8))
@@ -276,7 +238,10 @@ public sealed class TexturesTab(
             return;
         }
 
+        var canAdd   = DefaultTargetOption() != null;
         var iconSize = new Vector2(48 * ImUtf8.GlobalScale);
+        // Deletion is deferred past the loop — Delete() mutates the list being enumerated.
+        var deleteId = Guid.Empty;
         foreach (var (decal, idx) in decals.Decals.WithIndex())
         {
             using var id = ImUtf8.PushId(idx);
@@ -290,44 +255,64 @@ public sealed class TexturesTab(
             else
                 ImGui.Dummy(iconSize);
 
-            if (ImUtf8.SmallButton("Add"u8) && _selectedTexture.Length > 0)
+            if (ImUtf8.SmallButton("Add"u8) && canAdd)
                 AddLayer(dTexture, decal.Id);
             ImGui.SameLine();
             if (ImUtf8.SmallButton("X"u8) && ImGui.GetIO().KeyCtrl)
-                decals.Delete(decal.Id);
+                deleteId = decal.Id;
 
             group.Dispose();
             if (ImGui.IsItemHovered())
                 ImUtf8.HoverTooltip(
-                    $"{decal.Name}\nAdd: stamp this decal onto the selected texture.\nX: hold Control and click to remove from the library.");
+                    $"{decal.Name}\nAdd: stamp this decal onto the selected material.\nX: hold Control and click to remove from the library.");
         }
+
+        if (deleteId != Guid.Empty)
+            decals.Delete(deleteId);
     }
 
     private void AddLayer(DTexture dTexture, Guid decalId)
     {
-        // Index maps get colorset decals: the decal is quantized and each of its colors
-        // remaps texels to an automatically claimed colorset row.
-        var option = _options?.Find(o => string.Equals(o.GamePath, _selectedTexture, StringComparison.OrdinalIgnoreCase));
-        if (option is { Slot: TextureSlot.Index, DecalRecommended: false })
-            return; // Colorset decals are gated to supported (Dawntrail gear) materials.
+        // The colorset id map is the preferred target: the decal is quantized and each of
+        // its colors remaps texels to an automatically claimed colorset row. Materials
+        // without one take color decals on their diffuse.
+        var target = DefaultTargetOption();
+        if (target == null)
+            return;
 
-        if (!dTexture.Data.Textures.TryGetValue(_selectedTexture, out var layers))
+        if (!dTexture.Data.Textures.TryGetValue(target.GamePath, out var layers))
         {
-            layers                                    = [];
-            dTexture.Data.Textures[_selectedTexture] = layers;
+            layers                                   = [];
+            dTexture.Data.Textures[target.GamePath] = layers;
         }
 
-        CaptureTextureSource(dTexture, _selectedTexture);
+        CaptureTextureSource(dTexture, target.GamePath);
 
         var layer = new DecalLayer
         {
             DecalId   = decalId,
-            IdRemap   = option?.Slot is TextureSlot.Index,
+            IdRemap   = target.Slot is TextureSlot.Index,
             MaxColors = config.DefaultDecalMaxColors,
+            Surface   = true,
         };
         layers.Add(layer);
-        if (layer.IdRemap && option?.Mtrl.Table is ColorTable table)
-            ReallocateDecal(dTexture, option, table, layer);
+        if (layer.IdRemap && target.Mtrl.Table is ColorTable table)
+            ReallocateDecal(dTexture, target, table, layer);
+
+        // 3D placement is the primary path: anchor at the texture's UV center and hand the
+        // layer to the embedded viewport. Without mesh geometry the layer falls back to flat.
+        var source = FindMaterialSource(dTexture);
+        var mesh   = source == null ? null : uvReader.GetMesh(source);
+        if (mesh == null)
+        {
+            layer.Surface = false;
+        }
+        else
+        {
+            SeedSurfaceFromUv(mesh, layer);
+            BeginPlacement(dTexture, layer);
+        }
+
         Save(dTexture);
     }
 
@@ -338,13 +323,26 @@ public sealed class TexturesTab(
     private void CaptureTextureSource(DTexture dTexture, string gamePath)
         => overlayMods.GetOrCaptureTextureSource(dTexture, gamePath);
 
+    /// <summary> All decal layers of the selected material, across all of its textures. </summary>
     private void DrawLayers(DTexture dTexture)
     {
-        if (!dTexture.Data.Textures.TryGetValue(_selectedTexture, out var layers) || layers.Count == 0)
+        var any = false;
+        foreach (var option in MaterialOptions())
         {
-            ImUtf8.Text("No layers on this texture yet — add a decal from the library above."u8);
-            return;
+            if (!dTexture.Data.Textures.TryGetValue(option.GamePath, out var layers) || layers.Count == 0)
+                continue;
+
+            any = true;
+            DrawLayerList(dTexture, option, layers);
         }
+
+        if (!any)
+            ImUtf8.Text("No decals on this material yet — add one from the library above."u8);
+    }
+
+    private void DrawLayerList(DTexture dTexture, TextureOption option, List<TextureLayer> layers)
+    {
+        using var outerId = ImRaii.PushId(option.GamePath);
 
         var remove = -1;
         var swap   = (-1, -1);
@@ -367,28 +365,31 @@ public sealed class TexturesTab(
             }
 
             ImGui.SameLine();
+            var targetTag = option.Slot switch
+            {
+                TextureSlot.Index   => "  [colorset]",
+                TextureSlot.Diffuse => string.Empty,
+                _                   => $"  [{option.Slot}]",
+            };
             var modeTag = decal.Surface
                 ? decal is { AnchorX: 0f, AnchorY: 0f, AnchorZ: 0f } ? "  [3D — not placed!]" : "  [3D]"
                 : string.Empty;
-            var errorTag = decal.RowError != null ? "  [auto-disabled]" : string.Empty;
-            if (!ImUtf8.CollapsingHeader($"{idx + 1}: {name}{modeTag}{errorTag}###layer{idx}"))
+            var extractedTag = decal.Extracted ? "  [extracted]" : string.Empty;
+            var errorTag     = decal.RowError != null ? "  [auto-disabled]" : string.Empty;
+            if (!ImUtf8.CollapsingHeader($"{idx + 1}: {name}{targetTag}{extractedTag}{modeTag}{errorTag}###layer{idx}"))
                 continue;
 
             using var indent = ImRaii.PushIndent();
 
             var changed = false;
             if (decal.IdRemap)
-                changed |= DrawIdRemapSettings(dTexture, decal);
+                changed |= DrawIdRemapSettings(dTexture, option, decal);
 
-            changed |= DrawMaterialEffects(decal);
+            changed |= DrawMaterialEffects(option, decal);
             changed |= DrawPlacementSettings(dTexture, decal);
 
             if (changed)
-            {
-                if (decal.Surface)
-                    MarkSurfacePreviewDirty();
                 Save(dTexture);
-            }
 
             if (ImUtf8.SmallButton("Remove"u8))
                 remove = idx;
@@ -402,11 +403,21 @@ public sealed class TexturesTab(
 
         if (remove >= 0)
         {
-            if (layers[remove] is DecalLayer removedDecal)
+            var removedDecal = layers[remove] as DecalLayer;
+            if (removedDecal != null)
+            {
                 CleanupSlotEdits(dTexture, removedDecal);
+                if (_viewport.IsOpenFor(removedDecal))
+                    _viewport.EndPlacement();
+            }
+
             layers.RemoveAt(remove);
+            // Removing an extraction returns the texture's source to the base mod (or
+            // regenerates the cleaned copy from the remaining extractions).
+            if (removedDecal is { Extracted: true, PreExtractionSource: not null })
+                RestoreOrRegenerateSource(dTexture, option.GamePath, removedDecal);
             if (layers.Count == 0)
-                dTexture.Data.Textures.Remove(_selectedTexture);
+                dTexture.Data.Textures.Remove(option.GamePath);
             Save(dTexture);
         }
         else if (swap.Item1 >= 0)
@@ -422,20 +433,20 @@ public sealed class TexturesTab(
     /// and B halves of a pair serve as two independent colors. This editor bundles the
     /// color list, dye behavior and shape threshold — the one place all colorset settings live.
     /// </summary>
-    private bool DrawIdRemapSettings(DTexture dTexture, DecalLayer decal)
+    private bool DrawIdRemapSettings(DTexture dTexture, TextureOption option, DecalLayer decal)
     {
-        var option = _options?.Find(o => string.Equals(o.GamePath, _selectedTexture, StringComparison.OrdinalIgnoreCase));
-        if (option?.Mtrl.Table is not ColorTable table)
+        if (option.Mtrl.Table is not ColorTable table)
             return false;
 
-        EnsureIdStats(dTexture);
+        EnsureIdStats(dTexture, option.GamePath);
         var changed = false;
 
         // Old saves and layers whose allocation was cleared claim their rows on first draw.
         // Saves from older schemes (a slot shared with another decal, or a slot's B half used
         // as its own color) fringe at decal edges — heal them by reallocating onto whole,
-        // exclusively owned slots.
-        if (decal is { Enabled: true, RowError: null })
+        // exclusively owned slots. Extracted layers own gear-authored rows and are never
+        // re-quantized onto new ones.
+        if (decal is { Extracted: false, Enabled: true, RowError: null })
         {
             var conflict = decal.PaletteRows.Count > 0
              && (decal.PaletteRows.Any(r => r % 2 == 1)
@@ -445,19 +456,28 @@ public sealed class TexturesTab(
                 changed |= ReallocateDecal(dTexture, option, table, decal);
         }
 
-        ImGui.SetNextItemWidth(220 * ImUtf8.GlobalScale);
-        var maxColors = decal.MaxColors;
-        if (ImUtf8.Slider("Max Colors"u8, ref maxColors, "%d"u8, 1, 12))
-            decal.MaxColors = Math.Clamp(maxColors, 1, 12);
-        if (ImGui.IsItemDeactivatedAfterEdit())
-            changed |= ReallocateDecal(dTexture, option, table, decal);
-        ImUtf8.HoverTooltip(
-            "The decal is reduced to at most this many colors — similar colors merge.\nEach color claims one whole free colorset slot: its A row carries the color, its B row a darker shade the game blends toward where the gear baked its cloth shading.\nSo 6 colors need 6 fully free slots, and slots are never shared."u8);
+        if (decal.Extracted)
+        {
+            ImUtf8.Text("Extracted from this texture's id map — relocated onto its own claimed slots, seeded from the source rows."u8);
+            ImUtf8.HoverTooltip(
+                "This decal was lifted out of the id map and moved onto freshly claimed colorset slots that copy the source rows' authored look.\nRecoloring a slot recolors only the decal — the rest of the gear keeps its own rows."u8);
+        }
+        else
+        {
+            ImGui.SetNextItemWidth(220 * ImUtf8.GlobalScale);
+            var maxColors = decal.MaxColors;
+            if (ImUtf8.Slider("Max Colors"u8, ref maxColors, "%d"u8, 1, 12))
+                decal.MaxColors = Math.Clamp(maxColors, 1, 12);
+            if (ImGui.IsItemDeactivatedAfterEdit())
+                changed |= ReallocateDecal(dTexture, option, table, decal);
+            ImUtf8.HoverTooltip(
+                "The decal is reduced to at most this many colors — similar colors merge.\nEach color claims one whole free colorset slot: its A row carries the color, its B row a darker shade the game blends toward where the gear baked its cloth shading.\nSo 6 colors need 6 fully free slots, and slots are never shared."u8);
 
-        ImGui.SameLine();
-        if (ImUtf8.SmallButton("Re-extract Colors"u8))
-            changed |= ReallocateDecal(dTexture, option, table, decal);
-        ImUtf8.HoverTooltip("Quantize the decal image again and reassign rows — discards manual recolors below."u8);
+            ImGui.SameLine();
+            if (ImUtf8.SmallButton("Re-extract Colors"u8))
+                changed |= ReallocateDecal(dTexture, option, table, decal);
+            ImUtf8.HoverTooltip("Quantize the decal image again and reassign rows — discards manual recolors below."u8);
+        }
 
         if (decal.RowError != null)
         {
@@ -609,9 +629,11 @@ public sealed class TexturesTab(
 
         ImGui.SetNextItemWidth(220 * ImUtf8.GlobalScale);
         changed |= ImUtf8.Slider("Shape Threshold"u8, ref decal.AlphaThreshold, "%.2f"u8, 0.05f, 1f);
-        if (ImGui.IsItemDeactivatedAfterEdit())
+        if (!decal.Extracted && ImGui.IsItemDeactivatedAfterEdit())
             changed |= ReallocateDecal(dTexture, option, table, decal);
-        ImUtf8.HoverTooltip("Decal pixels whose alpha is at or above this value become part of the stamped shape.\nChanging it re-extracts the colors."u8);
+        ImUtf8.HoverTooltip(decal.Extracted
+            ? "Decal pixels whose alpha is at or above this value become part of the stamped shape."u8
+            : "Decal pixels whose alpha is at or above this value become part of the stamped shape.\nChanging it re-extracts the colors."u8);
 
         if (changed)
         {
@@ -630,11 +652,15 @@ public sealed class TexturesTab(
     /// </summary>
     private bool ReallocateDecal(DTexture dTexture, TextureOption option, ColorTable table, DecalLayer decal)
     {
+        // Extracted layers render through the gear's own authored rows — never reallocate.
+        if (decal.Extracted)
+            return false;
+
         var path = decals.FilePath(decal.DecalId);
         if (!File.Exists(path))
             return false;
 
-        EnsureIdStats(dTexture);
+        EnsureIdStats(dTexture, option.GamePath);
         var edit   = GetOrAddMaterialEdit(dTexture, option);
         var others = ClaimedRowsForMaterial(dTexture, option.MaterialGamePath, decal);
 
@@ -704,7 +730,7 @@ public sealed class TexturesTab(
         var ret = new HashSet<int>();
         foreach (var (gamePath, layers) in dTexture.Data.Textures)
         {
-            var opt = _options?.Find(o => string.Equals(o.GamePath, gamePath, StringComparison.OrdinalIgnoreCase));
+            var opt = OptionFor(gamePath);
             if (opt == null || !string.Equals(opt.MaterialGamePath, materialGamePath, StringComparison.OrdinalIgnoreCase))
                 continue;
 
@@ -725,12 +751,8 @@ public sealed class TexturesTab(
     /// set a surface finish on the mask map inside its footprint. Off by default; only
     /// offered when the material actually has those sibling textures.
     /// </summary>
-    private bool DrawMaterialEffects(DecalLayer decal)
+    private bool DrawMaterialEffects(TextureOption option, DecalLayer decal)
     {
-        var option = _options?.Find(o => string.Equals(o.GamePath, _selectedTexture, StringComparison.OrdinalIgnoreCase));
-        if (option == null)
-            return false;
-
         var hasNormal = _options!.Any(o => string.Equals(o.MaterialGamePath, option.MaterialGamePath, StringComparison.OrdinalIgnoreCase)
          && o.Slot is TextureSlot.Normal);
         var hasMask = _options!.Any(o => string.Equals(o.MaterialGamePath, option.MaterialGamePath, StringComparison.OrdinalIgnoreCase)
@@ -864,15 +886,14 @@ public sealed class TexturesTab(
         if (!removed.IdRemap || removed.PaletteRows.Count == 0)
             return;
 
-        var option = _options?.Find(o => string.Equals(o.GamePath, _selectedTexture, StringComparison.OrdinalIgnoreCase));
-        if (option == null || !dTexture.Data.Materials.TryGetValue(option.MaterialGamePath, out var edit))
+        if (!dTexture.Data.Materials.TryGetValue(_selectedMaterial, out var edit))
             return;
 
-        var others = ClaimedRowsForMaterial(dTexture, option.MaterialGamePath, removed);
+        var others = ClaimedRowsForMaterial(dTexture, _selectedMaterial, removed);
         foreach (var row in removed.PaletteRows.SelectMany(r => new[] { r, r ^ 1 }).Distinct().Where(r => !others.Contains(r)))
             edit.Rows.Remove(row);
         if (edit.IsEmpty)
-            dTexture.Data.Materials.Remove(option.MaterialGamePath);
+            dTexture.Data.Materials.Remove(_selectedMaterial);
     }
 
     /// <summary> The dye behavior most of this gear uses: the most frequent dye entry of the source material. </summary>
@@ -899,293 +920,16 @@ public sealed class TexturesTab(
         return (best.Key, row.Channel, row);
     }
 
-    private enum DragMode
-    {
-        None,
-        Move,
-        Scale,
-        Rotate,
-    }
-
-    private int      _activeLayer = -1;
-    private DragMode _dragMode    = DragMode.None;
-    private Vector2  _grabOffset;
-    private float    _rotateGrab;
-    private Vector2  _scaleSign = Vector2.One;
-
-    private readonly record struct LayerGeometry(Vector2 Center, Vector2 Half, float Sin, float Cos)
-    {
-        public Vector2 ToScreen(Vector2 local)
-            => Center + new Vector2(local.X * Cos - local.Y * Sin, local.X * Sin + local.Y * Cos);
-
-        public Vector2 ToLocal(Vector2 screen)
-        {
-            var d = screen - Center;
-            return new Vector2(d.X * Cos + d.Y * Sin, -d.X * Sin + d.Y * Cos);
-        }
-
-        public Vector2 RotationHandle
-            => ToScreen(new Vector2(0, -Half.Y - 22));
-
-        public bool Contains(Vector2 screen)
-        {
-            var local = ToLocal(screen);
-            return Math.Abs(local.X) <= Half.X && Math.Abs(local.Y) <= Half.Y;
-        }
-    }
-
-    private static LayerGeometry Geometry(DecalLayer layer, Vector2 start, Vector2 size)
-    {
-        var center = start + new Vector2(layer.PosU * size.X, layer.PosV * size.Y);
-        var half   = new Vector2(Math.Max(2f, layer.ScaleX * size.X), Math.Max(2f, layer.ScaleY * size.Y)) / 2;
-        var (sin, cos) = MathF.SinCos(layer.RotationDeg * MathF.PI / 180f);
-        return new LayerGeometry(center, half, sin, cos);
-    }
-
-    /// <summary>
-    /// In-window preview: the base texture with decal layers drawn on top, directly
-    /// manipulable — drag the decal to move it, corner handles to resize, top handle to rotate.
-    /// </summary>
-    private void DrawPreview(DTexture dTexture)
-    {
-        var wrap = GetPreviewWrap(dTexture);
-        if (wrap == null)
-        {
-            ImUtf8.Text("No preview available for this texture."u8);
-            return;
-        }
-
-        // Surface decals are baked into the preview image itself (debounced).
-        UpdateSurfacePreview(dTexture);
-        wrap = _previewWrap ?? wrap;
-
-        ImUtf8.Text("Click a decal to select it, drag to move, corner handles to resize (Shift: keep aspect), top handle to rotate (Ctrl: snap)."u8);
-
-        var showSeams = config.ShowUvSeams;
-        if (ImUtf8.Checkbox("Show UV Seams"u8, ref showSeams))
-        {
-            config.ShowUvSeams = showSeams;
-            config.Save();
-        }
-
-        ImUtf8.HoverTooltip("Outlines where the model's UV islands end.\nA decal crossing one of these lines gets cut off there on the actual gear."u8);
-
-        var layout = showSeams ? GetUvLayout(dTexture) : null;
-        if (showSeams)
-        {
-            ImGui.SameLine();
-            if (layout != null)
-                ImUtf8.Text($"({layout.Seams.Count} seam edges)");
-            else
-                using (ImRaii.PushColor(ImGuiCol.Text, 0xFF00A0FFu))
-                    ImUtf8.Text("no UV data for this texture — see /xllog, or re-add the material in the Source tab"u8);
-        }
-
-        var avail = ImGui.GetContentRegionAvail().X;
-        var scale = Math.Min(1f, avail / wrap.Width);
-        var size  = new Vector2(wrap.Width * scale, wrap.Height * scale);
-        var start = ImGui.GetCursorScreenPos();
-
-        // An invisible button owns the canvas so dragging never moves the window.
-        ImUtf8.InvisibleButton("##previewCanvas"u8, size);
-        var drawList = ImGui.GetWindowDrawList();
-        drawList.AddImage(wrap.Handle, start, start + size);
-
-        if (layout != null)
-        {
-            // Dark underlay below each bright line keeps the seams readable on any texture.
-            const uint seamOutline = 0xC0000000u;
-            const uint seamColor   = 0xFF00D7FFu;
-            foreach (var (a, b) in layout.Seams)
-                drawList.AddLine(start + a * size, start + b * size, seamOutline, 3f);
-            foreach (var (a, b) in layout.Seams)
-                drawList.AddLine(start + a * size, start + b * size, seamColor, 1.5f);
-        }
-
-        if (!dTexture.Data.Textures.TryGetValue(_selectedTexture, out var allLayers))
-            return;
-
-        // Surface decals live in the baked preview image and are placed on the model —
-        // only flat UV decals are drawn as directly manipulable rectangles here.
-        var layers = allLayers.OfType<DecalLayer>().Where(l => !l.Surface).ToList();
-        if (_activeLayer >= layers.Count)
-            _activeLayer = -1;
-
-        foreach (var layer in layers.Where(l => l.Enabled))
-        {
-            var decalWrap = textureProvider.GetFromFile(decals.FilePath(layer.DecalId)).GetWrapOrDefault();
-            if (decalWrap == null)
-                continue;
-
-            var geo = Geometry(layer, start, size);
-            // Colorset decals get a flat orange tint in the preview — their real color comes
-            // from the target row pair, which the base ID map cannot show.
-            var tint = layer.IdRemap
-                ? 0xFF20A5FFu
-                : (uint)(Math.Clamp(layer.Opacity, 0f, 1f) * 255f) << 24 | 0x00FFFFFFu;
-            drawList.AddImageQuad(decalWrap.Handle,
-                geo.ToScreen(new Vector2(-geo.Half.X, -geo.Half.Y)), geo.ToScreen(new Vector2(geo.Half.X, -geo.Half.Y)),
-                geo.ToScreen(new Vector2(geo.Half.X, geo.Half.Y)), geo.ToScreen(new Vector2(-geo.Half.X, geo.Half.Y)),
-                new Vector2(0, 0), new Vector2(1, 0), new Vector2(1, 1), new Vector2(0, 1),
-                tint);
-        }
-
-        HandleManipulation(dTexture, layers, start, size, drawList);
-    }
-
-    private void HandleManipulation(DTexture dTexture, List<DecalLayer> layers, Vector2 start, Vector2 size, ImDrawListPtr drawList)
-    {
-        var mouse = ImGui.GetMousePos();
-
-        if (ImGui.IsItemActivated())
-            BeginDrag(layers, start, size, mouse);
-
-        if (_dragMode != DragMode.None)
-        {
-            if (!ImGui.IsMouseDown(ImGuiMouseButton.Left) || _activeLayer < 0 || _activeLayer >= layers.Count)
-            {
-                _dragMode = DragMode.None;
-                Save(dTexture);
-            }
-            else
-            {
-                UpdateDrag(layers[_activeLayer], start, size, mouse);
-            }
-        }
-
-        // Selection visuals: outline + handles for the active layer.
-        if (_activeLayer < 0 || _activeLayer >= layers.Count)
-            return;
-
-        var active = layers[_activeLayer];
-        var geo    = Geometry(active, start, size);
-        var corners = new[]
-        {
-            geo.ToScreen(new Vector2(-geo.Half.X, -geo.Half.Y)),
-            geo.ToScreen(new Vector2(geo.Half.X, -geo.Half.Y)),
-            geo.ToScreen(new Vector2(geo.Half.X, geo.Half.Y)),
-            geo.ToScreen(new Vector2(-geo.Half.X, geo.Half.Y)),
-        };
-
-        const uint outlineColor = 0xFF00D7FFu;
-        for (var i = 0; i < 4; ++i)
-            drawList.AddLine(corners[i], corners[(i + 1) % 4], outlineColor, 1.5f);
-        foreach (var corner in corners)
-            drawList.AddRectFilled(corner - new Vector2(4), corner + new Vector2(4), outlineColor);
-
-        var rotHandle = geo.RotationHandle;
-        drawList.AddLine(geo.ToScreen(new Vector2(0, -geo.Half.Y)), rotHandle, outlineColor, 1.5f);
-        drawList.AddCircleFilled(rotHandle, 6f, outlineColor);
-    }
-
-    private void BeginDrag(List<DecalLayer> layers, Vector2 start, Vector2 size, Vector2 mouse)
-    {
-        // Handles of the already-selected layer win over selecting another layer.
-        if (_activeLayer >= 0 && _activeLayer < layers.Count && layers[_activeLayer].Enabled)
-        {
-            var geo = Geometry(layers[_activeLayer], start, size);
-            if (Vector2.Distance(mouse, geo.RotationHandle) <= 10f)
-            {
-                _dragMode   = DragMode.Rotate;
-                var local   = mouse - geo.Center;
-                _rotateGrab = MathF.Atan2(local.Y, local.X) - layers[_activeLayer].RotationDeg * MathF.PI / 180f;
-                return;
-            }
-
-            foreach (var (sx, sy) in new[] { (-1f, -1f), (1f, -1f), (1f, 1f), (-1f, 1f) })
-            {
-                var corner = geo.ToScreen(new Vector2(sx * geo.Half.X, sy * geo.Half.Y));
-                if (Vector2.Distance(mouse, corner) <= 8f)
-                {
-                    _dragMode  = DragMode.Scale;
-                    _scaleSign = new Vector2(sx, sy);
-                    return;
-                }
-            }
-        }
-
-        // Select and start moving the topmost decal under the cursor.
-        for (var i = layers.Count - 1; i >= 0; --i)
-        {
-            if (!layers[i].Enabled)
-                continue;
-
-            var geo = Geometry(layers[i], start, size);
-            if (!geo.Contains(mouse))
-                continue;
-
-            _activeLayer = i;
-            _dragMode    = DragMode.Move;
-            _grabOffset  = mouse - geo.Center;
-            return;
-        }
-
-        _activeLayer = -1;
-    }
-
-    private void UpdateDrag(DecalLayer layer, Vector2 start, Vector2 size, Vector2 mouse)
-    {
-        switch (_dragMode)
-        {
-            case DragMode.Move:
-            {
-                var center = mouse - _grabOffset - start;
-                layer.PosU = Math.Clamp(center.X / size.X, 0f, 1f);
-                layer.PosV = Math.Clamp(center.Y / size.Y, 0f, 1f);
-                break;
-            }
-            case DragMode.Rotate:
-            {
-                var local = mouse - (start + new Vector2(layer.PosU * size.X, layer.PosV * size.Y));
-                var deg   = (MathF.Atan2(local.Y, local.X) - _rotateGrab) * 180f / MathF.PI;
-                if (ImGui.GetIO().KeyCtrl)
-                    deg = MathF.Round(deg / 15f) * 15f;
-                layer.RotationDeg = deg switch
-                {
-                    > 180f  => deg - 360f,
-                    < -180f => deg + 360f,
-                    _       => deg,
-                };
-                break;
-            }
-            case DragMode.Scale:
-            {
-                var geo   = Geometry(layer, start, size);
-                var local = geo.ToLocal(mouse);
-                var newScaleX = Math.Clamp(Math.Abs(local.X) * 2f / size.X, 0.01f, 2f);
-                var newScaleY = Math.Clamp(Math.Abs(local.Y) * 2f / size.Y, 0.01f, 2f);
-                if (ImGui.GetIO().KeyShift && layer.ScaleX > 0.001f && layer.ScaleY > 0.001f)
-                {
-                    // Keep aspect: scale both axes by the dominant factor.
-                    var factor = Math.Max(newScaleX / layer.ScaleX, newScaleY / layer.ScaleY);
-                    layer.ScaleX = Math.Clamp(layer.ScaleX * factor, 0.01f, 2f);
-                    layer.ScaleY = Math.Clamp(layer.ScaleY * factor, 0.01f, 2f);
-                }
-                else
-                {
-                    layer.ScaleX = newScaleX;
-                    layer.ScaleY = newScaleY;
-                }
-
-                break;
-            }
-        }
-    }
-
     private bool _mdlHealAttempted;
 
     /// <summary>
-    /// The source material of the selected texture. Sources saved before model paths were
+    /// The source entry of the selected material. Sources saved before model paths were
     /// captured are healed once per selection through a live resource-tree resolve.
     /// </summary>
-    private SourcePath? FindSelectedSource(DTexture dTexture)
+    private SourcePath? FindMaterialSource(DTexture dTexture)
     {
-        var option = _options?.Find(o => string.Equals(o.GamePath, _selectedTexture, StringComparison.OrdinalIgnoreCase));
-        if (option == null)
-            return null;
-
         var source = dTexture.Data.Source.Materials.FirstOrDefault(m
-            => string.Equals(m.GamePath, option.MaterialGamePath, StringComparison.OrdinalIgnoreCase));
+            => string.Equals(m.GamePath, _selectedMaterial, StringComparison.OrdinalIgnoreCase));
         if (source == null)
             return null;
 
@@ -1213,17 +957,11 @@ public sealed class TexturesTab(
         return source;
     }
 
-    private UvLayout? GetUvLayout(DTexture dTexture)
-    {
-        var source = FindSelectedSource(dTexture);
-        return source == null ? null : uvReader.Get(source);
-    }
-
     #region Surface placement
 
     private string _placementError = string.Empty;
 
-    /// <summary> Placement controls of one decal layer: flat UV stamping or 3D surface projection. </summary>
+    /// <summary> Placement controls of one decal layer: 3D surface projection or flat UV stamping. </summary>
     private bool DrawPlacementSettings(DTexture dTexture, DecalLayer decal)
     {
         var changed = false;
@@ -1232,15 +970,14 @@ public sealed class TexturesTab(
         {
             decal.Surface = surface;
             changed       = true;
-            MarkSurfacePreviewDirty();
             // Entering 3D mode keeps the decal where it is: the current UV position is
             // converted to a mesh anchor. Only when that fails does placement mode open.
             if (surface && decal is { AnchorX: 0f, AnchorY: 0f, AnchorZ: 0f })
             {
-                var source = FindSelectedSource(dTexture);
+                var source = FindMaterialSource(dTexture);
                 var mesh   = source == null ? null : uvReader.GetMesh(source);
                 if (mesh == null || !SeedSurfaceFromUv(mesh, decal))
-                    OpenViewport(dTexture, decal);
+                    BeginPlacement(dTexture, decal);
             }
         }
 
@@ -1283,23 +1020,23 @@ public sealed class TexturesTab(
             ImUtf8.HoverTooltip(
                 "Keep the projection on the mesh piece you stamped it on.\nWithout this, overlapping pieces (linings, straps, panels behind) within reach catch the decal too."u8);
 
-            if (ImUtf8.Button(_viewport.IsOpenFor(decal) ? "Close 3D View"u8 : "Place in 3D View..."u8))
+            if (ImUtf8.Button(_viewport.IsOpenFor(decal) ? "Stop Placing"u8 : "Place in 3D View"u8))
             {
                 if (_viewport.IsOpenFor(decal))
-                    _viewport.Close();
+                    _viewport.EndPlacement();
                 else
-                    OpenViewport(dTexture, decal);
+                    BeginPlacement(dTexture, decal);
             }
 
             ImUtf8.HoverTooltip(
-                "Opens a window rendering the gear mesh in 3D — stamp and drag the decal directly on it,\norbit and zoom freely, and changes apply to the mod when you finish an adjustment."u8);
+                "Bind this decal to the 3D preview below — stamp and drag it directly on the mesh,\norbit and zoom freely, and changes apply to the mod when you finish an adjustment."u8);
 
             if (_placementError.Length > 0)
                 using (ImRaii.PushColor(ImGuiCol.Text, 0xFF00A0FFu))
                     ImUtf8.Text(_placementError);
             else if (decal is { AnchorX: 0f, AnchorY: 0f, AnchorZ: 0f })
                 using (ImRaii.PushColor(ImGuiCol.Text, 0xFF00A0FFu))
-                    ImUtf8.Text("NOT PLACED YET — the decal stays invisible until you place it in the 3D View."u8);
+                    ImUtf8.Text("NOT PLACED YET — the decal stays invisible until you place it in the 3D view below."u8);
         }
         else
         {
@@ -1318,6 +1055,8 @@ public sealed class TexturesTab(
                 ImGui.SetNextItemWidth(220 * ImUtf8.GlobalScale);
                 changed |= ImUtf8.Slider("Opacity"u8, ref decal.Opacity, "%.2f"u8, 0f, 1f);
             }
+
+            ImUtf8.Text("Flat UV placement — check the result in the 3D preview below or the Textures tab, or switch to Place on Model (3D)."u8);
         }
 
         return changed;
@@ -1407,9 +1146,10 @@ public sealed class TexturesTab(
         return true;
     }
 
-    private void OpenViewport(DTexture dTexture, DecalLayer decal)
+    /// <summary> Bind a decal layer to the embedded viewport for interactive placement. </summary>
+    private void BeginPlacement(DTexture dTexture, DecalLayer decal)
     {
-        var source = FindSelectedSource(dTexture);
+        var source = FindMaterialSource(dTexture);
 
         // The worn model can differ from the one captured at selection time (e.g. another
         // size option) — re-resolve so the viewport shows the variant actually in use.
@@ -1441,129 +1181,513 @@ public sealed class TexturesTab(
         }
 
         _placementError = string.Empty;
-        _viewport.Open(dTexture, decal, mesh, modelState.CurrentAttributeMask(mesh.GamePath), decals.FilePath(decal.DecalId), () =>
+        _viewport.Open(dTexture, mesh, modelState.CurrentAttributeMask(mesh.GamePath));
+        _viewport.BeginPlacement(decal, decals.FilePath(decal.DecalId), () => Save(dTexture));
+    }
+
+    #endregion
+
+    #region 3D preview shading
+
+    private Vector3[]? _rowDiffuse;
+    private int        _rowDiffuseVersion;
+    private bool       _rowDiffuseDirty = true;
+    private string     _rowDiffuseMaterial = string.Empty;
+
+    private long _lastEditMs;
+    private int  _editCounter;
+
+    private DecodedTexture? _exclDecoded;
+    private string          _exclPath = string.Empty;
+    private int             _exclVersion;
+    private bool            _exclBuilding;
+    private (int EntryVersion, int EditCounter, DecalLayer? Layer, string Path) _exclWanted = (-1, -1, null, string.Empty);
+
+    private (int, int, int, int, int) _shadingKey = (-2, -2, -2, -2, -2);
+
+    private void ResetShadingState()
+    {
+        _rowDiffuse         = null;
+        _rowDiffuseDirty    = true;
+        _rowDiffuseMaterial = string.Empty;
+        _exclDecoded        = null;
+        _exclPath           = string.Empty;
+        _exclWanted         = (-1, -1, null, string.Empty);
+        _shadingKey         = (-2, -2, -2, -2, -2);
+    }
+
+    /// <summary> The embedded 3D preview of the selected material, textured and colorset-aware. </summary>
+    private void DrawViewport(DTexture dTexture)
+    {
+        var source = FindMaterialSource(dTexture);
+        var mesh   = source == null ? null : uvReader.GetMesh(source);
+        if (mesh == null)
         {
-            MarkSurfacePreviewDirty();
-            Save(dTexture);
+            ImUtf8.Text("No mesh geometry available for a 3D preview — re-add the material in the Source tab while wearing the gear."u8);
+            return;
+        }
+
+        // A bound placement layer must belong to the selected material — switching materials
+        // would otherwise pair its overlay with the wrong mesh and shading.
+        var placement = _viewport.PlacementLayer;
+        if (placement != null)
+        {
+            var ownerOption = LayerOwnerPath(dTexture, placement) is { } path ? OptionFor(path) : null;
+            if (ownerOption == null || !string.Equals(ownerOption.MaterialGamePath, _selectedMaterial, StringComparison.OrdinalIgnoreCase))
+                _viewport.EndPlacement();
+        }
+
+        _viewport.Open(dTexture, mesh, modelState.CurrentAttributeMask(mesh.GamePath));
+        UpdateViewportShading(dTexture, mesh);
+        _viewport.Draw(dTexture);
+    }
+
+    /// <summary>
+    /// Assemble the viewport's shading inputs: the composited diffuse and id map of the
+    /// selected material plus the resolved colorset row colors. While a decal is being
+    /// placed, its own texture uses a base composited WITHOUT that layer — otherwise the
+    /// already-baked copy would ghost at the old position while dragging.
+    /// </summary>
+    private void UpdateViewportShading(DTexture dTexture, MaterialMesh mesh)
+    {
+        var diffuseOption = DiffuseOption();
+        var indexOption   = IndexOption();
+
+        if (_rowDiffuseDirty || !string.Equals(_rowDiffuseMaterial, _selectedMaterial, StringComparison.OrdinalIgnoreCase))
+        {
+            var mtrl = (indexOption ?? diffuseOption ?? MaterialOptions().FirstOrDefault())?.Mtrl;
+            _rowDiffuse = mtrl == null
+                ? null
+                : MaterialEditApplier.ResolveRowDiffuse(mtrl, dTexture.Data.Materials.GetValueOrDefault(_selectedMaterial));
+            _rowDiffuseDirty    = false;
+            _rowDiffuseMaterial = _selectedMaterial;
+            ++_rowDiffuseVersion;
+        }
+
+        var diffuseEntry = diffuseOption == null ? null : previewCache.Get(dTexture, diffuseOption.GamePath);
+        var indexEntry   = indexOption == null ? null : previewCache.Get(dTexture, indexOption.GamePath);
+
+        var placementLayer = _viewport.PlacementLayer;
+        var boundPath      = placementLayer == null ? null : LayerOwnerPath(dTexture, placementLayer);
+        if (placementLayer != null && boundPath != null)
+        {
+            var boundEntry = string.Equals(boundPath, diffuseOption?.GamePath, StringComparison.OrdinalIgnoreCase) ? diffuseEntry
+                : string.Equals(boundPath, indexOption?.GamePath, StringComparison.OrdinalIgnoreCase)              ? indexEntry
+                : null;
+            if (boundEntry != null)
+                EnsurePlacementBase(dTexture, placementLayer, boundEntry, mesh, boundPath);
+        }
+
+        var key = (diffuseEntry?.Version ?? -1, indexEntry?.Version ?? -1, _rowDiffuseVersion, _exclVersion,
+            placementLayer == null ? 0 : 1);
+        if (key == _shadingKey)
+            return;
+
+        _shadingKey = key;
+
+        DecodedTexture? Buffer(CompositePreviewCache.Entry? entry, string? gamePath)
+        {
+            if (entry?.Pristine == null)
+                return null;
+            if (placementLayer != null && string.Equals(gamePath, boundPath, StringComparison.OrdinalIgnoreCase))
+                return (string.Equals(_exclPath, boundPath, StringComparison.OrdinalIgnoreCase) ? _exclDecoded : null) ?? entry.Pristine;
+
+            return entry.Composited != null
+                ? new DecodedTexture(entry.Composited, entry.Pristine.Width, entry.Pristine.Height)
+                : entry.Pristine;
+        }
+
+        _viewport.UpdateShading(new ViewportShading(
+            Buffer(diffuseEntry, diffuseOption?.GamePath),
+            Buffer(indexEntry, indexOption?.GamePath),
+            _rowDiffuse));
+    }
+
+    /// <summary> Debounced background composite of the bound texture excluding the layer being placed. </summary>
+    private void EnsurePlacementBase(DTexture dTexture, DecalLayer layer, CompositePreviewCache.Entry entry, MaterialMesh mesh,
+        string boundPath)
+    {
+        var wanted = (entry.Version, _editCounter, (DecalLayer?)layer, boundPath);
+        if (_exclBuilding || entry.Pristine == null || _exclWanted == wanted)
+            return;
+        if (Environment.TickCount64 - _lastEditMs < PlacementBakeDebounceMs)
+            return;
+
+        _exclBuilding = true;
+        _exclWanted   = wanted;
+        var pristine = entry.Pristine;
+        var others = dTexture.Data.Textures.GetValueOrDefault(boundPath)?
+                .Where(l => !ReferenceEquals(l, layer)).ToList()
+         ?? [];
+
+        _ = Task.Run(() =>
+        {
+            try
+            {
+                var rgba = compositor.Composite(pristine, others, mesh);
+                _exclDecoded = new DecodedTexture(rgba, pristine.Width, pristine.Height);
+                _exclPath    = boundPath;
+                ++_exclVersion;
+            }
+            catch (Exception ex)
+            {
+                DynamicTextureManager.Log.Warning($"Could not bake the placement base of {boundPath}: {ex.Message}");
+            }
+            finally
+            {
+                _exclBuilding = false;
+            }
         });
     }
 
     #endregion
 
-    #region Surface preview bake
+    #region Colorset decal extraction
 
-    private DecodedTexture? _previewDecoded;
-    private bool            _surfaceBakeDirty;
-    private long            _surfaceBakeMs;
+    private readonly HashSet<int> _extractRows = [];
+    private bool                  _extractLargestOnly;
+    private string                _extractStatus = string.Empty;
 
-    private void MarkSurfacePreviewDirty()
+    /// <summary>
+    /// Lift a decal another mod baked into the id map out into a movable decal layer. The
+    /// selection is per ROW (a slot's A and B halves separately) because a baked decal often
+    /// shares its slot with the garment — e.g. the decal on 3B while 3A colors the cloth.
+    /// The extracted content is relocated onto freshly claimed slots of its own, so
+    /// recoloring and moving it never touches the rest of the gear.
+    /// </summary>
+    private void DrawExtractionSection(DTexture dTexture)
     {
-        _surfaceBakeDirty = true;
-        _surfaceBakeMs    = Environment.TickCount64;
+        var option = IndexOption();
+        if (option == null || option.Mtrl.Table is not ColorTable table)
+            return;
+
+        ImGui.Separator();
+        if (!ImUtf8.CollapsingHeader("Extract Baked Decal"u8))
+            return;
+
+        using var indent = ImRaii.PushIndent();
+        ImUtf8.TextWrapped(
+            "Lift a decal that is already baked into this material's id map (e.g. by the source mod) out into a decal layer of its own: hover the eye of each row to see where it renders on your character, pick the row(s) the baked decal uses, then extract. The decal is moved onto free colorset slots of its own — the original texels are filled with the surrounding garment — so it can be recolored and repositioned without touching the rest of the gear."u8);
+
+        // Which file the analysis actually reads — a stale capture (taken before the source
+        // mod was enabled or updated) is the usual reason a baked decal does not show up.
+        var capturedPath = dTexture.Data.TextureSourcePaths.GetValueOrDefault(option.GamePath);
+        var cleanedFile  = filenames.ExtractedSourceFile(dTexture.Identifier, option.GamePath);
+        var sourceLabel = capturedPath switch
+        {
+            null => "unresolved — falling back to the vanilla game file",
+            ""   => "vanilla game file",
+            _ when string.Equals(capturedPath, cleanedFile, StringComparison.OrdinalIgnoreCase)
+                 => "cleaned copy (extracted decals removed)",
+            _ => Path.GetFileName(capturedPath),
+        };
+        ImUtf8.Text($"Analyzing id map: {sourceLabel}");
+        if (capturedPath is { Length: > 0 } && ImGui.IsItemHovered())
+            ImUtf8.HoverTooltip(capturedPath);
+        ImGui.SameLine();
+        if (ImUtf8.SmallButton("Reload Source"u8))
+        {
+            dTexture.Data.TextureSourcePaths.Remove(option.GamePath);
+            _statsTexture = string.Empty;
+            previewCache.Invalidate(dTexture.Identifier, option.GamePath);
+            // With extractions present, rebase them onto the fresh capture and rebuild the
+            // cleaned copy — otherwise the redirect to it would just be dropped.
+            var fresh = overlayMods.GetOrCaptureTextureSource(dTexture, option.GamePath);
+            var extracted = dTexture.Data.Textures.GetValueOrDefault(option.GamePath)?.OfType<DecalLayer>()
+                    .Where(l => l.Extracted).ToList()
+             ?? [];
+            if (extracted.Count > 0)
+            {
+                foreach (var l in extracted)
+                    l.PreExtractionSource = fresh ?? string.Empty;
+                RegenerateCleanedSource(dTexture, option.GamePath);
+            }
+
+            saveService.QueueSave(dTexture);
+        }
+
+        ImUtf8.HoverTooltip(
+            "Drop the stored source capture and resolve the id map again from the currently active mods.\nUse this when the analyzed file is not the one your mod actually ships (e.g. the capture predates enabling or updating the source mod)."u8);
+
+        EnsureIdStats(dTexture, option.GamePath);
+        if (_rowUsageCounts.Count == 0)
+        {
+            ImUtf8.Text("No id-map statistics available for this texture."u8);
+            return;
+        }
+
+        var claimedRows = ClaimedRowsForMaterial(dTexture, option.MaterialGamePath, null);
+        _extractRows.RemoveWhere(claimedRows.Contains);
+        var rowDiffuse  = MaterialEditApplier.ResolveRowDiffuse(option.Mtrl, null);
+        var totalTexels = Math.Max(1, _rowUsageCounts.Values.Sum());
+
+        // Small regions first — a baked decal is usually a small fraction of the garment.
+        foreach (var (row, count) in _rowUsageCounts.OrderBy(kvp => kvp.Value))
+        {
+            using var id      = ImUtf8.PushId(row);
+            var       claimed = claimedRows.Contains(row);
+            var       picked  = _extractRows.Contains(row);
+            using (ImRaii.Disabled(claimed))
+            {
+                if (ImUtf8.Checkbox($"Row {RowName(row)}", ref picked))
+                {
+                    if (picked)
+                        _extractRows.Add(row);
+                    else
+                        _extractRows.Remove(row);
+                }
+            }
+
+            ImGui.SameLine();
+            var color = rowDiffuse == null ? Vector3.One : rowDiffuse[row];
+            ImGui.ColorButton("##rowColor",
+                new Vector4(Math.Clamp(color.X, 0f, 1f), Math.Clamp(color.Y, 0f, 1f), Math.Clamp(color.Z, 0f, 1f), 1f));
+            ImGui.SameLine();
+            ImUtf8.Text($"{count} texels ({100f * count / totalTexels:F1}%){(claimed ? "  — claimed by a decal layer" : string.Empty)}");
+            ImGui.SameLine();
+            ImUtf8.IconButton(Dalamud.Interface.FontAwesomeIcon.Eye,
+                "Highlights where this row dominantly renders on the character while hovered (redraws your character).\nA baked decal usually lives on a row the garment itself barely uses — often a slot's B half."u8);
+            if (ImGui.IsItemHovered())
+            {
+                _highlightHovered = true;
+                highlighter.Highlight(option.MaterialGamePath, option.Mtrl, row);
+            }
+        }
+
+        ImUtf8.Checkbox("Largest Connected Region Only"u8, ref _extractLargestOnly);
+        ImUtf8.HoverTooltip(
+            "Keep only the biggest connected patch of the selected rows.\nUseful when a row also covers unrelated texels elsewhere (a B half additionally catches the garment's deepest baked shading) — but turn it OFF if the decal itself is smaller than those other patches."u8);
+
+        if (ImUtf8.Button("Extract Selected Rows as Decal"u8) && _extractRows.Count > 0)
+            ExtractDecal(dTexture, option, table);
+        if (_extractRows.Count == 0)
+            ImUtf8.HoverTooltip("Select at least one row above first."u8);
+
+        if (_extractStatus.Length > 0)
+            ImUtf8.TextWrapped(_extractStatus);
+    }
+
+    private void ExtractDecal(DTexture dTexture, TextureOption option, ColorTable table)
+    {
+        _extractStatus = string.Empty;
+
+        var diskPath = overlayMods.GetOrCaptureTextureSource(dTexture, option.GamePath);
+        if (diskPath is { Length: 0 })
+            diskPath = null; // vanilla
+
+        var decoded    = textureIO.Load(option.GamePath, diskPath, null);
+        var rowDiffuse = MaterialEditApplier.ResolveRowDiffuse(option.Mtrl, null);
+        if (decoded == null || rowDiffuse == null)
+        {
+            _extractStatus = "Could not load the id map or its colorset.";
+            return;
+        }
+
+        var extraction = ColorsetDecalExtractor.Extract(decoded, _extractRows, rowDiffuse, _extractLargestOnly);
+        if (extraction == null)
+        {
+            _extractStatus = "The selected rows cover no texels — nothing to extract.";
+            return;
+        }
+
+        // The extracted content moves onto freshly claimed slots: its source rows may be
+        // shared with the garment (decal on 3B, cloth on 3A), so keeping them would couple
+        // every recolor to the gear. One whole free pair per source row, like any decal.
+        EnsureIdStats(dTexture, option.GamePath);
+        var others     = ClaimedRowsForMaterial(dTexture, option.MaterialGamePath, null);
+        var allocation = ColorRowAllocator.Allocate(extraction.Rows.Count, _usedRowPairs, others);
+        if (!allocation.Success)
+        {
+            _extractStatus = allocation.Error!;
+            return;
+        }
+
+        DecalEntry? entry;
+        using (var stamp = extraction.Stamp)
+        {
+            entry = decals.ImportGenerated(stamp, $"{option.MaterialLabel} — extracted decal");
+        }
+
+        if (entry == null)
+        {
+            _extractStatus = "Could not save the extracted stamp image.";
+            return;
+        }
+
+        CaptureTextureSource(dTexture, option.GamePath);
+        if (!dTexture.Data.Textures.TryGetValue(option.GamePath, out var layers))
+        {
+            layers                                   = [];
+            dTexture.Data.Textures[option.GamePath] = layers;
+        }
+
+        var layer = new DecalLayer
+        {
+            DecalId             = entry.Id,
+            IdRemap             = true,
+            Extracted           = true,
+            WriteBlendFromAlpha = true,
+            PaletteColors       = extraction.RowColors.ToList(),
+            PaletteRows         = allocation.Rows,
+            MaxColors           = extraction.Rows.Count,
+            FillPair            = extraction.FillPair,
+            FillBlend           = extraction.FillBlend,
+            SourceU             = (float)extraction.X / extraction.MapWidth,
+            SourceV             = (float)extraction.Y / extraction.MapHeight,
+            SourceUW            = (float)extraction.W / extraction.MapWidth,
+            SourceUH            = (float)extraction.H / extraction.MapHeight,
+            Surface             = false,
+        };
+        // Texel-exact original placement, so the restamp lands exactly on the erased region.
+        layer.PosU   = layer.SourceU + layer.SourceUW / 2f;
+        layer.PosV   = layer.SourceV + layer.SourceUH / 2f;
+        layer.ScaleX = layer.SourceUW;
+        layer.ScaleY = layer.SourceUH;
+
+        // The texture's source becomes a cleaned copy with the decal removed; the original
+        // is remembered so removing the extraction returns the source to the base mod. A
+        // second extraction on the same texture shares the first one's true base.
+        layer.PreExtractionSource = layers.OfType<DecalLayer>()
+                .FirstOrDefault(l => l is { Extracted: true, PreExtractionSource: not null })?.PreExtractionSource
+         ?? dTexture.Data.TextureSourcePaths.GetValueOrDefault(option.GamePath)
+         ?? string.Empty;
+        layers.Add(layer);
+        RegenerateCleanedSource(dTexture, option.GamePath);
+
+        // Seed each claimed slot from its SOURCE row so the decal keeps its authored look
+        // (specular, roughness, tile — everything, not just the color); the slot's B half
+        // becomes the standard darkened shade partner for benign edge blends.
+        var edit = GetOrAddMaterialEdit(dTexture, option);
+        for (var i = 0; i < allocation.Rows.Count; ++i)
+        {
+            var newRow = allocation.Rows[i];
+            var srcRow = extraction.Rows[i];
+            edit.Rows.Remove(newRow);
+            edit.Rows.Remove(newRow + 1);
+
+            var seededA = ColorRowEdit.FromRow(newRow, table[srcRow]);
+            seededA.DyeMode    = ColorRowEdit.RowDyeMode.Disable;
+            edit.Rows[newRow]  = seededA;
+
+            var seededB = ColorRowEdit.FromRow(newRow + 1, table[srcRow]);
+            seededB.Diffuse        = [seededA.Diffuse[0] * ShadeFactor, seededA.Diffuse[1] * ShadeFactor, seededA.Diffuse[2] * ShadeFactor];
+            seededB.DyeMode        = ColorRowEdit.RowDyeMode.Disable;
+            edit.Rows[newRow + 1]  = seededB;
+        }
+
+        _extractRows.Clear();
+        _extractStatus =
+            $"Extracted {extraction.Rows.Count} row(s) into decal \"{entry.Name}\" ({extraction.W}x{extraction.H} texels), "
+          + $"relocated onto slot(s) {string.Join(", ", allocation.Rows.Select(r => r / 2 + 1))}. "
+          + "The texture's source is now a cleaned copy with the decal removed — anything left behind shows in the row list above.";
+        DynamicTextureManager.Log.Information(
+            $"Extracted colorset decal from {option.GamePath}: rows [{string.Join(", ", extraction.Rows.Select(RowName))}] -> "
+          + $"slots [{string.Join(", ", allocation.Rows.Select(r => r / 2 + 1))}], "
+          + $"rect {extraction.X},{extraction.Y} {extraction.W}x{extraction.H}, fill pair {extraction.FillPair + 1} blend {extraction.FillBlend}.");
+        Save(dTexture);
     }
 
     /// <summary>
-    /// Surface decals cannot be shown as draggable rectangles — their shape depends on the
-    /// mesh. Instead the preview image itself is re-baked (debounced) with all enabled
-    /// surface layers so the projected result, including seam crossings, is visible.
+    /// Rebuild the cleaned source copy of a texture: its true base (the source before any
+    /// extraction) with every extracted decal's footprint erased, written next to the config
+    /// and set as the texture's captured source. Builds and previews then start from a map
+    /// that no longer contains the extracted decals.
     /// </summary>
-    private void UpdateSurfacePreview(DTexture dTexture)
+    private void RegenerateCleanedSource(DTexture dTexture, string gamePath)
     {
-        if (!_surfaceBakeDirty || _previewDecoded == null)
-            return;
-        if (Environment.TickCount64 - _surfaceBakeMs < 600)
-            return;
-
-        _surfaceBakeDirty = false;
-        var surfaceLayers = dTexture.Data.Textures.GetValueOrDefault(_selectedTexture)?
-                .OfType<DecalLayer>().Where(l => l is { Enabled: true, Surface: true }).Cast<TextureLayer>().ToList()
+        var extracted = dTexture.Data.Textures.GetValueOrDefault(gamePath)?.OfType<DecalLayer>()
+                .Where(l => l is { Extracted: true, PreExtractionSource: not null }).ToList()
          ?? [];
+        if (extracted.Count == 0)
+            return;
 
-        var rgba = _previewDecoded.Rgba;
-        if (surfaceLayers.Count > 0)
+        var basePath = extracted[0].PreExtractionSource!;
+        var decoded  = textureIO.Load(gamePath, basePath.Length == 0 ? null : basePath, null);
+        if (decoded == null)
         {
-            var source = FindSelectedSource(dTexture);
-            var mesh   = source == null ? null : uvReader.GetMesh(source);
-            if (mesh != null)
-                rgba = compositor.Composite(_previewDecoded, surfaceLayers, mesh, previewHighlight: true);
+            DynamicTextureManager.Log.Warning($"Could not load the base source of {gamePath} to build its cleaned copy.");
+            return;
         }
 
-        _previewWrap?.Dispose();
-        _previewWrap = textureProvider.CreateFromRaw(RawImageSpecification.Rgba32(_previewDecoded.Width, _previewDecoded.Height),
-            rgba, $"DTM Preview {_selectedTexture}");
+        using var image = SixLabors.ImageSharp.Image.LoadPixelData<Rgba32>(decoded.Rgba, decoded.Width, decoded.Height);
+        foreach (var layer in extracted)
+            TextureCompositor.EraseExtractedFootprint(image, layer, decals.FilePath(layer.DecalId));
+
+        var file = filenames.ExtractedSourceFile(dTexture.Identifier, gamePath);
+        Directory.CreateDirectory(filenames.ExtractedDirectory);
+        image.SaveAsPng(file);
+        dTexture.Data.TextureSourcePaths[gamePath] = file;
+        _statsTexture = string.Empty;
+        previewCache.Invalidate(dTexture.Identifier, gamePath);
+        DynamicTextureManager.Log.Information(
+            $"Rebuilt cleaned source of {gamePath} from \"{(basePath.Length == 0 ? "vanilla" : basePath)}\" minus {extracted.Count} extracted decal(s).");
+    }
+
+    /// <summary>
+    /// After removing an extracted layer: regenerate the cleaned copy from the remaining
+    /// extractions, or — when it was the last one — restore the original source capture and
+    /// delete the copy, returning the texture to the base mod.
+    /// </summary>
+    private void RestoreOrRegenerateSource(DTexture dTexture, string gamePath, DecalLayer removed)
+    {
+        var remaining = dTexture.Data.Textures.GetValueOrDefault(gamePath)?.OfType<DecalLayer>()
+            .Any(l => l is { Extracted: true, PreExtractionSource: not null }) ?? false;
+        if (remaining)
+        {
+            RegenerateCleanedSource(dTexture, gamePath);
+            return;
+        }
+
+        dTexture.Data.TextureSourcePaths[gamePath] = removed.PreExtractionSource!;
+        try
+        {
+            File.Delete(filenames.ExtractedSourceFile(dTexture.Identifier, gamePath));
+        }
+        catch (Exception ex)
+        {
+            DynamicTextureManager.Log.Warning($"Could not delete the cleaned source copy of {gamePath}: {ex.Message}");
+        }
+
+        _statsTexture = string.Empty;
+        previewCache.Invalidate(dTexture.Identifier, gamePath);
+        DynamicTextureManager.Log.Information(
+            $"Removed last extraction of {gamePath} — source restored to \"{(removed.PreExtractionSource!.Length == 0 ? "vanilla" : removed.PreExtractionSource)}\".");
     }
 
     #endregion
 
-    private long _previewAttemptMs;
-
-    private IDalamudTextureWrap? GetPreviewWrap(DTexture dTexture)
-    {
-        // Retry failed loads occasionally — the source may become recoverable (e.g. after
-        // the generated mod is disabled or the source capture heals).
-        if (_previewPath == _selectedTexture
-         && (_previewWrap != null || Environment.TickCount64 - _previewAttemptMs < 2000))
-            return _previewWrap;
-
-        _previewWrap?.Dispose();
-        _previewWrap      = null;
-        _previewPath      = _selectedTexture;
-        _previewAttemptMs = Environment.TickCount64;
-
-        // The shared capture logic prefers the stored pristine source and can recover it
-        // from the source mod's file lists when our own mod already owns the resolution.
-        var diskPath = overlayMods.GetOrCaptureTextureSource(dTexture, _selectedTexture);
-        if (diskPath is { Length: 0 })
-            diskPath = null; // vanilla
-
-        var decoded = textureIO.Load(_selectedTexture, diskPath, null);
-        if (decoded == null)
-            return null;
-
-        if (_options?.Find(o => string.Equals(o.GamePath, _selectedTexture, StringComparison.OrdinalIgnoreCase))?.Slot
-            is TextureSlot.Index)
-            ComputeIdStats(decoded);
-
-        _previewDecoded   = decoded;
-        _surfaceBakeDirty = true;
-        _surfaceBakeMs    = 0;
-        _previewWrap = textureProvider.CreateFromRaw(RawImageSpecification.Rgba32(decoded.Width, decoded.Height), decoded.Rgba,
-            $"DTM Preview {_selectedTexture}");
-        return _previewWrap;
-    }
-
     /// <summary>
-    /// Id-map usage statistics for the selected texture: which row pairs it references and
-    /// how often each row actually renders (the G channel blends a pair's A row at 255 with
-    /// its B row at 0). Seeding claimed slots depends on these, so they are computed on
-    /// demand instead of waiting for the preview image to load.
+    /// Id-map usage statistics for a texture: which row pairs it references, how often each
+    /// row actually renders (the G channel blends a pair's A row at 255 with its B row at 0)
+    /// and how many texels each pair covers. Row seeding and decal extraction depend on
+    /// these, so they are computed on demand.
     /// </summary>
-    private void EnsureIdStats(DTexture dTexture)
+    private void EnsureIdStats(DTexture dTexture, string gamePath)
     {
-        if (_statsTexture == _selectedTexture)
+        if (_statsTexture == gamePath)
             return;
 
-        var diskPath = overlayMods.GetOrCaptureTextureSource(dTexture, _selectedTexture);
+        var diskPath = overlayMods.GetOrCaptureTextureSource(dTexture, gamePath);
         if (diskPath is { Length: 0 })
             diskPath = null; // vanilla
 
-        var decoded = textureIO.Load(_selectedTexture, diskPath, null);
+        var decoded = textureIO.Load(gamePath, diskPath, null);
         if (decoded == null)
         {
             // Leave the stats empty but marked current — seeding falls back to the first
-            // authored row, and a successful preview load recomputes them.
-            _statsTexture = _selectedTexture;
+            // authored row, and a later successful load recomputes them.
+            _statsTexture = gamePath;
             _usedRowPairs.Clear();
             _rowUsageCounts.Clear();
             return;
         }
 
-        ComputeIdStats(decoded);
+        ComputeIdStats(gamePath, decoded);
     }
 
-    private void ComputeIdStats(DecodedTexture decoded)
+    private void ComputeIdStats(string gamePath, DecodedTexture decoded)
     {
-        _statsTexture = _selectedTexture;
+        _statsTexture = gamePath;
         _usedRowPairs.Clear();
         _rowUsageCounts.Clear();
         for (var i = 0; i < decoded.Rgba.Length; i += 4)
@@ -1578,6 +1702,10 @@ public sealed class TexturesTab(
     private void Save(DTexture dTexture)
     {
         dTexture.LastEdit = DateTimeOffset.UtcNow;
+        previewCache.Invalidate(dTexture.Identifier);
+        _rowDiffuseDirty = true;
+        ++_editCounter;
+        _lastEditMs = Environment.TickCount64;
         saveService.DelaySave(dTexture);
         overlayMods.QueueAutoApply(dTexture);
     }

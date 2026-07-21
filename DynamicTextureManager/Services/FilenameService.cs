@@ -14,6 +14,7 @@ public class FilenameService
     public readonly string DTextureDirectory;
     public readonly string DecalDirectory;
     public readonly string DecalIndexFile;
+    public readonly string ExtractedDirectory;
 
     public FilenameService(IDalamudPluginInterface pi)
     {
@@ -24,10 +25,19 @@ public class FilenameService
         DTextureDirectory        = Path.Combine(ConfigDirectory, "textures");
         DecalDirectory           = Path.Combine(ConfigDirectory, "decals");
         DecalIndexFile           = Path.Combine(ConfigDirectory, "decals.json");
+        ExtractedDirectory       = Path.Combine(ConfigDirectory, "extracted");
     }
 
     public string DecalFile(System.Guid id)
         => Path.Combine(DecalDirectory, $"{id}.png");
+
+    /// <summary> The cleaned source copy of a texture whose baked decals were extracted, one per dTexture and game path. </summary>
+    public string ExtractedSourceFile(System.Guid dTexture, string gamePath)
+    {
+        var hash = System.Convert.ToHexString(
+            System.Security.Cryptography.SHA1.HashData(System.Text.Encoding.UTF8.GetBytes(gamePath.ToLowerInvariant())))[..16];
+        return Path.Combine(ExtractedDirectory, $"{dTexture:N}_{hash}.png");
+    }
 
     public IEnumerable<FileInfo> DTextures()
     {
