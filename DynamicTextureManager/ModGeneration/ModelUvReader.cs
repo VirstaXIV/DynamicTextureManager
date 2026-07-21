@@ -139,6 +139,22 @@ public sealed class ModelUvReader(IDataManager dataManager) : IService
         return dataManager.GetFile(source.MdlGamePath)?.Data;
     }
 
+    /// <summary>
+    /// Map a UV into the base 0..1 tile. The game samples textures with wrap, and modded
+    /// models sometimes place their UV islands in a different tile (e.g. V in -1..0) — raw
+    /// values would draw seams and bake decals outside the texture. Exact integer values on
+    /// a tile's far edge map to 1 so islands touching that edge stay intact; only triangles
+    /// genuinely crossing a tile boundary (rare in gear) cannot be represented after wrapping.
+    /// </summary>
+    private static Vector2 WrapUv(Vector2 uv)
+        => new(WrapCoord(uv.X), WrapCoord(uv.Y));
+
+    private static float WrapCoord(float x)
+    {
+        var wrapped = x - MathF.Floor(x);
+        return wrapped == 0f && x >= 1f ? 1f : wrapped;
+    }
+
     /// <summary> Extract the LOD-0 geometry of all meshes using the material. </summary>
     private static MaterialMesh? ReadMesh(MdlFile mdl, string materialFileName, string mdlGamePath)
     {
@@ -175,7 +191,7 @@ public sealed class ModelUvReader(IDataManager dataManager) : IService
             {
                 positions.Add(vertex.Position);
                 normals.Add(vertex.Normal);
-                uvs.Add(vertex.Uv);
+                uvs.Add(WrapUv(vertex.Uv));
             }
 
             // Submesh attribute masks let the picker skip variant geometry the game hides.
