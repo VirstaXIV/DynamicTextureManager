@@ -18,6 +18,12 @@ public class Configuration: IPluginConfiguration, ISavable
 {
     public bool OpenFoldersByDefault { get; set; } = false;
     public bool AutoReload { get; set; } = true;
+    public int OverlayPriority { get; set; } = 999;
+    public bool LivePreview { get; set; } = true;
+    public bool DeleteModWithDTexture { get; set; } = true;
+    public bool ShowAllTextures { get; set; } = false;
+    public int DefaultDecalMaxColors { get; set; } = 6;
+    public bool ShowUvSeams { get; set; } = true;
     public Guid SelectedDTexture { get; set; } = Guid.Empty;
     public float CurrentDTextureSelectorWidth { get; set; } = 200f;
     public float DTMSelectorMinimumScale { get; set; } = 0.1f;

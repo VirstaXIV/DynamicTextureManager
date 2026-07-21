@@ -1,4 +1,4 @@
-﻿
+
 Microsoft Visual Studio Solution File, Format Version 12.00
 # Visual Studio Version 16
 VisualStudioVersion = 16.0.29709.97
@@ -6,6 +6,16 @@ MinimumVisualStudioVersion = 10.0.40219.1
 Project("{FAE04EC0-301F-11D3-BF4B-00C04F79EFBC}") = "DynamicTextureManager", "DynamicTextureManager\DynamicTextureManager.csproj", "{13C812E9-0D42-4B95-8646-40EEBF30636F}"
 EndProject
 Project("{FAE04EC0-301F-11D3-BF4B-00C04F79EFBC}") = "OtterGui", "OtterGui\OtterGui.csproj", "{11FC1896-136B-4831-A83C-95496BD7F1B4}"
+EndProject
+Project("{FAE04EC0-301F-11D3-BF4B-00C04F79EFBC}") = "Penumbra.String", "Penumbra.String\Penumbra.String.csproj", "{312A2240-D8E3-48FC-A17A-2052E074D2CE}"
+EndProject
+Project("{FAE04EC0-301F-11D3-BF4B-00C04F79EFBC}") = "Penumbra.Api", "Penumbra.Api\Penumbra.Api.csproj", "{7AD45307-4FAA-402E-8E87-676B3582CBE8}"
+EndProject
+Project("{FAE04EC0-301F-11D3-BF4B-00C04F79EFBC}") = "Penumbra.GameData", "Penumbra.GameData\Penumbra.GameData.csproj", "{8F0A934A-EF5B-4778-9656-558867D99F85}"
+EndProject
+Project("{FAE04EC0-301F-11D3-BF4B-00C04F79EFBC}") = "Luna", "Luna\Luna\Luna.csproj", "{2649EA37-3141-407C-A1EC-762772EE1744}"
+EndProject
+Project("{FAE04EC0-301F-11D3-BF4B-00C04F79EFBC}") = "Luna.Generators", "Luna\Luna.Generators\Luna.Generators.csproj", "{2950B6D5-6D76-46A2-A116-A39FE3AB027F}"
 EndProject
 Global
 	GlobalSection(SolutionConfigurationPlatforms) = preSolution
@@ -17,14 +27,30 @@ Global
 		{13C812E9-0D42-4B95-8646-40EEBF30636F}.Debug|x64.Build.0 = Debug|x64
 		{13C812E9-0D42-4B95-8646-40EEBF30636F}.Release|x64.ActiveCfg = Release|x64
 		{13C812E9-0D42-4B95-8646-40EEBF30636F}.Release|x64.Build.0 = Release|x64
-		{4FEC9558-EB25-419F-B86E-51B8CFDA32B7}.Debug|x64.ActiveCfg = Debug|x64
-		{4FEC9558-EB25-419F-B86E-51B8CFDA32B7}.Debug|x64.Build.0 = Debug|x64
-		{4FEC9558-EB25-419F-B86E-51B8CFDA32B7}.Release|x64.ActiveCfg = Release|x64
-		{4FEC9558-EB25-419F-B86E-51B8CFDA32B7}.Release|x64.Build.0 = Release|x64
 		{11FC1896-136B-4831-A83C-95496BD7F1B4}.Debug|x64.ActiveCfg = Debug|x64
 		{11FC1896-136B-4831-A83C-95496BD7F1B4}.Debug|x64.Build.0 = Debug|x64
 		{11FC1896-136B-4831-A83C-95496BD7F1B4}.Release|x64.ActiveCfg = Release|x64
 		{11FC1896-136B-4831-A83C-95496BD7F1B4}.Release|x64.Build.0 = Release|x64
+		{312A2240-D8E3-48FC-A17A-2052E074D2CE}.Debug|x64.ActiveCfg = Debug|x64
+		{312A2240-D8E3-48FC-A17A-2052E074D2CE}.Debug|x64.Build.0 = Debug|x64
+		{312A2240-D8E3-48FC-A17A-2052E074D2CE}.Release|x64.ActiveCfg = Release|x64
+		{312A2240-D8E3-48FC-A17A-2052E074D2CE}.Release|x64.Build.0 = Release|x64
+		{7AD45307-4FAA-402E-8E87-676B3582CBE8}.Debug|x64.ActiveCfg = Debug|x64
+		{7AD45307-4FAA-402E-8E87-676B3582CBE8}.Debug|x64.Build.0 = Debug|x64
+		{7AD45307-4FAA-402E-8E87-676B3582CBE8}.Release|x64.ActiveCfg = Release|x64
+		{7AD45307-4FAA-402E-8E87-676B3582CBE8}.Release|x64.Build.0 = Release|x64
+		{8F0A934A-EF5B-4778-9656-558867D99F85}.Debug|x64.ActiveCfg = Debug|x64
+		{8F0A934A-EF5B-4778-9656-558867D99F85}.Debug|x64.Build.0 = Debug|x64
+		{8F0A934A-EF5B-4778-9656-558867D99F85}.Release|x64.ActiveCfg = Release|x64
+		{8F0A934A-EF5B-4778-9656-558867D99F85}.Release|x64.Build.0 = Release|x64
+		{2649EA37-3141-407C-A1EC-762772EE1744}.Debug|x64.ActiveCfg = Debug|x64
+		{2649EA37-3141-407C-A1EC-762772EE1744}.Debug|x64.Build.0 = Debug|x64
+		{2649EA37-3141-407C-A1EC-762772EE1744}.Release|x64.ActiveCfg = Release|x64
+		{2649EA37-3141-407C-A1EC-762772EE1744}.Release|x64.Build.0 = Release|x64
+		{2950B6D5-6D76-46A2-A116-A39FE3AB027F}.Debug|x64.ActiveCfg = Debug|x64
+		{2950B6D5-6D76-46A2-A116-A39FE3AB027F}.Debug|x64.Build.0 = Debug|x64
+		{2950B6D5-6D76-46A2-A116-A39FE3AB027F}.Release|x64.ActiveCfg = Release|x64
+		{2950B6D5-6D76-46A2-A116-A39FE3AB027F}.Release|x64.Build.0 = Release|x64
 	EndGlobalSection
 	GlobalSection(SolutionProperties) = preSolution
 		HideSolutionNode = FALSE

@@ -12,6 +12,8 @@ public class FilenameService
     public readonly string DTextureFileSystem;
     public readonly string MigrationDTextureFile;
     public readonly string DTextureDirectory;
+    public readonly string DecalDirectory;
+    public readonly string DecalIndexFile;
 
     public FilenameService(IDalamudPluginInterface pi)
     {
@@ -20,7 +22,12 @@ public class FilenameService
         DTextureFileSystem       = Path.Combine(ConfigDirectory, "sort_order.json");
         MigrationDTextureFile    = Path.Combine(ConfigDirectory, "textures.json");
         DTextureDirectory        = Path.Combine(ConfigDirectory, "textures");
+        DecalDirectory           = Path.Combine(ConfigDirectory, "decals");
+        DecalIndexFile           = Path.Combine(ConfigDirectory, "decals.json");
     }
+
+    public string DecalFile(System.Guid id)
+        => Path.Combine(DecalDirectory, $"{id}.png");
 
     public IEnumerable<FileInfo> DTextures()
     {
