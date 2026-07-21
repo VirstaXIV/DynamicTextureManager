@@ -9,30 +9,43 @@ using DynamicTextureManager.DTextures;
 using DynamicTextureManager.DTextures.Data;
 using DynamicTextureManager.ModGeneration;
 using OtterGui.Text;
+using SixLabors.ImageSharp.PixelFormats;
 
 namespace DynamicTextureManager.UI.Panels;
 
 /// <summary>
-/// A 3D viewport window for placing surface decals: the gear mesh is software-rendered in
-/// its bind pose — the exact space the bake works in — so picking is exact by construction,
-/// independent of the live character's pose, race or body modifications. Left-drag stamps
-/// and moves the decal (rendered live on the mesh), right-drag orbits, middle-drag pans,
-/// wheel zooms, Ctrl+wheel resizes the decal and Shift+wheel rotates it.
+/// Everything the viewport samples to shade the mesh with the material's real look: the
+/// composited diffuse, the composited id map and the 32 resolved colorset row diffuse
+/// colors (the dTexture's edits applied). Any part may be null and falls back to gray.
+/// </summary>
+public sealed record ViewportShading(DecodedTexture? Diffuse, DecodedTexture? IdMap, Vector3[]? RowDiffuse);
+
+/// <summary>
+/// The 3D preview of the selected material: the gear mesh software-rendered in its bind
+/// pose — the exact space the bake works in — shaded with the composited textures and the
+/// live colorset colors, so it doubles as the main preview of the decals in their set
+/// colors. Binding a decal layer turns it into placement mode: left-drag stamps and moves
+/// the decal, Ctrl+wheel resizes it and Shift+wheel rotates it. Right-drag orbits,
+/// middle-drag pans, wheel zooms. Renders embedded in the Decals tab or popped out.
 /// </summary>
 public sealed class DecalViewport(ITextureProvider textureProvider) : IDisposable
 {
     private const int RenderSize = 768;
 
     private bool          _open;
+    private bool          _poppedOut;
     private DTexture?     _dTexture;
     private DecalLayer?   _layer;
     private MaterialMesh? _mesh;
     private uint          _visibleAttributes = uint.MaxValue;
     private Action?       _onChanged;
 
-    private byte[]? _decalRgba;
-    private int     _decalWidth;
-    private int     _decalHeight;
+    private ViewportShading? _shading;
+    private bool             _highlightDecal;
+
+    private Rgba32[]? _decalPixels;
+    private int       _decalWidth;
+    private int       _decalHeight;
 
     private float   _yaw      = 0.3f;
     private float   _pitch    = 0.1f;
@@ -47,39 +60,93 @@ public sealed class DecalViewport(ITextureProvider textureProvider) : IDisposabl
     public void Dispose()
         => _wrap?.Dispose();
 
+    public bool IsOpen
+        => _open;
+
     public bool IsOpenFor(DecalLayer layer)
         => _open && ReferenceEquals(_layer, layer);
 
-    public void Open(DTexture dTexture, DecalLayer layer, MaterialMesh mesh, uint visibleAttributes, string decalPath, Action onChanged)
-    {
-        _dTexture          = dTexture;
-        _layer             = layer;
-        _mesh              = mesh;
-        _visibleAttributes = visibleAttributes;
-        _onChanged         = onChanged;
-        _open              = true;
-        _renderDirty       = true;
+    /// <summary> The layer currently bound for placement, null in view mode. </summary>
+    public DecalLayer? PlacementLayer
+        => _open ? _layer : null;
 
+    /// <summary>
+    /// Show the viewport for a material's mesh in view mode. Idempotent per frame: the
+    /// camera and any bound placement layer survive as long as the mesh stays the same.
+    /// </summary>
+    public void Open(DTexture dTexture, MaterialMesh mesh, uint visibleAttributes)
+    {
+        var changed = !ReferenceEquals(_mesh, mesh) || !ReferenceEquals(_dTexture, dTexture);
+        _dTexture = dTexture;
+        if (_visibleAttributes != visibleAttributes)
+            _renderDirty = true;
+        _visibleAttributes = visibleAttributes;
+        if (changed)
+        {
+            _mesh        = mesh;
+            _layer       = null;
+            _onChanged   = null;
+            _renderDirty = true;
+            FrameCamera();
+        }
+
+        _open = true;
+    }
+
+    /// <summary> Bind a decal layer for interactive placement on the currently shown mesh. </summary>
+    public void BeginPlacement(DecalLayer layer, string decalPath, Action onChanged)
+    {
+        _layer       = layer;
+        _onChanged   = onChanged;
+        _renderDirty = true;
         LoadDecal(decalPath);
-        FrameCamera();
+    }
+
+    /// <summary> Return to view mode, committing any pending placement edit. </summary>
+    public void EndPlacement()
+    {
+        if (_editDirty)
+        {
+            _editDirty = false;
+            _onChanged?.Invoke();
+        }
+
+        _layer       = null;
+        _onChanged   = null;
+        _renderDirty = true;
+    }
+
+    /// <summary> Swap in new shading buffers; re-renders only when something actually changed. </summary>
+    public void UpdateShading(ViewportShading? shading)
+    {
+        if (ReferenceEquals(_shading?.Diffuse, shading?.Diffuse)
+         && ReferenceEquals(_shading?.IdMap, shading?.IdMap)
+         && ReferenceEquals(_shading?.RowDiffuse, shading?.RowDiffuse))
+            return;
+
+        _shading     = shading;
+        _renderDirty = true;
     }
 
     public void Close()
-        => _open = false;
+    {
+        EndPlacement();
+        _open = false;
+    }
 
     private void LoadDecal(string path)
     {
-        _decalRgba = null;
+        _decalPixels = null;
         try
         {
             if (!File.Exists(path))
                 return;
 
-            using var image = SixLabors.ImageSharp.Image.Load<SixLabors.ImageSharp.PixelFormats.Rgba32>(path);
+            using var image = SixLabors.ImageSharp.Image.Load<Rgba32>(path);
             _decalWidth  = image.Width;
             _decalHeight = image.Height;
-            _decalRgba   = new byte[image.Width * image.Height * 4];
-            image.CopyPixelDataTo(_decalRgba);
+            _decalPixels = new Rgba32[image.Width * image.Height];
+            image.CopyPixelDataTo(_decalPixels);
         }
         catch (Exception ex)
         {
@@ -105,27 +172,40 @@ public sealed class DecalViewport(ITextureProvider textureProvider) : IDisposabl
         _pitch    = 0.1f;
     }
 
-    /// <summary> Draw the window; call every frame. Closes itself when the layer disappears. </summary>
+    /// <summary> Draw embedded in the current layout, or as a separate window when popped out. Call every frame. </summary>
     public void Draw(DTexture current)
     {
-        if (!_open || _layer == null || _mesh == null || _dTexture == null)
+        if (!_open || _mesh == null || _dTexture == null)
             return;
 
-        // The viewport belongs to one dTexture and one layer — close if the selection moved on.
+        // The viewport belongs to one dTexture — close if the selection moved on.
         if (!ReferenceEquals(current, _dTexture))
         {
-            _open = false;
+            Close();
             return;
         }
 
-        ImGui.SetNextWindowSize(new Vector2(820, 900) * ImUtf8.GlobalScale, ImGuiCond.FirstUseEver);
-        var open = _open;
-        if (ImGui.Begin("Decal Placement — 3D View###dtmDecalViewport", ref open))
-            DrawContent();
-        ImGui.End();
-        _open = open;
+        if (_poppedOut)
+        {
+            ImGui.SetNextWindowSize(new Vector2(820, 900) * ImUtf8.GlobalScale, ImGuiCond.FirstUseEver);
+            var open = true;
+            if (ImGui.Begin("3D Preview###dtmDecalViewport", ref open))
+                DrawContent();
+            ImGui.End();
+            if (!open)
+                _poppedOut = false;
+        }
+        else
+        {
+            var avail  = ImGui.GetContentRegionAvail();
+            var height = MathF.Max(340f * ImUtf8.GlobalScale, avail.Y);
+            using var child = ImUtf8.Child("##viewportChild"u8, new Vector2(avail.X, height), true);
+            if (child)
+                DrawContent();
+        }
 
-        if (!_open && _editDirty)
+        // Commit once per completed interaction even if the mouse left the canvas.
+        if (_editDirty && !ImGui.IsMouseDown(ImGuiMouseButton.Left) && !ImGui.IsAnyItemActive())
         {
             _editDirty = false;
             _onChanged?.Invoke();
@@ -134,36 +214,18 @@ public sealed class DecalViewport(ITextureProvider textureProvider) : IDisposabl
 
     private void DrawContent()
     {
-        if (_layer == null || _mesh == null)
+        if (_mesh == null)
             return;
 
-        ImUtf8.Text("Left-drag: place/move decal.  Right-drag: orbit.  Middle-drag: pan.  Wheel: zoom, Ctrl+wheel: decal size, Shift+wheel: decal rotation."u8);
-
-        var widthCm = _layer.WorldWidth * 100f;
-        ImGui.SetNextItemWidth(150 * ImUtf8.GlobalScale);
-        if (ImUtf8.Slider("Width (cm)"u8, ref widthCm, "%.1f"u8, 1f, 100f))
-        {
-            _layer.WorldWidth = widthCm / 100f;
-            MarkEdited();
-        }
-
+        if (ImUtf8.SmallButton(_poppedOut ? "Embed"u8 : "Pop Out"u8))
+            _poppedOut = !_poppedOut;
+        ImUtf8.HoverTooltip("Move the 3D preview between the Decals tab and its own resizable window."u8);
         ImGui.SameLine();
-        var heightCm = _layer.WorldHeight * 100f;
-        ImGui.SetNextItemWidth(150 * ImUtf8.GlobalScale);
-        if (ImUtf8.Slider("Height (cm)"u8, ref heightCm, "%.1f"u8, 1f, 100f))
-        {
-            _layer.WorldHeight = heightCm / 100f;
-            MarkEdited();
-        }
 
-        ImGui.SameLine();
-        ImGui.SetNextItemWidth(150 * ImUtf8.GlobalScale);
-        var rotation = _layer.RotationDeg;
-        if (ImUtf8.Slider("Rotation"u8, ref rotation, "%.0f°"u8, -180f, 180f))
-        {
-            _layer.RotationDeg = rotation;
-            MarkEdited();
-        }
+        if (_layer != null)
+            DrawPlacementControls(_layer);
+        else
+            ImUtf8.Text("Right-drag: orbit.  Middle-drag: pan.  Wheel: zoom.  Add or place a decal to stamp on the mesh."u8);
 
         var avail = ImGui.GetContentRegionAvail();
         var size  = MathF.Max(200f, MathF.Min(avail.X, avail.Y));
@@ -182,6 +244,47 @@ public sealed class DecalViewport(ITextureProvider textureProvider) : IDisposabl
         HandleInput(start, size);
     }
 
+    private void DrawPlacementControls(DecalLayer layer)
+    {
+        ImUtf8.Text("Left-drag: place/move decal.  Right-drag: orbit.  Middle-drag: pan.  Wheel: zoom, Ctrl+wheel: decal size, Shift+wheel: decal rotation."u8);
+
+        var widthCm = layer.WorldWidth * 100f;
+        ImGui.SetNextItemWidth(130 * ImUtf8.GlobalScale);
+        if (ImUtf8.Slider("Width (cm)"u8, ref widthCm, "%.1f"u8, 1f, 100f))
+        {
+            layer.WorldWidth = widthCm / 100f;
+            MarkEdited();
+        }
+
+        ImGui.SameLine();
+        var heightCm = layer.WorldHeight * 100f;
+        ImGui.SetNextItemWidth(130 * ImUtf8.GlobalScale);
+        if (ImUtf8.Slider("Height (cm)"u8, ref heightCm, "%.1f"u8, 1f, 100f))
+        {
+            layer.WorldHeight = heightCm / 100f;
+            MarkEdited();
+        }
+
+        ImGui.SameLine();
+        ImGui.SetNextItemWidth(130 * ImUtf8.GlobalScale);
+        var rotation = layer.RotationDeg;
+        if (ImUtf8.Slider("Rotation"u8, ref rotation, "%.0f°"u8, -180f, 180f))
+        {
+            layer.RotationDeg = rotation;
+            MarkEdited();
+        }
+
+        ImGui.SameLine();
+        if (ImUtf8.Checkbox("Highlight"u8, ref _highlightDecal))
+            _renderDirty = true;
+        ImUtf8.HoverTooltip("Render the decal as a bright orange footprint instead of its real colors — easier to find on busy textures."u8);
+
+        ImGui.SameLine();
+        if (ImUtf8.SmallButton("Done"u8))
+            EndPlacement();
+        ImUtf8.HoverTooltip("Finish placing this decal and return the preview to view mode."u8);
+    }
+
     private void MarkEdited()
     {
         _renderDirty = true;
@@ -190,7 +293,7 @@ public sealed class DecalViewport(ITextureProvider textureProvider) : IDisposabl
 
     private void HandleInput(Vector2 start, float size)
     {
-        if (_layer == null || _mesh == null)
+        if (_mesh == null)
             return;
 
         var hovered = ImGui.IsItemHovered();
@@ -198,14 +301,14 @@ public sealed class DecalViewport(ITextureProvider textureProvider) : IDisposabl
 
         if (hovered && io.MouseWheel != 0f)
         {
-            if (io.KeyCtrl)
+            if (io.KeyCtrl && _layer != null)
             {
                 var factor = 1f + io.MouseWheel * 0.1f;
                 _layer.WorldWidth  = Math.Clamp(_layer.WorldWidth * factor, 0.01f, 2f);
                 _layer.WorldHeight = Math.Clamp(_layer.WorldHeight * factor, 0.01f, 2f);
                 MarkEdited();
             }
-            else if (io.KeyShift)
+            else if (io.KeyShift && _layer != null)
             {
                 var rotation = _layer.RotationDeg + io.MouseWheel * 5f;
                 _layer.RotationDeg = rotation switch
@@ -248,7 +351,7 @@ public sealed class DecalViewport(ITextureProvider textureProvider) : IDisposabl
             }
         }
 
-        if (hovered && ImGui.IsMouseDown(ImGuiMouseButton.Left))
+        if (hovered && _layer != null && ImGui.IsMouseDown(ImGuiMouseButton.Left))
         {
             var local = (ImGui.GetMousePos() - start) / size;
             if (local is { X: >= 0f and <= 1f, Y: >= 0f and <= 1f } && TryPick(local, out var position, out var normal, out var part))
@@ -264,13 +367,6 @@ public sealed class DecalViewport(ITextureProvider textureProvider) : IDisposabl
                 _layer.SurfaceShapes     = 0;
                 MarkEdited();
             }
-        }
-
-        // Commit once per completed interaction, not per frame.
-        if (_editDirty && !ImGui.IsMouseDown(ImGuiMouseButton.Left) && io.MouseWheel == 0f && !ImGui.IsAnyItemActive())
-        {
-            _editDirty = false;
-            _onChanged?.Invoke();
         }
     }
 
@@ -372,10 +468,39 @@ public sealed class DecalViewport(ITextureProvider textureProvider) : IDisposabl
         return true;
     }
 
-    /// <summary> Software-render the mesh with the decal projected live, into a texture wrap. </summary>
+    /// <summary> The material's base color at a UV coordinate: diffuse sample times colorset row color. </summary>
+    private Vector3 SampleAlbedo(Vector2 uv)
+    {
+        var albedo = Vector3.One;
+        var shaded = false;
+        if (_shading?.Diffuse is { } diffuse)
+        {
+            var x = Math.Clamp((int)(uv.X * diffuse.Width), 0, diffuse.Width - 1);
+            var y = Math.Clamp((int)(uv.Y * diffuse.Height), 0, diffuse.Height - 1);
+            var i = (y * diffuse.Width + x) * 4;
+            albedo *= new Vector3(diffuse.Rgba[i] / 255f, diffuse.Rgba[i + 1] / 255f, diffuse.Rgba[i + 2] / 255f);
+            shaded  = true;
+        }
+
+        if (_shading is { IdMap: { } idMap, RowDiffuse: { } rows })
+        {
+            // Nearest texel: bilinear on the pair byte would blend unrelated pairs.
+            var x = Math.Clamp((int)(uv.X * idMap.Width), 0, idMap.Width - 1);
+            var y = Math.Clamp((int)(uv.Y * idMap.Height), 0, idMap.Height - 1);
+            var i = (y * idMap.Width + x) * 4;
+            var pair  = Math.Clamp((int)Math.Round(idMap.Rgba[i] / 17f), 0, 15);
+            var blend = idMap.Rgba[i + 1] / 255f;
+            albedo *= Vector3.Lerp(rows[pair * 2 + 1], rows[pair * 2], blend);
+            shaded  = true;
+        }
+
+        return shaded ? albedo : new Vector3(190f / 255f);
+    }
+
+    /// <summary> Software-render the mesh with the material's shading and the bound decal projected live. </summary>
     private void Render()
     {
-        if (_mesh == null || _layer == null)
+        if (_mesh == null)
             return;
 
         const int size = RenderSize;
@@ -394,16 +519,20 @@ public sealed class DecalViewport(ITextureProvider textureProvider) : IDisposabl
         _lastViewProjection = viewProjection;
         var eyeDirection = Vector3.Normalize(CameraOffset());
 
-        var anchored  = _layer is not { AnchorX: 0f, AnchorY: 0f, AnchorZ: 0f };
-        var anchor    = new Vector3(_layer.AnchorX, _layer.AnchorY, _layer.AnchorZ);
-        var normalDir = new Vector3(_layer.NormalX, _layer.NormalY, _layer.NormalZ);
+        var layer     = _layer;
+        var anchored  = layer is not (null or { AnchorX: 0f, AnchorY: 0f, AnchorZ: 0f });
+        var anchor    = layer == null ? Vector3.Zero : new Vector3(layer.AnchorX, layer.AnchorY, layer.AnchorZ);
+        var normalDir = layer == null ? Vector3.UnitY : new Vector3(layer.NormalX, layer.NormalY, layer.NormalZ);
         var (tangent, bitangent) = normalDir.LengthSquared() > 1e-6f
-            ? SurfaceDecalBaker.TangentFrame(Vector3.Normalize(normalDir), _layer.RotationDeg)
+            ? SurfaceDecalBaker.TangentFrame(Vector3.Normalize(normalDir), layer?.RotationDeg ?? 0f)
             : (Vector3.UnitX, Vector3.UnitZ);
         if (normalDir.LengthSquared() > 1e-6f)
             normalDir = Vector3.Normalize(normalDir);
-        var maxDepth  = MathF.Max(_layer.WorldWidth, _layer.WorldHeight) * 0.4f;
-        var threshold = (byte)Math.Clamp((int)Math.Round(_layer.AlphaThreshold * 255f), 1, 255);
+        var maxDepth  = layer == null ? 0f : MathF.Max(layer.WorldWidth, layer.WorldHeight) * 0.4f;
+        var threshold = (byte)Math.Clamp((int)Math.Round((layer?.AlphaThreshold ?? 0.5f) * 255f), 1, 255);
+        var rows      = _shading?.RowDiffuse;
+        var realColor = !_highlightDecal && layer != null
+         && (!layer.IdRemap || (rows != null && layer.PaletteRows.Count > 0 && layer.PaletteRows.Count == layer.PaletteColors.Count));
 
         Span<Vector2> screen = stackalloc Vector2[3];
         Span<float>   depths = stackalloc float[3];
@@ -447,7 +576,7 @@ public sealed class DecalViewport(ITextureProvider textureProvider) : IDisposabl
             if (minX > maxX || minY > maxY)
                 continue;
 
-            var dimmed = _layer.SurfaceLimitToPart && _layer.SurfacePart >= 0 && _mesh.TriangleParts[triangle] != _layer.SurfacePart;
+            var dimmed = layer is { SurfaceLimitToPart: true, SurfacePart: >= 0 } && _mesh.TriangleParts[triangle] != layer.SurfacePart;
 
             for (var y = minY; y <= maxY; ++y)
             {
@@ -473,44 +602,49 @@ public sealed class DecalViewport(ITextureProvider textureProvider) : IDisposabl
                         ? 0.35f + 0.65f * MathF.Abs(Vector3.Dot(Vector3.Normalize(pixelNormal), eyeDirection))
                         : 0.6f;
 
-                    var baseGray = dimmed ? 90f : 190f;
-                    var r = baseGray * light;
-                    var g = baseGray * light;
-                    var b = baseGray * light;
+                    var uv    = _mesh.Uvs[i0] * w0 + _mesh.Uvs[i1] * w1 + _mesh.Uvs[i2] * w2;
+                    var color = SampleAlbedo(uv) * 255f;
+                    if (dimmed)
+                        color *= 0.4f;
 
-                    if (anchored && !dimmed)
+                    if (anchored && !dimmed && layer != null)
                     {
                         var d  = position - anchor;
-                        var du = Vector3.Dot(d, tangent) / _layer.WorldWidth + 0.5f;
-                        var dv = Vector3.Dot(d, bitangent) / _layer.WorldHeight + 0.5f;
+                        var du = Vector3.Dot(d, tangent) / layer.WorldWidth + 0.5f;
+                        var dv = Vector3.Dot(d, bitangent) / layer.WorldHeight + 0.5f;
                         var dz = Vector3.Dot(d, normalDir);
-                        if (du is >= 0f and <= 1f && dv is >= 0f and <= 1f && MathF.Abs(dz) <= maxDepth
-                         && SampleDecalAlpha(du, dv) >= threshold)
+                        if (du is >= 0f and <= 1f && dv is >= 0f and <= 1f && MathF.Abs(dz) <= maxDepth)
                         {
-                            r = 255f * light;
-                            g = 140f * light;
-                            b = 0f;
+                            var sample = _decalPixels == null
+                                ? new Rgba32(255, 255, 255, 255)
+                                : SurfaceDecalBaker.SampleBilinear(_decalPixels, _decalWidth, _decalHeight, du, dv);
+                            if (layer.IdRemap)
+                            {
+                                if (sample.A >= threshold)
+                                    color = realColor
+                                        ? _shading!.RowDiffuse![layer.PaletteRows[DecalQuantizer.NearestIndex(sample, layer.PaletteColors)]] * 255f
+                                        : new Vector3(255f, 140f, 0f);
+                            }
+                            else
+                            {
+                                var alpha = sample.A / 255f * Math.Clamp(layer.Opacity, 0f, 1f);
+                                if (alpha > 0f)
+                                    color = realColor
+                                        ? Vector3.Lerp(color, new Vector3(sample.R, sample.G, sample.B), alpha)
+                                        : new Vector3(255f, 140f, 0f);
+                            }
                         }
                     }
 
-                    rgba[index * 4]     = (byte)Math.Clamp((int)r, 0, 255);
-                    rgba[index * 4 + 1] = (byte)Math.Clamp((int)g, 0, 255);
-                    rgba[index * 4 + 2] = (byte)Math.Clamp((int)b, 0, 255);
+                    color *= light;
+                    rgba[index * 4]     = (byte)Math.Clamp((int)color.X, 0, 255);
+                    rgba[index * 4 + 1] = (byte)Math.Clamp((int)color.Y, 0, 255);
+                    rgba[index * 4 + 2] = (byte)Math.Clamp((int)color.Z, 0, 255);
                 }
             }
         }
 
         _wrap?.Dispose();
         _wrap = textureProvider.CreateFromRaw(RawImageSpecification.Rgba32(size, size), rgba, "DTM Viewport");
-    }
-
-    private byte SampleDecalAlpha(float u, float v)
-    {
-        if (_decalRgba == null || _decalWidth == 0 || _decalHeight == 0)
-            return 255;
-
-        var x = Math.Clamp((int)(u * (_decalWidth - 1)), 0, _decalWidth - 1);
-        var y = Math.Clamp((int)(v * (_decalHeight - 1)), 0, _decalHeight - 1);
-        return _decalRgba[(y * _decalWidth + x) * 4 + 3];
     }
 }

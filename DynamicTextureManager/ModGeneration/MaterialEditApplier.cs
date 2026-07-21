@@ -1,3 +1,4 @@
+using System.Numerics;
 using DynamicTextureManager.DTextures.Data;
 using Penumbra.GameData.Files;
 using Penumbra.GameData.Files.MaterialStructs;
@@ -55,6 +56,36 @@ public static class MaterialEditApplier
         }
 
         return applied;
+    }
+
+    /// <summary>
+    /// The 32 row diffuse colors of a material's colorset with a dTexture's edits applied —
+    /// what the colorset visualizations (id-map colorize, 3D preview) render rows with.
+    /// Null for materials without a Dawntrail color table.
+    /// </summary>
+    public static Vector3[]? ResolveRowDiffuse(MtrlFile mtrl, MaterialEdit? edit)
+    {
+        if (mtrl.Table is not ColorTable)
+            return null;
+
+        var resolved = mtrl;
+        if (edit is { IsEmpty: false })
+        {
+            resolved = CloneForEdit(mtrl);
+            Apply(resolved, edit);
+        }
+
+        if (resolved.Table is not ColorTable table)
+            return null;
+
+        var ret = new Vector3[ColorTable.NumRows];
+        for (var i = 0; i < ColorTable.NumRows; ++i)
+        {
+            var color = table[i].DiffuseColor;
+            ret[i] = new Vector3((float)color.Red, (float)color.Green, (float)color.Blue);
+        }
+
+        return ret;
     }
 
     /// <summary>

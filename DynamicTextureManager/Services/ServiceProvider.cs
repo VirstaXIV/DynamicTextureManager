@@ -73,7 +73,8 @@ public static class ServiceProvider
                    .AddSingleton<TextureIO>()
                    .AddSingleton<TextureCompositor>()
                    .AddSingleton<ModelUvReader>()
-                   .AddSingleton<DecalLibrary>();
+                   .AddSingleton<DecalLibrary>()
+                   .AddSingleton<CompositePreviewCache>();
 
     private static ServiceManager AddEvents(this ServiceManager services)
         => services.AddSingleton<DTextureChanged>();
@@ -92,6 +93,7 @@ public static class ServiceProvider
                     .AddSingleton<DTMWindowSystem>()
                     .AddSingleton<DTMFileSystemSelector>()
                     .AddSingleton<UI.Panels.SourceTab>()
-                    .AddSingleton<UI.Panels.TexturesTab>()
+                    .AddSingleton<UI.Panels.DecalsTab>()
+                    .AddSingleton<UI.Panels.TextureViewerTab>()
                     .AddSingleton<DTMPanel>();
 }

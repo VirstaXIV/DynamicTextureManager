@@ -154,6 +154,44 @@ public sealed class DecalLayer : TextureLayer
     /// <summary> Enabled shape keys captured at stamp time, so the bake targets the same morphed surface that was clicked. </summary>
     public uint SurfaceShapes;
 
+    /// <summary>
+    /// Raw decal lifted out of the source id map instead of stamped from the library: its
+    /// pairs are the gear's own authored slots and the bake erases the original footprint
+    /// before restamping, so the decal can be moved and its rows recolored.
+    /// </summary>
+    public bool Extracted;
+
+    /// <summary> Original footprint rectangle in normalized UV space (top-left corner); negative U means unknown. </summary>
+    public float SourceU = -1f;
+
+    public float SourceV;
+
+    /// <summary> Original footprint extent in normalized UV space. </summary>
+    public float SourceUW;
+
+    public float SourceUH;
+
+    /// <summary> 0-based colorset pair the erase fills the footprint's R channel with (the dominant surrounding pair). </summary>
+    public int FillPair = -1;
+
+    /// <summary> G (A/B blend) value the erase fills the footprint with; -1 leaves G untouched. </summary>
+    public int FillBlend = -1;
+
+    /// <summary>
+    /// Stamping also writes the id map's G channel from the decal pixel's alpha. Used by
+    /// extracted decals relocated onto their own claimed pairs: the source content lived on
+    /// specific A/B halves of shared pairs, so the stamp must steer the blend onto the new
+    /// pair's A row instead of inheriting whatever the garment baked there.
+    /// </summary>
+    public bool WriteBlendFromAlpha;
+
+    /// <summary>
+    /// The texture source captured BEFORE this extraction redirected it to a cleaned copy
+    /// (empty = vanilla). Removing the extraction restores this and deletes the copy, so the
+    /// source returns to the base mod. Null on non-extracted layers.
+    /// </summary>
+    public string? PreExtractionSource;
+
     public override string LayerType
         => Type;
 
@@ -187,6 +225,16 @@ public sealed class DecalLayer : TextureLayer
         json["SurfaceLimitToPart"] = SurfaceLimitToPart;
         json["SurfaceAttributes"]  = SurfaceAttributes;
         json["SurfaceShapes"]      = SurfaceShapes;
+        json["Extracted"]          = Extracted;
+        json["SourceU"]            = SourceU;
+        json["SourceV"]            = SourceV;
+        json["SourceUW"]           = SourceUW;
+        json["SourceUH"]           = SourceUH;
+        json["FillPair"]           = FillPair;
+        json["FillBlend"]          = FillBlend;
+        json["WriteBlendFromAlpha"] = WriteBlendFromAlpha;
+        if (PreExtractionSource != null)
+            json["PreExtractionSource"] = PreExtractionSource;
     }
 
     public static DecalLayer LoadDecal(JObject json)
@@ -220,5 +268,14 @@ public sealed class DecalLayer : TextureLayer
             SurfaceLimitToPart = json["SurfaceLimitToPart"]?.ToObject<bool>() ?? true,
             SurfaceAttributes  = json["SurfaceAttributes"]?.ToObject<uint>() ?? uint.MaxValue,
             SurfaceShapes      = json["SurfaceShapes"]?.ToObject<uint>() ?? 0,
+            Extracted          = json["Extracted"]?.ToObject<bool>() ?? false,
+            SourceU            = json["SourceU"]?.ToObject<float>() ?? -1f,
+            SourceV            = json["SourceV"]?.ToObject<float>() ?? 0f,
+            SourceUW           = json["SourceUW"]?.ToObject<float>() ?? 0f,
+            SourceUH           = json["SourceUH"]?.ToObject<float>() ?? 0f,
+            FillPair           = json["FillPair"]?.ToObject<int>() ?? -1,
+            FillBlend          = json["FillBlend"]?.ToObject<int>() ?? -1,
+            WriteBlendFromAlpha = json["WriteBlendFromAlpha"]?.ToObject<bool>() ?? false,
+            PreExtractionSource = json["PreExtractionSource"]?.ToObject<string>(),
         };
 }

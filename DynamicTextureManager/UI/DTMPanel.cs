@@ -15,21 +15,23 @@ public class DTMPanel : IDisposable
     private readonly PenumbraService _penumbra;
     private readonly EditPreviewer _previewer;
     private readonly SourceTab _sourceTab;
-    private readonly TexturesTab _texturesTab;
+    private readonly DecalsTab _decalsTab;
+    private readonly TextureViewerTab _textureViewerTab;
     private readonly HeaderDrawer.Button[] _leftButtons;
     private readonly HeaderDrawer.Button[] _rightButtons;
 
     public DTMPanel(DTMFileSystemSelector selector, OverlayModManager overlayMods, PenumbraService penumbra, EditPreviewer previewer,
-        SourceTab sourceTab, TexturesTab texturesTab)
+        SourceTab sourceTab, DecalsTab decalsTab, TextureViewerTab textureViewerTab)
     {
-        _selector     = selector;
-        _overlayMods  = overlayMods;
-        _penumbra     = penumbra;
-        _previewer    = previewer;
-        _sourceTab    = sourceTab;
-        _texturesTab  = texturesTab;
-        _leftButtons  = [new ApplyButton(this)];
-        _rightButtons = [new DeleteModButton(this)];
+        _selector         = selector;
+        _overlayMods      = overlayMods;
+        _penumbra         = penumbra;
+        _previewer        = previewer;
+        _sourceTab        = sourceTab;
+        _decalsTab        = decalsTab;
+        _textureViewerTab = textureViewerTab;
+        _leftButtons      = [new ApplyButton(this)];
+        _rightButtons     = [new DeleteModButton(this)];
     }
 
     private sealed class ApplyButton(DTMPanel panel) : HeaderDrawer.Button
@@ -123,8 +125,14 @@ public class DTMPanel : IDisposable
                     if (tab)
                     {
                         decalsDrawn = true;
-                        _texturesTab.Draw(selected);
+                        _decalsTab.Draw(selected);
                     }
+                }
+
+                using (var tab = ImUtf8.TabItem("Textures"u8))
+                {
+                    if (tab)
+                        _textureViewerTab.Draw(selected);
                 }
             }
         }

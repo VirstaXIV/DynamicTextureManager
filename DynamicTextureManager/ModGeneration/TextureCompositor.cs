@@ -147,6 +147,54 @@ public sealed class TextureCompositor(DecalLibrary decals) : IService
             target.Mutate(c => c.DrawImage(decal, new Point(x, y), layer.Opacity));
     }
 
+    /// <summary>
+    /// Fill an extracted decal's original id-map footprint with the surrounding garment
+    /// values: R gets the dominant neighboring pair, G the median neighboring blend — the
+    /// closest stand-in for what the garment would render without the baked decal. Used to
+    /// generate the cleaned source copy an extraction redirects its texture to.
+    /// </summary>
+    public static void EraseExtractedFootprint(Image<Rgba32> target, DecalLayer layer, string stampPath)
+    {
+        if (!File.Exists(stampPath))
+        {
+            DynamicTextureManager.Log.Warning($"Extracted decal {layer.DecalId} is missing from the library — its original footprint stays in place.");
+            return;
+        }
+
+        var path = stampPath;
+        var x0 = (int)Math.Round(layer.SourceU * target.Width);
+        var y0 = (int)Math.Round(layer.SourceV * target.Height);
+        var w  = Math.Max(1, (int)Math.Round(layer.SourceUW * target.Width));
+        var h  = Math.Max(1, (int)Math.Round(layer.SourceUH * target.Height));
+
+        using var stamp = Image.Load<Rgba32>(path);
+        if (stamp.Width != w || stamp.Height != h)
+            stamp.Mutate(c => c.Resize(w, h, KnownResamplers.NearestNeighbor));
+
+        var threshold = (byte)Math.Clamp((int)Math.Round(layer.AlphaThreshold * 255f), 1, 255);
+        var fillR     = (byte)Math.Clamp(layer.FillPair * 17, 0, 255);
+
+        for (var dy = 0; dy < h; ++dy)
+        {
+            var ty = y0 + dy;
+            if (ty < 0 || ty >= target.Height)
+                continue;
+
+            for (var dx = 0; dx < w; ++dx)
+            {
+                var tx = x0 + dx;
+                if (tx < 0 || tx >= target.Width || stamp[dx, dy].A < threshold)
+                    continue;
+
+                var pixel = target[tx, ty];
+                pixel.R = fillR;
+                if (layer.FillBlend >= 0)
+                    pixel.G = (byte)Math.Clamp(layer.FillBlend, 0, 255);
+                target[tx, ty] = pixel;
+            }
+        }
+    }
+
     /// <summary> Replay a flat decal's footprint onto a sibling texture, applying its material effect per texel. </summary>
     private static void ApplyFlatEffect(Image<Rgba32> target, Image<Rgba32> decal, DecalLayer layer, int offsetX, int offsetY,
         TextureSlot slot)
@@ -205,9 +253,13 @@ public sealed class TextureCompositor(DecalLibrary decals) : IService
                 if (source.A < threshold)
                     continue;
 
-                var row        = layer.PaletteRows[DecalQuantizer.NearestIndex(source, layer.PaletteColors)];
-                var pixel      = target[tx, ty];
-                pixel.R        = (byte)(row / 2 * 17);
+                var row   = layer.PaletteRows[DecalQuantizer.NearestIndex(source, layer.PaletteColors)];
+                var pixel = target[tx, ty];
+                pixel.R   = (byte)(row / 2 * 17);
+                // Relocated extracted decals carry their blend weight in the stamp's alpha —
+                // it steers the new pair's A/B mix instead of the garment's baked shading.
+                if (layer.WriteBlendFromAlpha)
+                    pixel.G = source.A;
                 target[tx, ty] = pixel;
             }
         }
