@@ -52,6 +52,14 @@ public abstract class TextureLayer
             : [];
 }
 
+/// <summary> How a decal adjusts the material's mask map inside its footprint. </summary>
+public enum DecalMaskPreset
+{
+    Keep   = 0,
+    Matte  = 1,
+    Glossy = 2,
+}
+
 /// <summary> A decal image stamped onto a target texture at a UV position with scale, rotation and opacity. </summary>
 public sealed class DecalLayer : TextureLayer
 {
@@ -97,6 +105,20 @@ public sealed class DecalLayer : TextureLayer
 
     /// <summary> Decal pixels with alpha at or above this threshold are remapped in <see cref="IdRemap"/> mode. </summary>
     public float AlphaThreshold = 0.5f;
+
+    /// <summary>
+    /// All textures of a material are related: a printed-on decal usually wants the cloth
+    /// bump detail under it smoothed away. Blends the material's normal map toward flat
+    /// inside the decal footprint (0 = leave the normal map untouched).
+    /// </summary>
+    public float NormalSmooth;
+
+    /// <summary> Surface-finish preset written into the material's mask map inside the decal footprint. </summary>
+    public DecalMaskPreset MaskPreset = DecalMaskPreset.Keep;
+
+    /// <summary> Whether this layer also edits the material's sibling textures (normal/mask). </summary>
+    public bool HasMaterialEffects
+        => NormalSmooth > 0f || MaskPreset != DecalMaskPreset.Keep;
 
     /// <summary>
     /// Surface mode: instead of a rectangle in UV space, the decal is projected onto the 3D
@@ -146,6 +168,8 @@ public sealed class DecalLayer : TextureLayer
         json["PaletteColors"]  = new JArray(PaletteColors);
         json["PaletteRows"]    = new JArray(PaletteRows);
         json["AlphaThreshold"] = AlphaThreshold;
+        json["NormalSmooth"]   = NormalSmooth;
+        json["MaskPreset"]     = (int)MaskPreset;
         json["Surface"]        = Surface;
         json["AnchorX"]        = AnchorX;
         json["AnchorY"]        = AnchorY;
@@ -176,6 +200,8 @@ public sealed class DecalLayer : TextureLayer
             PaletteColors  = json["PaletteColors"]?.ToObject<List<uint>>() ?? [],
             PaletteRows    = json["PaletteRows"]?.ToObject<List<int>>() ?? [],
             AlphaThreshold = json["AlphaThreshold"]?.ToObject<float>() ?? 0.5f,
+            NormalSmooth   = json["NormalSmooth"]?.ToObject<float>() ?? 0f,
+            MaskPreset     = (DecalMaskPreset)(json["MaskPreset"]?.ToObject<int>() ?? 0),
             Surface        = json["Surface"]?.ToObject<bool>() ?? false,
             AnchorX        = json["AnchorX"]?.ToObject<float>() ?? 0f,
             AnchorY        = json["AnchorY"]?.ToObject<float>() ?? 0f,

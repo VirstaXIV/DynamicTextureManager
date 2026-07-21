@@ -377,6 +377,7 @@ public sealed class TexturesTab(
             if (decal.IdRemap)
                 changed |= DrawIdRemapSettings(dTexture, decal);
 
+            changed |= DrawMaterialEffects(decal);
             changed |= DrawPlacementSettings(dTexture, decal);
 
             if (changed)
@@ -680,6 +681,72 @@ public sealed class TexturesTab(
 
         return ret;
     }
+
+    /// <summary>
+    /// All textures of a material are related: a decal can also smooth the normal map and
+    /// set a surface finish on the mask map inside its footprint. Off by default; only
+    /// offered when the material actually has those sibling textures.
+    /// </summary>
+    private bool DrawMaterialEffects(DecalLayer decal)
+    {
+        var option = _options?.Find(o => string.Equals(o.GamePath, _selectedTexture, StringComparison.OrdinalIgnoreCase));
+        if (option == null)
+            return false;
+
+        var hasNormal = _options!.Any(o => string.Equals(o.MaterialGamePath, option.MaterialGamePath, StringComparison.OrdinalIgnoreCase)
+         && o.Slot is TextureSlot.Normal);
+        var hasMask = _options!.Any(o => string.Equals(o.MaterialGamePath, option.MaterialGamePath, StringComparison.OrdinalIgnoreCase)
+         && o.Slot is TextureSlot.Mask);
+        if (!hasNormal && !hasMask)
+            return false;
+
+        var changed = false;
+        ImGui.Separator();
+        ImUtf8.Text("Material Effects"u8);
+        ImUtf8.HoverTooltip("The decal's footprint replayed onto the material's other textures — smoothing bump detail or changing the surface finish under the decal."u8);
+
+        if (hasNormal)
+        {
+            ImGui.SetNextItemWidth(220 * ImUtf8.GlobalScale);
+            var smooth = decal.NormalSmooth;
+            if (ImUtf8.Slider("Normal Smoothing"u8, ref smooth, "%.2f"u8, 0f, 1f))
+            {
+                decal.NormalSmooth = Math.Clamp(smooth, 0f, 1f);
+                changed            = true;
+            }
+
+            ImUtf8.HoverTooltip("Flattens the cloth/skin bump detail under the decal — like a print sitting on top of the fabric.\n0 leaves the normal map untouched."u8);
+        }
+
+        if (hasMask)
+        {
+            ImGui.SetNextItemWidth(220 * ImUtf8.GlobalScale);
+            using (var combo = ImUtf8.Combo("Surface Finish"u8, MaskPresetLabel(decal.MaskPreset)))
+            {
+                if (combo)
+                    foreach (var preset in Enum.GetValues<DecalMaskPreset>())
+                    {
+                        if (!ImUtf8.Selectable(MaskPresetLabel(preset), preset == decal.MaskPreset) || preset == decal.MaskPreset)
+                            continue;
+
+                        decal.MaskPreset = preset;
+                        changed          = true;
+                    }
+            }
+
+            ImUtf8.HoverTooltip("How the surface responds to light under the decal, written into the material's mask map.\nMatte suits cloth prints, Glossy suits stickers/vinyl. Experimental — mask channel meanings are still being verified."u8);
+        }
+
+        return changed;
+    }
+
+    private static string MaskPresetLabel(DecalMaskPreset preset)
+        => preset switch
+        {
+            DecalMaskPreset.Matte  => "Matte",
+            DecalMaskPreset.Glossy => "Glossy",
+            _                      => "Keep",
+        };
 
     private MaterialEdit GetOrAddMaterialEdit(DTexture dTexture, TextureOption option)
     {
