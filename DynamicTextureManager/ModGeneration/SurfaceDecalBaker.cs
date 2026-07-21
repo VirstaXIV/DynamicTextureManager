@@ -35,9 +35,14 @@ public static class SurfaceDecalBaker
         normal = Vector3.Normalize(normal);
         var (tangent, bitangent) = TangentFrame(normal, layer.RotationDeg);
 
+        // Material effects can cover a larger or smaller area than the decal itself.
+        var effectScale = effectSlot != null ? Math.Max(0.01f, layer.EffectScale) : 1f;
+        var worldWidth  = layer.WorldWidth * effectScale;
+        var worldHeight = layer.WorldHeight * effectScale;
+
         // Limit projection depth so the decal cannot wrap through the body onto the far side
         // or catch nearby lining/trim pieces as stray fragments.
-        var maxDepth  = MathF.Max(layer.WorldWidth, layer.WorldHeight) * 0.4f;
+        var maxDepth  = MathF.Max(worldWidth, worldHeight) * 0.4f;
         var threshold = (byte)Math.Clamp((int)Math.Round(layer.AlphaThreshold * 255f), 1, 255);
         var opacity   = Math.Clamp(layer.Opacity, 0f, 1f);
 
@@ -82,8 +87,8 @@ public static class SurfaceDecalBaker
             {
                 var d = p - anchor;
                 return new Vector3(
-                    Vector3.Dot(d, tangent) / layer.WorldWidth + 0.5f,
-                    Vector3.Dot(d, bitangent) / layer.WorldHeight + 0.5f,
+                    Vector3.Dot(d, tangent) / worldWidth + 0.5f,
+                    Vector3.Dot(d, bitangent) / worldHeight + 0.5f,
                     Vector3.Dot(d, normal));
             }
 

@@ -120,8 +120,10 @@ public sealed class TextureCompositor(DecalLibrary decals) : IService
             return;
         }
 
-        var width  = Math.Max(1, (int)Math.Round(layer.ScaleX * target.Width));
-        var height = Math.Max(1, (int)Math.Round(layer.ScaleY * target.Height));
+        // Material effects can cover a larger or smaller area than the decal itself.
+        var scale  = effectSlot != null ? Math.Max(0.01f, layer.EffectScale) : 1f;
+        var width  = Math.Max(1, (int)Math.Round(layer.ScaleX * scale * target.Width));
+        var height = Math.Max(1, (int)Math.Round(layer.ScaleY * scale * target.Height));
 
         using var decal = Image.Load<Rgba32>(path);
         // Bilinear resampling invents blend colors at edges; keep colorset decals crisp so
