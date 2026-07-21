@@ -52,12 +52,13 @@ public abstract class TextureLayer
             : [];
 }
 
-/// <summary> How a decal adjusts the material's mask map inside its footprint. </summary>
-public enum DecalMaskPreset
+/// <summary> How a decal adjusts the material's surface finish inside its footprint. </summary>
+public enum DecalFinishMode
 {
     Keep   = 0,
     Matte  = 1,
     Glossy = 2,
+    Custom = 3,
 }
 
 /// <summary> A decal image stamped onto a target texture at a UV position with scale, rotation and opacity. </summary>
@@ -117,15 +118,29 @@ public sealed class DecalLayer : TextureLayer
     /// </summary>
     public float NormalSmooth;
 
-    /// <summary> Surface-finish preset written into the material's mask map inside the decal footprint. </summary>
-    public DecalMaskPreset MaskPreset = DecalMaskPreset.Keep;
+    /// <summary>
+    /// Surface finish inside the decal footprint. Written into the material's mask map, and —
+    /// for id-remap decals — into the claimed colorset rows' roughness/specular, which is what
+    /// actually dominates perceived shine on colorset-driven gear.
+    /// </summary>
+    public DecalFinishMode Finish = DecalFinishMode.Keep;
+
+    /// <summary> Roughness for <see cref="DecalFinishMode.Custom"/> (0 = mirror-glossy, 1 = fully matte). </summary>
+    public float FinishRoughness = 0.5f;
+
+    /// <summary> Specular multiplier for <see cref="DecalFinishMode.Custom"/> applied to the authored row specular. </summary>
+    public float FinishSpecScale = 1f;
 
     /// <summary> Size of the material-effect footprint relative to the decal (1 = exactly the decal shape). </summary>
     public float EffectScale = 1f;
 
     /// <summary> Whether this layer also edits the material's sibling textures (normal/mask). </summary>
     public bool HasMaterialEffects
-        => NormalSmooth > 0f || MaskPreset != DecalMaskPreset.Keep;
+        => NormalSmooth > 0f || Finish != DecalFinishMode.Keep;
+
+    /// <summary> Whether the finish setting wants a mask-map write. </summary>
+    public bool WantsMaskEffect
+        => Finish != DecalFinishMode.Keep;
 
     /// <summary>
     /// Surface mode: instead of a rectangle in UV space, the decal is projected onto the 3D
@@ -213,9 +228,11 @@ public sealed class DecalLayer : TextureLayer
         json["PaletteColors"]  = new JArray(PaletteColors);
         json["PaletteRows"]    = new JArray(PaletteRows);
         json["AlphaThreshold"] = AlphaThreshold;
-        json["NormalSmooth"]   = NormalSmooth;
-        json["MaskPreset"]     = (int)MaskPreset;
-        json["EffectScale"]    = EffectScale;
+        json["NormalSmooth"]    = NormalSmooth;
+        json["Finish"]          = (int)Finish;
+        json["FinishRoughness"] = FinishRoughness;
+        json["FinishSpecScale"] = FinishSpecScale;
+        json["EffectScale"]     = EffectScale;
         json["Surface"]        = Surface;
         json["AnchorX"]        = AnchorX;
         json["AnchorY"]        = AnchorY;
@@ -257,7 +274,10 @@ public sealed class DecalLayer : TextureLayer
             PaletteRows    = json["PaletteRows"]?.ToObject<List<int>>() ?? [],
             AlphaThreshold = json["AlphaThreshold"]?.ToObject<float>() ?? 0.5f,
             NormalSmooth   = json["NormalSmooth"]?.ToObject<float>() ?? 0f,
-            MaskPreset     = (DecalMaskPreset)(json["MaskPreset"]?.ToObject<int>() ?? 0),
+            // "Finish" replaced the pre-v0.5 "MaskPreset" key; old Matte/Glossy values map 1:1.
+            Finish          = (DecalFinishMode)(json["Finish"]?.ToObject<int>() ?? json["MaskPreset"]?.ToObject<int>() ?? 0),
+            FinishRoughness = json["FinishRoughness"]?.ToObject<float>() ?? 0.5f,
+            FinishSpecScale = json["FinishSpecScale"]?.ToObject<float>() ?? 1f,
             EffectScale    = json["EffectScale"]?.ToObject<float>() ?? 1f,
             Surface        = json["Surface"]?.ToObject<bool>() ?? false,
             AnchorX        = json["AnchorX"]?.ToObject<float>() ?? 0f,

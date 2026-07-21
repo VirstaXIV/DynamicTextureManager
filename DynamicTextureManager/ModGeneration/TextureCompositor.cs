@@ -85,9 +85,8 @@ public sealed class TextureCompositor(DecalLibrary decals) : IService
 
     /// <summary>
     /// The per-texel material effect for sibling textures: smooth the normal map toward flat
-    /// (RG 128/128 is the neutral tangent normal) or write the mask finish preset. Mask
-    /// channel semantics are empirical — G is treated as roughness on Dawntrail character
-    /// masks; adjust here if in-game verification says otherwise.
+    /// (RG 128/128 is the neutral tangent normal) or write the finish into the mask map.
+    /// Mask channel semantics live in <see cref="FinishMapping"/>.
     /// </summary>
     internal static bool ApplyEffectPixel(ref Rgba32 pixel, in Rgba32 sample, byte threshold, DecalLayer layer, TextureSlot slot)
     {
@@ -100,8 +99,8 @@ public sealed class TextureCompositor(DecalLibrary decals) : IService
                 pixel.R = LerpByte(pixel.R, 128, layer.NormalSmooth);
                 pixel.G = LerpByte(pixel.G, 128, layer.NormalSmooth);
                 return true;
-            case TextureSlot.Mask when layer.MaskPreset != DecalMaskPreset.Keep:
-                pixel.G = layer.MaskPreset == DecalMaskPreset.Matte ? (byte)200 : (byte)30;
+            case TextureSlot.Mask when layer.WantsMaskEffect:
+                FinishMapping.ApplyToMaskPixel(ref pixel, layer);
                 return true;
             default:
                 return false;

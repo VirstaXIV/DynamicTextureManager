@@ -47,7 +47,8 @@ public sealed class DecalsTab(
     PenumbraService penumbra,
     CompositePreviewCache previewCache,
     FilenameService filenames,
-    Configuration config)
+    Configuration config,
+    DecalLibraryWindow decalLibraryWindow)
     : IService, IDisposable
 {
     private const long SlotPreviewDebounceMs = 400;
@@ -245,54 +246,48 @@ public sealed class DecalsTab(
 
     private void DrawDecalLibrary(DTexture dTexture)
     {
-        if (ImUtf8.Button("Import Decal..."u8))
-            _fileDialog.OpenFileDialog("Import Decal", "Images{.png,.jpg,.jpeg,.dds,.bmp,.tga}", (success, path) =>
+        var canAdd = DefaultTargetOption() != null;
+        using (ImRaii.Disabled(!canAdd))
+        {
+            if (ImUtf8.Button("Add Decal from Library..."u8))
             {
-                if (success)
-                    decals.Import(path);
-            });
-        ImUtf8.HoverTooltip("Import an image into the decal library. It is converted to PNG and can be stamped onto textures."u8);
-
-        if (decals.Decals.Count == 0)
-        {
-            ImUtf8.Text("No decals imported yet."u8);
-            return;
+                // The picker outlives this frame; ignore the pick if the selection changed meanwhile.
+                var owner = dTexture.Identifier;
+                decalLibraryWindow.OpenAsPicker("Click a decal to stamp it onto the selected material — or import a new one.",
+                    entry =>
+                    {
+                        if (_cacheOwner == owner)
+                            AddLayer(dTexture, entry.Id, entry.Preset);
+                    });
+            }
         }
 
-        var canAdd   = DefaultTargetOption() != null;
-        var iconSize = new Vector2(48 * ImUtf8.GlobalScale);
-        // Deletion is deferred past the loop — Delete() mutates the list being enumerated.
-        var deleteId = Guid.Empty;
-        foreach (var (decal, idx) in decals.Decals.WithIndex())
+        ImUtf8.HoverTooltip(canAdd
+            ? "Pick a decal from the library — its saved settings (colors, surface finish, size) are applied automatically."u8
+            : "Select a material that supports decals first."u8);
+
+        ImGui.SameLine();
+        using (ImRaii.Disabled(!canAdd))
         {
-            using var id = ImUtf8.PushId(idx);
-            if (idx > 0)
-                ImGui.SameLine();
+            if (ImUtf8.Button("Import Decal..."u8))
+                _fileDialog.OpenFileDialog("Import Decal", "Images{.png,.jpg,.jpeg,.dds,.bmp,.tga}", (success, path) =>
+                {
+                    if (!success)
+                        return;
 
-            using var group = ImUtf8.Group();
-            var wrap = textureProvider.GetFromFile(decals.FilePath(decal.Id)).GetWrapOrDefault();
-            if (wrap != null)
-                ImGui.Image(wrap.Handle, iconSize);
-            else
-                ImGui.Dummy(iconSize);
-
-            if (ImUtf8.SmallButton("Add"u8) && canAdd)
-                AddLayer(dTexture, decal.Id);
-            ImGui.SameLine();
-            if (ImUtf8.SmallButton("X"u8) && ImGui.GetIO().KeyCtrl)
-                deleteId = decal.Id;
-
-            group.Dispose();
-            if (ImGui.IsItemHovered())
-                ImUtf8.HoverTooltip(
-                    $"{decal.Name}\nAdd: stamp this decal onto the selected material.\nX: hold Control and click to remove from the library.");
+                    var entry = decals.Import(path);
+                    if (entry != null && _cacheOwner == dTexture.Identifier)
+                        AddLayer(dTexture, entry.Id, entry.Preset);
+                });
         }
 
-        if (deleteId != Guid.Empty)
-            decals.Delete(deleteId);
+        ImUtf8.HoverTooltip("Import an image into the decal library and stamp it onto the selected material right away.\nTo import without stamping, use the Decal Library window (title-bar button)."u8);
     }
 
     private void AddLayer(DTexture dTexture, Guid decalId)
+        => AddLayer(dTexture, decalId, decals.Get(decalId)?.Preset);
+
+    private void AddLayer(DTexture dTexture, Guid decalId, DecalPreset? preset)
     {
         // The colorset id map is the preferred target: the decal is quantized and each of
         // its colors remaps texels to an automatically claimed colorset row. Materials
@@ -316,9 +311,46 @@ public sealed class DecalsTab(
             MaxColors = config.DefaultDecalMaxColors,
             Surface   = true,
         };
+        if (preset != null)
+        {
+            // The preset may opt out of colorset mode, but never forces it onto a diffuse target.
+            layer.IdRemap        &= preset.IdRemap;
+            layer.MaxColors       = preset.MaxColors;
+            layer.AlphaThreshold  = preset.AlphaThreshold;
+            layer.Opacity         = preset.Opacity;
+            layer.ScaleX          = preset.ScaleX;
+            layer.ScaleY          = preset.ScaleY;
+            layer.RotationDeg     = preset.RotationDeg;
+            layer.WorldWidth      = preset.WorldWidth;
+            layer.WorldHeight     = preset.WorldHeight;
+            layer.NormalSmooth    = preset.NormalSmooth;
+            layer.Finish          = preset.Finish;
+            layer.FinishRoughness = preset.FinishRoughness;
+            layer.FinishSpecScale = preset.FinishSpecScale;
+            layer.EffectScale     = preset.EffectScale;
+        }
+
         layers.Add(layer);
         if (layer.IdRemap && target.Mtrl.Table is ColorTable table)
+        {
             ReallocateDecal(dTexture, target, table, layer);
+
+            // Restore the preset's saved recolors: quantization is deterministic for the same
+            // image/settings, so the extracted palette lines up index-for-index. A count
+            // mismatch means the image or settings changed since the preset was saved — the
+            // fresh extraction wins then.
+            if (preset != null && layer.PaletteRows.Count > 0 && preset.PaletteColors.Count == layer.PaletteRows.Count)
+            {
+                var edit = GetOrAddMaterialEdit(dTexture, target);
+                for (var i = 0; i < layer.PaletteRows.Count; ++i)
+                {
+                    var color = new Rgba32(preset.PaletteColors[i]);
+                    GetOrSeedRow(edit, table, layer.PaletteRows[i]).Diffuse = [color.R / 255f, color.G / 255f, color.B / 255f];
+                    GetOrSeedRow(edit, table, layer.PaletteRows[i] + 1).Diffuse =
+                        [color.R / 255f * ShadeFactor, color.G / 255f * ShadeFactor, color.B / 255f * ShadeFactor];
+                }
+            }
+        }
 
         // 3D placement is the primary path: anchor at the texture's UV center and hand the
         // layer to the embedded viewport. Without mesh geometry the layer falls back to flat.
@@ -343,6 +375,42 @@ public sealed class DecalsTab(
     /// </summary>
     private void CaptureTextureSource(DTexture dTexture, string gamePath)
         => overlayMods.GetOrCaptureTextureSource(dTexture, gamePath);
+
+    /// <summary>
+    /// Store the layer's current settings as the library entry's preset, so the next
+    /// attachment of this decal — on any gear — starts from them. Colors are read back from
+    /// the claimed rows, so manual recolors round-trip through the library.
+    /// </summary>
+    private void SaveLayerPreset(DTexture dTexture, TextureOption option, DecalLayer decal)
+    {
+        var preset = new DecalPreset
+        {
+            IdRemap         = decal.IdRemap,
+            MaxColors       = decal.MaxColors,
+            AlphaThreshold  = decal.AlphaThreshold,
+            NormalSmooth    = decal.NormalSmooth,
+            Finish          = decal.Finish,
+            FinishRoughness = decal.FinishRoughness,
+            FinishSpecScale = decal.FinishSpecScale,
+            EffectScale     = decal.EffectScale,
+            Opacity         = decal.Opacity,
+            ScaleX          = decal.ScaleX,
+            ScaleY          = decal.ScaleY,
+            RotationDeg     = decal.RotationDeg,
+            WorldWidth      = decal.WorldWidth,
+            WorldHeight     = decal.WorldHeight,
+        };
+
+        if (decal.IdRemap && dTexture.Data.Materials.TryGetValue(option.MaterialGamePath, out var edit))
+            for (var i = 0; i < decal.PaletteRows.Count; ++i)
+                preset.PaletteColors.Add(edit.Rows.TryGetValue(decal.PaletteRows[i], out var rowEdit)
+                    ? new Rgba32(rowEdit.Diffuse[0], rowEdit.Diffuse[1], rowEdit.Diffuse[2]).PackedValue
+                    : i < decal.PaletteColors.Count
+                        ? decal.PaletteColors[i]
+                        : uint.MaxValue);
+
+        decals.SetPreset(decal.DecalId, preset);
+    }
 
     /// <summary> All decal layers of the selected material, across all of its textures. </summary>
     private void DrawLayers(DTexture dTexture)
@@ -406,7 +474,7 @@ public sealed class DecalsTab(
             if (decal.IdRemap)
                 changed |= DrawIdRemapSettings(dTexture, option, decal);
 
-            changed |= DrawMaterialEffects(option, decal);
+            changed |= DrawMaterialEffects(dTexture, option, decal);
             changed |= DrawPlacementSettings(dTexture, decal);
 
             if (changed)
@@ -420,6 +488,10 @@ public sealed class DecalsTab(
             ImGui.SameLine();
             if (ImUtf8.SmallButton("Down"u8) && idx < layers.Count - 1)
                 swap = (idx, idx + 1);
+            ImGui.SameLine();
+            if (ImUtf8.SmallButton("Save Settings to Library"u8))
+                SaveLayerPreset(dTexture, option, decal);
+            ImUtf8.HoverTooltip("Store this layer's colors, surface finish and size on the library entry.\nFuture attachments of this decal start from these settings — on any gear."u8);
         }
 
         if (remove >= 0)
@@ -565,6 +637,7 @@ public sealed class DecalsTab(
                     seeded.Diffuse = keep;
             }
 
+            ApplyFinishToClaimedRows(edit, table, decal);
             changed = true;
         }
 
@@ -722,6 +795,9 @@ public sealed class DecalsTab(
                     GetOrSeedRow(edit, table, result.Rows[i] + 1).Diffuse =
                         [color.R / 255f * ShadeFactor, color.G / 255f * ShadeFactor, color.B / 255f * ShadeFactor];
                 }
+
+                // Freshly seeded rows carry the template's finish; re-apply the layer's own.
+                ApplyFinishToClaimedRows(edit, table, decal);
             }
             else
             {
@@ -779,19 +855,24 @@ public sealed class DecalsTab(
 
     /// <summary>
     /// All textures of a material are related: a decal can also smooth the normal map and
-    /// set a surface finish on the mask map inside its footprint. Off by default; only
-    /// offered when the material actually has those sibling textures.
+    /// set a surface finish inside its footprint. The finish goes into the mask map and —
+    /// for colorset decals — into the claimed rows' roughness/specular, which dominates
+    /// perceived shine on colorset-driven gear. Off by default.
     /// </summary>
-    private bool DrawMaterialEffects(TextureOption option, DecalLayer decal)
+    private bool DrawMaterialEffects(DTexture dTexture, TextureOption option, DecalLayer decal)
     {
         var hasNormal = _options!.Any(o => string.Equals(o.MaterialGamePath, option.MaterialGamePath, StringComparison.OrdinalIgnoreCase)
          && o.Slot is TextureSlot.Normal);
         var hasMask = _options!.Any(o => string.Equals(o.MaterialGamePath, option.MaterialGamePath, StringComparison.OrdinalIgnoreCase)
          && o.Slot is TextureSlot.Mask);
-        if (!hasNormal && !hasMask)
+        // Colorset decals carry their finish on the claimed rows, so the control works even
+        // without a mask sibling.
+        var showFinish = hasMask || decal.IdRemap;
+        if (!hasNormal && !showFinish)
             return false;
 
-        var changed = false;
+        var changed       = false;
+        var finishChanged = false;
         ImGui.Separator();
         ImUtf8.Text("Material Effects"u8);
         ImUtf8.HoverTooltip("The decal's footprint replayed onto the material's other textures — smoothing bump detail or changing the surface finish under the decal."u8);
@@ -809,26 +890,57 @@ public sealed class DecalsTab(
             ImUtf8.HoverTooltip("Flattens the cloth/skin bump detail under the decal — like a print sitting on top of the fabric.\n0 leaves the normal map untouched."u8);
         }
 
-        if (hasMask)
+        if (showFinish)
         {
             ImGui.SetNextItemWidth(220 * ImUtf8.GlobalScale);
-            using (var combo = ImUtf8.Combo("Surface Finish"u8, MaskPresetLabel(decal.MaskPreset)))
+            using (var combo = ImUtf8.Combo("Surface Finish"u8, FinishLabel(decal.Finish)))
             {
                 if (combo)
-                    foreach (var preset in Enum.GetValues<DecalMaskPreset>())
+                    foreach (var mode in Enum.GetValues<DecalFinishMode>())
                     {
-                        if (!ImUtf8.Selectable(MaskPresetLabel(preset), preset == decal.MaskPreset) || preset == decal.MaskPreset)
+                        if (!ImUtf8.Selectable(FinishLabel(mode), mode == decal.Finish) || mode == decal.Finish)
                             continue;
 
-                        decal.MaskPreset = preset;
-                        changed          = true;
+                        decal.Finish  = mode;
+                        finishChanged = true;
                     }
             }
 
-            ImUtf8.HoverTooltip("How the surface responds to light under the decal, written into the material's mask map.\nMatte suits cloth prints, Glossy suits stickers/vinyl. Experimental — mask channel meanings are still being verified."u8);
+            ImUtf8.HoverTooltip(decal.IdRemap
+                ? "How the surface responds to light under the decal — written into the claimed colorset rows (and the mask map, if the material has one).\nMatte suits cloth prints, Glossy suits stickers/vinyl; Custom exposes the raw values."u8
+                : "How the surface responds to light under the decal, written into the material's mask map.\nMatte suits cloth prints, Glossy suits stickers/vinyl; Custom exposes the raw values.\nNote: on colorset-driven gear the underlying rows bound what the mask alone can change."u8);
+
+            if (decal.Finish == DecalFinishMode.Custom)
+            {
+                ImGui.SetNextItemWidth(220 * ImUtf8.GlobalScale);
+                var roughness = decal.FinishRoughness;
+                if (ImUtf8.Slider("Roughness"u8, ref roughness, "%.2f"u8, 0f, 1f))
+                {
+                    decal.FinishRoughness = Math.Clamp(roughness, 0f, 1f);
+                    finishChanged         = true;
+                }
+
+                ImUtf8.HoverTooltip("0 = mirror-glossy, 1 = fully matte."u8);
+
+                ImGui.SetNextItemWidth(220 * ImUtf8.GlobalScale);
+                var specScale = decal.FinishSpecScale;
+                if (ImUtf8.Slider("Specular Scale"u8, ref specScale, "%.2f"u8, 0f, 2f))
+                {
+                    decal.FinishSpecScale = Math.Clamp(specScale, 0f, 2f);
+                    finishChanged         = true;
+                }
+
+                ImUtf8.HoverTooltip("Multiplier on the authored specular color — below 1 dims reflections, above 1 boosts them."u8);
+            }
+            else if (decal.Finish != DecalFinishMode.Keep)
+            {
+                var (roughness, specScale) = FinishMapping.PresetValues(decal.Finish);
+                using var disabled = ImRaii.Disabled();
+                ImUtf8.Text($"Roughness {roughness:F2}, specular ×{specScale:F2}");
+            }
         }
 
-        if (decal.HasMaterialEffects)
+        if (decal.HasMaterialEffects && (hasNormal || hasMask))
         {
             ImGui.SetNextItemWidth(220 * ImUtf8.GlobalScale);
             var effectScale = decal.EffectScale;
@@ -841,16 +953,93 @@ public sealed class DecalsTab(
             ImUtf8.HoverTooltip("Size of the affected area relative to the decal — above 1 the smoothing/finish extends past the decal's edge, below 1 it stays inside it."u8);
         }
 
+        if (finishChanged)
+        {
+            changed = true;
+            if (decal.IdRemap && option.Mtrl.Table is ColorTable table)
+            {
+                ApplyFinishToClaimedRows(GetOrAddMaterialEdit(dTexture, option), table, decal);
+                _slotPreviewDirty  = true;
+                _slotPreviewMs     = Environment.TickCount64;
+                _slotPreviewOption = option;
+            }
+        }
+
         return changed;
     }
 
-    private static string MaskPresetLabel(DecalMaskPreset preset)
-        => preset switch
+    private static string FinishLabel(DecalFinishMode mode)
+        => mode switch
         {
-            DecalMaskPreset.Matte  => "Matte",
-            DecalMaskPreset.Glossy => "Glossy",
+            DecalFinishMode.Matte  => "Matte",
+            DecalFinishMode.Glossy => "Glossy",
+            DecalFinishMode.Custom => "Custom",
             _                      => "Keep",
         };
+
+    /// <summary>
+    /// Write the decal's finish into every claimed row (both halves of each pair). Rows are
+    /// rebased onto a full template row first (keeping only colors and dye settings), so
+    /// switching finishes or returning to Keep is idempotent. With an explicit finish the
+    /// template must be a DIELECTRIC authored row: metal rows carry BRDF scalars that turn
+    /// the diffuse path off, which rendered a white decal as dark grey once the finish
+    /// cleared their Metalness.
+    /// </summary>
+    private void ApplyFinishToClaimedRows(MaterialEdit edit, ColorTable table, DecalLayer decal)
+    {
+        foreach (var row in decal.PaletteRows.SelectMany(r => new[] { r, r ^ 1 }).Distinct())
+        {
+            if (!edit.Rows.TryGetValue(row, out var rowEdit))
+                continue;
+
+            // Extracted layers render through the gear's own authored look — leave it alone
+            // for Keep, and only stamp the absolute finish values on top otherwise.
+            if (decal.Extracted)
+            {
+                if (decal.Finish != DecalFinishMode.Keep)
+                    FinishMapping.ApplyToRow(rowEdit, decal);
+                continue;
+            }
+
+            var templateIdx = SeedTemplateIndex(table, row);
+            if (decal.Finish != DecalFinishMode.Keep && (float)table[templateIdx].Metalness >= 0.5f)
+                templateIdx = DielectricTemplateIndex(table) ?? templateIdx;
+
+            var seeded = ColorRowEdit.FromRow(row, table[templateIdx]);
+            seeded.RowIndex     = row;
+            seeded.Diffuse      = rowEdit.Diffuse;
+            seeded.DyeMode      = rowEdit.DyeMode;
+            seeded.DyeTemplate  = rowEdit.DyeTemplate;
+            seeded.DyeChannel   = rowEdit.DyeChannel;
+            seeded.DyeDiffuse   = rowEdit.DyeDiffuse;
+            seeded.DyeSpecular  = rowEdit.DyeSpecular;
+            seeded.DyeEmissive  = rowEdit.DyeEmissive;
+            seeded.DyeRoughness = rowEdit.DyeRoughness;
+            seeded.DyeMetalness = rowEdit.DyeMetalness;
+            seeded.DyeSheen     = rowEdit.DyeSheen;
+            edit.Rows[row]      = seeded;
+
+            if (decal.Finish != DecalFinishMode.Keep)
+                FinishMapping.ApplyToRow(seeded, decal);
+        }
+    }
+
+    /// <summary>
+    /// The most-rendered authored non-metal row — the template whose BRDF scalars suit a
+    /// dielectric print. Null when the gear authors no dielectric rows at all.
+    /// </summary>
+    private int? DielectricTemplateIndex(ColorTable table)
+    {
+        foreach (var (idx, _) in _rowUsageCounts.OrderByDescending(kvp => kvp.Value))
+            if (idx >= 0 && idx < ColorTable.NumRows && !IsFillerRow(table[idx]) && (float)table[idx].Metalness < 0.5f)
+                return idx;
+
+        for (var i = 0; i < ColorTable.NumRows; ++i)
+            if (!IsFillerRow(table[i]) && (float)table[i].Metalness < 0.5f)
+                return i;
+
+        return null;
+    }
 
     private MaterialEdit GetOrAddMaterialEdit(DTexture dTexture, TextureOption option)
     {
