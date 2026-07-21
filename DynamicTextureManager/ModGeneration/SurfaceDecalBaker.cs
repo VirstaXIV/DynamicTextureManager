@@ -1,6 +1,7 @@
 using System;
 using System.Numerics;
 using DynamicTextureManager.DTextures.Data;
+using DynamicTextureManager.ModGeneration.Shaders;
 using SixLabors.ImageSharp;
 using SixLabors.ImageSharp.PixelFormats;
 
@@ -18,7 +19,13 @@ public static class SurfaceDecalBaker
     /// Draw id-remap texels as a bright highlight color instead of the raw row-pair value —
     /// the pair byte is almost invisible on an id map, so previews would look empty.
     /// </param>
-    public static void Bake(Image<Rgba32> target, Image<Rgba32> decal, MaterialMesh mesh, DecalLayer layer, bool previewHighlight = false)
+    /// <param name="effectSlot">
+    /// When set, the bake targets a sibling texture of the same material (normal/mask):
+    /// the footprint is identical, but each texel receives the layer's material effect
+    /// instead of its colors.
+    /// </param>
+    public static void Bake(Image<Rgba32> target, Image<Rgba32> decal, MaterialMesh mesh, DecalLayer layer, bool previewHighlight = false,
+        TextureSlot? effectSlot = null)
     {
         var anchor = new Vector3(layer.AnchorX, layer.AnchorY, layer.AnchorZ);
         var normal = new Vector3(layer.NormalX, layer.NormalY, layer.NormalZ);
@@ -34,7 +41,7 @@ public static class SurfaceDecalBaker
         var threshold = (byte)Math.Clamp((int)Math.Round(layer.AlphaThreshold * 255f), 1, 255);
         var opacity   = Math.Clamp(layer.Opacity, 0f, 1f);
 
-        if (layer.IdRemap && (layer.PaletteRows.Count == 0 || layer.PaletteRows.Count != layer.PaletteColors.Count))
+        if (effectSlot == null && layer.IdRemap && (layer.PaletteRows.Count == 0 || layer.PaletteRows.Count != layer.PaletteColors.Count))
         {
             DynamicTextureManager.Log.Warning("Surface colorset decal has no allocated rows, layer skipped.");
             return;
@@ -91,14 +98,14 @@ public static class SurfaceDecalBaker
 
             RasterizeTriangle(target, decalPixels, decal.Width, decal.Height,
                 mesh.Uvs[i0], mesh.Uvs[i1], mesh.Uvs[i2], d0, d1, d2, maxDepth, threshold, opacity, layer,
-                previewHighlight);
+                previewHighlight, effectSlot);
         }
     }
 
     /// <summary> Rasterize one triangle in texture space, sampling the decal through the interpolated projection coordinates. </summary>
     private static void RasterizeTriangle(Image<Rgba32> target, Rgba32[] decal, int decalWidth, int decalHeight,
         Vector2 uv0, Vector2 uv1, Vector2 uv2, Vector3 d0, Vector3 d1, Vector3 d2,
-        float maxDepth, byte threshold, float opacity, DecalLayer layer, bool previewHighlight)
+        float maxDepth, byte threshold, float opacity, DecalLayer layer, bool previewHighlight, TextureSlot? effectSlot)
     {
         var a = new Vector2(uv0.X * target.Width, uv0.Y * target.Height);
         var b = new Vector2(uv1.X * target.Width, uv1.Y * target.Height);
@@ -131,7 +138,13 @@ public static class SurfaceDecalBaker
                     continue;
 
                 var sample = SampleBilinear(decal, decalWidth, decalHeight, local.X, local.Y);
-                if (layer.IdRemap)
+                if (effectSlot is { } slot)
+                {
+                    var pixel = target[x, y];
+                    if (TextureCompositor.ApplyEffectPixel(ref pixel, sample, threshold, layer, slot))
+                        target[x, y] = pixel;
+                }
+                else if (layer.IdRemap)
                 {
                     if (sample.A < threshold)
                         continue;

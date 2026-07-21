@@ -345,7 +345,14 @@ public sealed class OverlayModManager : IService, IDisposable
             ? dTexture.Data.OutputModDirectory
             : $"DTM_{dTexture.Incognito}";
 
-    private sealed record TextureJob(string GamePath, string? DiskPath, List<DTextures.Data.TextureLayer> Layers, MaterialMesh? Mesh);
+    private sealed record TextureJob(string GamePath, string? DiskPath, List<DTextures.Data.TextureLayer> Layers, MaterialMesh? Mesh)
+    {
+        /// <summary> Sibling-texture slot this job applies material effects for (normal/mask), if any. </summary>
+        public Shaders.TextureSlot EffectSlot { get; init; } = Shaders.TextureSlot.Unknown;
+
+        /// <summary> Decal layers from the material's other textures whose effects replay onto this one. </summary>
+        public List<DTextures.Data.TextureLayer> EffectLayers { get; init; } = [];
+    }
 
     private sealed record BuildPlan(Dictionary<string, byte[]> MaterialFiles, List<TextureJob> TextureJobs);
 
@@ -491,7 +498,79 @@ public sealed class OverlayModManager : IService, IDisposable
             textures.Add(new TextureJob(gamePath, diskPath is { Length: > 0 } ? diskPath : null, layers, mesh));
         }
 
+        AddSiblingEffectJobs(dTexture, textures);
+
         return new BuildPlan(materials, textures);
+    }
+
+    /// <summary>
+    /// All textures of a material are related: decals with material effects (normal
+    /// smoothing, mask finish) replay their footprint onto the material's normal/mask
+    /// textures, which usually have no layers of their own — synthesize jobs for them.
+    /// </summary>
+    private void AddSiblingEffectJobs(DTexture dTexture, List<TextureJob> textures)
+    {
+        var meshCache = new Dictionary<string, MaterialMesh?>(StringComparer.OrdinalIgnoreCase);
+        foreach (var (gamePath, layers) in dTexture.Data.Textures)
+        {
+            var effectLayers = layers.OfType<DTextures.Data.DecalLayer>()
+                .Where(l => l.Enabled && l.HasMaterialEffects)
+                .Cast<DTextures.Data.TextureLayer>()
+                .ToList();
+            if (effectLayers.Count == 0)
+                continue;
+
+            var owner = FindTextureOwner(dTexture, gamePath);
+            var mtrl  = owner != null ? sourceFiles.GetMaterial(owner, null) : null;
+            if (owner == null || mtrl == null)
+                continue;
+
+            MaterialMesh? mesh = null;
+            if (effectLayers.Any(l => l is DTextures.Data.DecalLayer { Surface: true }))
+            {
+                if (!meshCache.TryGetValue(owner.GamePath, out mesh))
+                    meshCache[owner.GamePath] = mesh = uvReader.GetMesh(owner);
+                if (mesh == null)
+                    DynamicTextureManager.Log.Warning(
+                        $"No mesh geometry for {owner.GamePath} — surface decal material effects will be skipped this build.");
+            }
+
+            foreach (var info in shaderHandlers.For(mtrl).ClassifyTextures(mtrl))
+            {
+                if (info.Slot is not (Shaders.TextureSlot.Normal or Shaders.TextureSlot.Mask)
+                 || string.Equals(info.GamePath, gamePath, StringComparison.OrdinalIgnoreCase))
+                    continue;
+
+                // Only layers whose effect actually touches this slot.
+                var slotLayers = effectLayers.Where(l => l is DTextures.Data.DecalLayer d
+                     && (info.Slot == Shaders.TextureSlot.Normal ? d.NormalSmooth > 0f : d.MaskPreset != DTextures.Data.DecalMaskPreset.Keep))
+                    .ToList();
+                if (slotLayers.Count == 0)
+                    continue;
+
+                var existing = textures.FindIndex(j => string.Equals(j.GamePath, info.GamePath, StringComparison.OrdinalIgnoreCase));
+                if (existing >= 0)
+                {
+                    var job = textures[existing];
+                    textures[existing] = job with
+                    {
+                        EffectSlot = info.Slot,
+                        EffectLayers = [.. job.EffectLayers, .. slotLayers],
+                        Mesh = job.Mesh ?? mesh,
+                    };
+                    continue;
+                }
+
+                // Capture the sibling's pristine source BEFORE our own mod first claims its
+                // resolution — later resolves would return our generated file and compound.
+                var diskPath = GetOrCaptureTextureSource(dTexture, info.GamePath);
+                textures.Add(new TextureJob(info.GamePath, diskPath is { Length: > 0 } ? diskPath : null, [], mesh)
+                {
+                    EffectSlot   = info.Slot,
+                    EffectLayers = slotLayers,
+                });
+            }
+        }
     }
 
     /// <summary> The source material whose shader exposes a given texture game path. </summary>
@@ -587,7 +666,11 @@ public sealed class OverlayModManager : IService, IDisposable
             if (decoded == null)
                 continue;
 
-            var rgba    = compositor.Composite(decoded, job.Layers, job.Mesh);
+            var rgba = compositor.Composite(decoded, job.Layers, job.Mesh);
+            if (job.EffectLayers.Count > 0)
+                rgba = compositor.CompositeSiblingEffects(new DecodedTexture(rgba, decoded.Width, decoded.Height),
+                    job.EffectLayers, job.EffectSlot, job.Mesh);
+
             var outFile = build.PrepareFile(job.GamePath);
             await penumbra.ConvertTextureData(rgba, decoded.Width, outFile, TextureType.Bc7Tex).ConfigureAwait(false);
             ++written;
