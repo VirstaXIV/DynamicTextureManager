@@ -1,0 +1,30 @@
+[
+  {
+    "Author": "Virsta",
+    "Name": "Dynamic Texture Manager",
+    "InternalName": "DynamicTextureManager",
+    "AssemblyVersion": "0.2.0.0",
+    "Description": "Helps set up custom textures to add custom decals / images on models by generating override textures.",
+    "ApplicableVersion": "any",
+    "RepoUrl": "https://github.com/VirstaXIV/DynamicTextureManager",
+    "Tags": [
+      "penumbra",
+      "textures",
+      "dynamic",
+      "manager"
+    ],
+    "DalamudApiLevel": 15,
+    "LoadRequiredState": 0,
+    "LoadSync": false,
+    "CanUnloadAsync": false,
+    "LoadPriority": 0,
+    "IconUrl": "https://raw.githubusercontent.com/VirstaXIV/DynamicTextureManager/master/images/icon.png",
+    "Punchline": "Manager for dynamically adjusting textures",
+    "AcceptsFeedback": true,
+    "LastUpdate": 1784661365,
+    "DownloadCount": 0,
+    "DownloadLinkInstall": "https://github.com/VirstaXIV/DynamicTextureManager/releases/latest/download/latest.zip",
+    "DownloadLinkUpdate": "https://github.com/VirstaXIV/DynamicTextureManager/releases/latest/download/latest.zip",
+    "DownloadLinkTesting": "https://github.com/VirstaXIV/DynamicTextureManager/releases/latest/download/latest.zip"
+  }
+]
