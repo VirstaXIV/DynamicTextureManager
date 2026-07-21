@@ -47,12 +47,10 @@ public static class ColorsetDecalExtractor
         var anySet   = false;
         for (var i = 0; i < width * height; ++i)
         {
-            var pair = Math.Clamp((int)Math.Round(idMap.Rgba[i * 4] / 17f), 0, 15);
-            var g    = idMap.Rgba[i * 4 + 1];
-            var row  = pair * 2 + (g >= 128 ? 0 : 1);
-            texRows[i] = (byte)row;
+            var g = idMap.Rgba[i * 4 + 1];
+            texRows[i] = (byte)IdMapTexel.Row(idMap.Rgba[i * 4], g);
             weights[i] = g >= 128 ? g : (byte)(255 - g);
-            if (!selected.Contains(row))
+            if (!selected.Contains(texRows[i]))
                 continue;
 
             mask[i] = true;
@@ -216,7 +214,7 @@ public static class ColorsetDecalExtractor
             var counts = new Dictionary<int, int>();
             for (var i = 0; i < width * height; ++i)
             {
-                var pair = Math.Clamp((int)Math.Round(idMap.Rgba[i * 4] / 17f), 0, 15);
+                var pair = IdMapTexel.Pair(idMap.Rgba[i * 4]);
                 counts[pair] = counts.GetValueOrDefault(pair) + 1;
             }
 
@@ -226,14 +224,14 @@ public static class ColorsetDecalExtractor
         var pairCounts = new Dictionary<int, int>();
         foreach (var i in ring)
         {
-            var pair = Math.Clamp((int)Math.Round(idMap.Rgba[i * 4] / 17f), 0, 15);
+            var pair = IdMapTexel.Pair(idMap.Rgba[i * 4]);
             pairCounts[pair] = pairCounts.GetValueOrDefault(pair) + 1;
         }
 
         var fillPair = pairCounts.OrderByDescending(kvp => kvp.Value).First().Key;
 
         var blends = ring
-            .Where(i => Math.Clamp((int)Math.Round(idMap.Rgba[i * 4] / 17f), 0, 15) == fillPair)
+            .Where(i => IdMapTexel.Pair(idMap.Rgba[i * 4]) == fillPair)
             .Select(i => (int)idMap.Rgba[i * 4 + 1])
             .OrderBy(g => g)
             .ToList();

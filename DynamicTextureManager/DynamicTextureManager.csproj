@@ -4,7 +4,7 @@
     <Author>Virsta</Author>
     <Name>Dynamic Texture Manager</Name>
     <MinimumDalamudVersion>14.0.0</MinimumDalamudVersion>
-    <Version>0.3.0</Version>
+    <Version>0.4.0</Version>
     <ApplicableVersion>any</ApplicableVersion>
     <Punchline>Manager for dynamically adjusting textures</Punchline>
     <Description>Helps set up custom textures to add custom decals / images on models by generating override textures.</Description>

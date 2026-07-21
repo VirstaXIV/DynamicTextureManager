@@ -106,6 +106,10 @@ public sealed class DecalLayer : TextureLayer
     /// <summary> Decal pixels with alpha at or above this threshold are remapped in <see cref="IdRemap"/> mode. </summary>
     public float AlphaThreshold = 0.5f;
 
+    /// <summary> The threshold as an alpha byte, floored at 1 so fully transparent pixels never pass. </summary>
+    public byte AlphaThresholdByte
+        => (byte)System.Math.Clamp((int)System.Math.Round(AlphaThreshold * 255f), 1, 255);
+
     /// <summary>
     /// All textures of a material are related: a printed-on decal usually wants the cloth
     /// bump detail under it smoothed away. Blends the material's normal map toward flat

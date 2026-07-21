@@ -20,8 +20,7 @@ public sealed class TextureCompositor(DecalLibrary decals) : IService
     /// Apply all enabled layers onto the base texture. Returns the composited RGBA buffer.
     /// Surface-projected layers need the material's mesh geometry; without it they are skipped.
     /// </summary>
-    public byte[] Composite(DecodedTexture baseTexture, IEnumerable<TextureLayer> layers, MaterialMesh? mesh = null,
-        bool previewHighlight = false)
+    public byte[] Composite(DecodedTexture baseTexture, IEnumerable<TextureLayer> layers, MaterialMesh? mesh = null)
     {
         using var image = Image.LoadPixelData<Rgba32>(baseTexture.Rgba, baseTexture.Width, baseTexture.Height);
 
@@ -33,7 +32,7 @@ public sealed class TextureCompositor(DecalLibrary decals) : IService
             switch (layer)
             {
                 case DecalLayer decal:
-                    ApplyDecal(image, decal, mesh, previewHighlight);
+                    ApplyDecal(image, decal, mesh);
                     break;
                 default:
                     DynamicTextureManager.Log.Warning($"Unknown layer type {layer.LayerType}, skipped.");
@@ -44,6 +43,21 @@ public sealed class TextureCompositor(DecalLibrary decals) : IService
         var result = new byte[image.Width * image.Height * 4];
         image.CopyPixelDataTo(result);
         return result;
+    }
+
+    /// <summary>
+    /// The full per-texture composite a build writes (minus BC7): own layers, then sibling
+    /// material effects. The one sequence shared by the mod build and the preview cache, so
+    /// previews stay pixel-identical to built files by construction.
+    /// </summary>
+    public byte[] CompositeFull(DecodedTexture baseTexture, IEnumerable<TextureLayer> layers,
+        IReadOnlyList<TextureLayer> effectLayers, TextureSlot effectSlot, MaterialMesh? mesh)
+    {
+        var rgba = Composite(baseTexture, layers, mesh);
+        if (effectLayers.Count > 0)
+            rgba = CompositeSiblingEffects(new DecodedTexture(rgba, baseTexture.Width, baseTexture.Height),
+                effectLayers, effectSlot, mesh);
+        return rgba;
     }
 
     /// <summary>
@@ -61,7 +75,7 @@ public sealed class TextureCompositor(DecalLibrary decals) : IService
             if (!layer.Enabled || !layer.HasMaterialEffects)
                 continue;
 
-            ApplyDecal(image, layer, mesh, previewHighlight: false, effectSlot: slot);
+            ApplyDecal(image, layer, mesh, effectSlot: slot);
         }
 
         var result = new byte[image.Width * image.Height * 4];
@@ -97,8 +111,7 @@ public sealed class TextureCompositor(DecalLibrary decals) : IService
     private static byte LerpByte(byte from, byte to, float t)
         => (byte)Math.Clamp((int)Math.Round(from + (to - from) * t), 0, 255);
 
-    private void ApplyDecal(Image<Rgba32> target, DecalLayer layer, MaterialMesh? mesh, bool previewHighlight,
-        TextureSlot? effectSlot = null)
+    private void ApplyDecal(Image<Rgba32> target, DecalLayer layer, MaterialMesh? mesh, TextureSlot? effectSlot = null)
     {
         var path = decals.FilePath(layer.DecalId);
         if (!File.Exists(path))
@@ -116,7 +129,7 @@ public sealed class TextureCompositor(DecalLibrary decals) : IService
             }
 
             using var source = Image.Load<Rgba32>(path);
-            SurfaceDecalBaker.Bake(target, source, mesh, layer, previewHighlight, effectSlot);
+            SurfaceDecalBaker.Bake(target, source, mesh, layer, effectSlot);
             return;
         }
 
@@ -161,18 +174,17 @@ public sealed class TextureCompositor(DecalLibrary decals) : IService
             return;
         }
 
-        var path = stampPath;
         var x0 = (int)Math.Round(layer.SourceU * target.Width);
         var y0 = (int)Math.Round(layer.SourceV * target.Height);
         var w  = Math.Max(1, (int)Math.Round(layer.SourceUW * target.Width));
         var h  = Math.Max(1, (int)Math.Round(layer.SourceUH * target.Height));
 
-        using var stamp = Image.Load<Rgba32>(path);
+        using var stamp = Image.Load<Rgba32>(stampPath);
         if (stamp.Width != w || stamp.Height != h)
             stamp.Mutate(c => c.Resize(w, h, KnownResamplers.NearestNeighbor));
 
-        var threshold = (byte)Math.Clamp((int)Math.Round(layer.AlphaThreshold * 255f), 1, 255);
-        var fillR     = (byte)Math.Clamp(layer.FillPair * 17, 0, 255);
+        var threshold = layer.AlphaThresholdByte;
+        var fillR     = IdMapTexel.PairByte(layer.FillPair);
 
         for (var dy = 0; dy < h; ++dy)
         {
@@ -199,7 +211,7 @@ public sealed class TextureCompositor(DecalLibrary decals) : IService
     private static void ApplyFlatEffect(Image<Rgba32> target, Image<Rgba32> decal, DecalLayer layer, int offsetX, int offsetY,
         TextureSlot slot)
     {
-        var threshold = (byte)Math.Clamp((int)Math.Round(layer.AlphaThreshold * 255f), 1, 255);
+        var threshold = layer.AlphaThresholdByte;
 
         for (var dy = 0; dy < decal.Height; ++dy)
         {
@@ -235,7 +247,7 @@ public sealed class TextureCompositor(DecalLibrary decals) : IService
             return;
         }
 
-        var threshold = (byte)Math.Clamp((int)Math.Round(layer.AlphaThreshold * 255f), 1, 255);
+        var threshold = layer.AlphaThresholdByte;
 
         for (var dy = 0; dy < decal.Height; ++dy)
         {
@@ -255,11 +267,7 @@ public sealed class TextureCompositor(DecalLibrary decals) : IService
 
                 var row   = layer.PaletteRows[DecalQuantizer.NearestIndex(source, layer.PaletteColors)];
                 var pixel = target[tx, ty];
-                pixel.R   = (byte)(row / 2 * 17);
-                // Relocated extracted decals carry their blend weight in the stamp's alpha —
-                // it steers the new pair's A/B mix instead of the garment's baked shading.
-                if (layer.WriteBlendFromAlpha)
-                    pixel.G = source.A;
+                IdMapTexel.StampRow(ref pixel, row, source.A, layer.WriteBlendFromAlpha);
                 target[tx, ty] = pixel;
             }
         }

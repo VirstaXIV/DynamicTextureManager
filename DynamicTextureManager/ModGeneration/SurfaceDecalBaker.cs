@@ -15,16 +15,12 @@ namespace DynamicTextureManager.ModGeneration;
 /// </summary>
 public static class SurfaceDecalBaker
 {
-    /// <param name="previewHighlight">
-    /// Draw id-remap texels as a bright highlight color instead of the raw row-pair value —
-    /// the pair byte is almost invisible on an id map, so previews would look empty.
-    /// </param>
     /// <param name="effectSlot">
     /// When set, the bake targets a sibling texture of the same material (normal/mask):
     /// the footprint is identical, but each texel receives the layer's material effect
     /// instead of its colors.
     /// </param>
-    public static void Bake(Image<Rgba32> target, Image<Rgba32> decal, MaterialMesh mesh, DecalLayer layer, bool previewHighlight = false,
+    public static void Bake(Image<Rgba32> target, Image<Rgba32> decal, MaterialMesh mesh, DecalLayer layer,
         TextureSlot? effectSlot = null)
     {
         var anchor = new Vector3(layer.AnchorX, layer.AnchorY, layer.AnchorZ);
@@ -43,7 +39,7 @@ public static class SurfaceDecalBaker
         // Limit projection depth so the decal cannot wrap through the body onto the far side
         // or catch nearby lining/trim pieces as stray fragments.
         var maxDepth  = MathF.Max(worldWidth, worldHeight) * 0.4f;
-        var threshold = (byte)Math.Clamp((int)Math.Round(layer.AlphaThreshold * 255f), 1, 255);
+        var threshold = layer.AlphaThresholdByte;
         var opacity   = Math.Clamp(layer.Opacity, 0f, 1f);
 
         if (effectSlot == null && layer.IdRemap && (layer.PaletteRows.Count == 0 || layer.PaletteRows.Count != layer.PaletteColors.Count))
@@ -102,15 +98,14 @@ public static class SurfaceDecalBaker
                 continue;
 
             RasterizeTriangle(target, decalPixels, decal.Width, decal.Height,
-                mesh.Uvs[i0], mesh.Uvs[i1], mesh.Uvs[i2], d0, d1, d2, maxDepth, threshold, opacity, layer,
-                previewHighlight, effectSlot);
+                mesh.Uvs[i0], mesh.Uvs[i1], mesh.Uvs[i2], d0, d1, d2, maxDepth, threshold, opacity, layer, effectSlot);
         }
     }
 
     /// <summary> Rasterize one triangle in texture space, sampling the decal through the interpolated projection coordinates. </summary>
     private static void RasterizeTriangle(Image<Rgba32> target, Rgba32[] decal, int decalWidth, int decalHeight,
         Vector2 uv0, Vector2 uv1, Vector2 uv2, Vector3 d0, Vector3 d1, Vector3 d2,
-        float maxDepth, byte threshold, float opacity, DecalLayer layer, bool previewHighlight, TextureSlot? effectSlot)
+        float maxDepth, byte threshold, float opacity, DecalLayer layer, TextureSlot? effectSlot)
     {
         var a = new Vector2(uv0.X * target.Width, uv0.Y * target.Height);
         var b = new Vector2(uv1.X * target.Width, uv1.Y * target.Height);
@@ -154,21 +149,9 @@ public static class SurfaceDecalBaker
                     if (sample.A < threshold)
                         continue;
 
-                    if (previewHighlight)
-                    {
-                        target[x, y] = new Rgba32(255, 140, 0, 255);
-                        continue;
-                    }
-
-                    // Write only the claimed slot's pair index; G keeps the garment's baked
-                    // shading blend between the slot's color (A) and its shade partner (B) —
-                    // unless the layer carries its own blend weight in the stamp's alpha
-                    // (relocated extracted decals).
                     var row   = layer.PaletteRows[DecalQuantizer.NearestIndex(sample, layer.PaletteColors)];
                     var pixel = target[x, y];
-                    pixel.R   = (byte)(row / 2 * 17);
-                    if (layer.WriteBlendFromAlpha)
-                        pixel.G = sample.A;
+                    IdMapTexel.StampRow(ref pixel, row, sample.A, layer.WriteBlendFromAlpha);
                     target[x, y] = pixel;
                 }
                 else

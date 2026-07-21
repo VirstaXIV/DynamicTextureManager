@@ -52,7 +52,6 @@ public static class CompositePlanner
         {
             var effectLayers = layers.OfType<DecalLayer>()
                 .Where(l => l.Enabled && l.HasMaterialEffects)
-                .Cast<TextureLayer>()
                 .ToList();
             if (effectLayers.Count == 0)
                 continue;
@@ -69,8 +68,9 @@ public static class CompositePlanner
                     continue;
 
                 // Only layers whose effect actually touches this slot.
-                var slotLayers = effectLayers.Where(l => l is DecalLayer d
-                     && (info.Slot == TextureSlot.Normal ? d.NormalSmooth > 0f : d.MaskPreset != DecalMaskPreset.Keep))
+                var slotLayers = effectLayers
+                    .Where(d => info.Slot == TextureSlot.Normal ? d.NormalSmooth > 0f : d.MaskPreset != DecalMaskPreset.Keep)
+                    .Cast<TextureLayer>()
                     .ToList();
                 if (slotLayers.Count == 0)
                     continue;

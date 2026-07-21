@@ -3,7 +3,6 @@ using System.Collections.Generic;
 using System.IO;
 using System.Linq;
 using System.Numerics;
-using System.Threading.Tasks;
 using Dalamud.Bindings.ImGui;
 using Dalamud.Interface.ImGuiFileDialog;
 using Dalamud.Plugin.Services;
@@ -45,15 +44,13 @@ public sealed class DecalsTab(
     ModelUvReader uvReader,
     TargetResolver resolver,
     CharacterModelState modelState,
-    TextureCompositor compositor,
     PenumbraService penumbra,
     CompositePreviewCache previewCache,
     FilenameService filenames,
     Configuration config)
     : IService, IDisposable
 {
-    private const long SlotPreviewDebounceMs   = 400;
-    private const long PlacementBakeDebounceMs = 400;
+    private const long SlotPreviewDebounceMs = 400;
 
     /// <summary> Darkening applied to a shade-partner row: the benign blend target for a pair's unused half. </summary>
     private const float ShadeFactor = 0.6f;
@@ -72,9 +69,11 @@ public sealed class DecalsTab(
 
     private readonly DecalViewport _viewport = new(textureProvider);
 
-    private string                        _statsTexture = string.Empty;
-    private readonly HashSet<int>         _usedRowPairs = [];
-    private readonly Dictionary<int, int> _rowUsageCounts = [];
+    private string                             _statsTexture = string.Empty;
+    private readonly HashSet<int>              _usedRowPairs = [];
+    private readonly Dictionary<int, int>      _rowUsageCounts = [];
+    private readonly List<(int Row, int Count)> _sortedRowUsage = [];
+    private int                                _statsTotalTexels = 1;
 
     public void Dispose()
         => _viewport.Dispose();
@@ -147,19 +146,30 @@ public sealed class DecalsTab(
         DrawViewport(dTexture);
     }
 
+    private List<TextureOption>? _materialOptionsCache;
+    private (List<TextureOption>? Options, string Material) _materialOptionsKey;
+
+    /// <summary> The selected material's options, cached — Draw paths ask for this several times per frame. </summary>
     private List<TextureOption> MaterialOptions()
-        => _options == null
-            ? []
-            : _options.Where(o => string.Equals(o.MaterialGamePath, _selectedMaterial, StringComparison.OrdinalIgnoreCase)).ToList();
+    {
+        if (_materialOptionsCache != null
+         && ReferenceEquals(_materialOptionsKey.Options, _options)
+         && string.Equals(_materialOptionsKey.Material, _selectedMaterial, StringComparison.OrdinalIgnoreCase))
+            return _materialOptionsCache;
+
+        _materialOptionsKey   = (_options, _selectedMaterial);
+        _materialOptionsCache = _options?
+                .Where(o => string.Equals(o.MaterialGamePath, _selectedMaterial, StringComparison.OrdinalIgnoreCase)).ToList()
+         ?? [];
+        return _materialOptionsCache;
+    }
 
     /// <summary> The material's colorset id map, when the shader supports colorset decals on it. </summary>
     private TextureOption? IndexOption()
-        => _options?.Find(o => string.Equals(o.MaterialGamePath, _selectedMaterial, StringComparison.OrdinalIgnoreCase)
-         && o is { Slot: TextureSlot.Index, DecalRecommended: true });
+        => MaterialOptions().Find(o => o is { Slot: TextureSlot.Index, DecalRecommended: true });
 
     private TextureOption? DiffuseOption()
-        => _options?.Find(o => string.Equals(o.MaterialGamePath, _selectedMaterial, StringComparison.OrdinalIgnoreCase)
-         && o.Slot is TextureSlot.Diffuse);
+        => MaterialOptions().Find(o => o.Slot is TextureSlot.Diffuse);
 
     /// <summary> Where a new decal goes: the colorset id map when supported, else the diffuse. </summary>
     private TextureOption? DefaultTargetOption()
@@ -204,6 +214,17 @@ public sealed class DecalsTab(
 
     private static string RowName(int row)
         => $"{row / 2 + 1}{(row % 2 == 0 ? 'A' : 'B')}";
+
+    /// <summary> Eye icon that highlights a colorset row on the live model while hovered. </summary>
+    private void DrawRowHighlightEye(TextureOption option, int row, ReadOnlySpan<byte> tooltip)
+    {
+        ImUtf8.IconButton(Dalamud.Interface.FontAwesomeIcon.Eye, tooltip);
+        if (ImGui.IsItemHovered())
+        {
+            _highlightHovered = true;
+            highlighter.Highlight(option.MaterialGamePath, option.Mtrl, row);
+        }
+    }
 
     /// <summary> Debounced on-model preview of slot color/dye changes through a temporary mod. </summary>
     private void UpdateSlotPreview(DTexture dTexture)
@@ -527,13 +548,8 @@ public sealed class DecalsTab(
                 ImUtf8.HoverTooltip("This part of the decal renders in this color — recolor it without touching the image."u8);
 
             ImGui.SameLine();
-            ImUtf8.IconButton(Dalamud.Interface.FontAwesomeIcon.Eye,
+            DrawRowHighlightEye(option, row,
                 "Highlights the parts of the model this row colors while hovered (redraws your character).\nAfter a build, that includes the decal itself."u8);
-            if (ImGui.IsItemHovered())
-            {
-                _highlightHovered = true;
-                highlighter.Highlight(option.MaterialGamePath, option.Mtrl, row);
-            }
         }
 
         if (ImUtf8.SmallButton("Reset Rows"u8))
@@ -689,7 +705,7 @@ public sealed class DecalsTab(
         }
         else
         {
-            var result = ColorRowAllocator.Allocate(palette.Length, _usedRowPairs, others);
+            var result = ColorRowAllocator.Allocate(palette.Length, EffectiveGearUsedPairs(dTexture, option.MaterialGamePath), others);
             decal.RowError = result.Error;
             if (result.Success)
             {
@@ -717,6 +733,21 @@ public sealed class DecalsTab(
             dTexture.Data.Materials.Remove(option.MaterialGamePath);
 
         return true;
+    }
+
+    /// <summary>
+    /// The scanner's gear-used slots minus the user's usable overrides — what row allocation
+    /// actually blocks. The scanner marks a slot used over a single referencing texel, so
+    /// the override exists for maps where stray pixels lock out effectively free slots.
+    /// </summary>
+    private IReadOnlySet<int> EffectiveGearUsedPairs(DTexture dTexture, string materialGamePath)
+    {
+        if (!dTexture.Data.Materials.TryGetValue(materialGamePath, out var edit) || edit.UsableSlots.Count == 0)
+            return _usedRowPairs;
+
+        var ret = new HashSet<int>(_usedRowPairs);
+        ret.ExceptWith(edit.UsableSlots);
+        return ret;
     }
 
     /// <summary>
@@ -831,12 +862,17 @@ public sealed class DecalsTab(
         return edit;
     }
 
-    private ColorRowEdit GetOrSeedRow(MaterialEdit edit, ColorTable table, int rowIndex)
+    /// <param name="templateRow">
+    /// The source row the seed copies its values from; defaults to the safe authored row
+    /// <see cref="SeedTemplateIndex"/> picks. Extraction passes the lifted decal's own
+    /// source row so the relocated slot keeps its authored look.
+    /// </param>
+    private ColorRowEdit GetOrSeedRow(MaterialEdit edit, ColorTable table, int rowIndex, int? templateRow = null)
     {
         if (edit.Rows.TryGetValue(rowIndex, out var row))
             return row;
 
-        var seeded = ColorRowEdit.FromRow(rowIndex, table[SeedTemplateIndex(table, rowIndex)]);
+        var seeded = ColorRowEdit.FromRow(rowIndex, table[templateRow ?? SeedTemplateIndex(table, rowIndex)]);
         seeded.RowIndex = rowIndex;
         // Deterministic default for claimed slots: the decal keeps its color unless the
         // user explicitly makes it dyeable — inheriting the template row's dye entry would
@@ -1189,31 +1225,18 @@ public sealed class DecalsTab(
 
     #region 3D preview shading
 
-    private Vector3[]? _rowDiffuse;
-    private int        _rowDiffuseVersion;
-    private bool       _rowDiffuseDirty = true;
-    private string     _rowDiffuseMaterial = string.Empty;
+    private readonly record struct ShadingKey(int DiffuseVersion, int IndexVersion, int RowVersion, bool Placement);
 
-    private long _lastEditMs;
-    private int  _editCounter;
-
-    private DecodedTexture? _exclDecoded;
-    private string          _exclPath = string.Empty;
-    private int             _exclVersion;
-    private bool            _exclBuilding;
-    private (int EntryVersion, int EditCounter, DecalLayer? Layer, string Path) _exclWanted = (-1, -1, null, string.Empty);
-
-    private (int, int, int, int, int) _shadingKey = (-2, -2, -2, -2, -2);
+    private Vector3[]?  _rowDiffuse;
+    private int         _rowDiffuseVersion;
+    private string      _rowDiffuseMaterial = string.Empty;
+    private ShadingKey? _shadingKey;
 
     private void ResetShadingState()
     {
         _rowDiffuse         = null;
-        _rowDiffuseDirty    = true;
         _rowDiffuseMaterial = string.Empty;
-        _exclDecoded        = null;
-        _exclPath           = string.Empty;
-        _exclWanted         = (-1, -1, null, string.Empty);
-        _shadingKey         = (-2, -2, -2, -2, -2);
+        _shadingKey         = null;
     }
 
     /// <summary> The embedded 3D preview of the selected material, textured and colorset-aware. </summary>
@@ -1238,106 +1261,59 @@ public sealed class DecalsTab(
         }
 
         _viewport.Open(dTexture, mesh, modelState.CurrentAttributeMask(mesh.GamePath));
-        UpdateViewportShading(dTexture, mesh);
+        UpdateViewportShading(dTexture);
         _viewport.Draw(dTexture);
     }
 
     /// <summary>
     /// Assemble the viewport's shading inputs: the composited diffuse and id map of the
     /// selected material plus the resolved colorset row colors. While a decal is being
-    /// placed, its own texture uses a base composited WITHOUT that layer — otherwise the
-    /// already-baked copy would ghost at the old position while dragging.
+    /// placed, its own texture uses a base composited WITHOUT that layer (an exclude-layer
+    /// entry of the shared preview cache) — otherwise the already-baked copy would ghost at
+    /// the old position while dragging.
     /// </summary>
-    private void UpdateViewportShading(DTexture dTexture, MaterialMesh mesh)
+    private void UpdateViewportShading(DTexture dTexture)
     {
         var diffuseOption = DiffuseOption();
         var indexOption   = IndexOption();
 
-        if (_rowDiffuseDirty || !string.Equals(_rowDiffuseMaterial, _selectedMaterial, StringComparison.OrdinalIgnoreCase))
+        if (!string.Equals(_rowDiffuseMaterial, _selectedMaterial, StringComparison.OrdinalIgnoreCase))
         {
             var mtrl = (indexOption ?? diffuseOption ?? MaterialOptions().FirstOrDefault())?.Mtrl;
             _rowDiffuse = mtrl == null
                 ? null
                 : MaterialEditApplier.ResolveRowDiffuse(mtrl, dTexture.Data.Materials.GetValueOrDefault(_selectedMaterial));
-            _rowDiffuseDirty    = false;
             _rowDiffuseMaterial = _selectedMaterial;
             ++_rowDiffuseVersion;
         }
 
-        var diffuseEntry = diffuseOption == null ? null : previewCache.Get(dTexture, diffuseOption.GamePath);
-        var indexEntry   = indexOption == null ? null : previewCache.Get(dTexture, indexOption.GamePath);
-
         var placementLayer = _viewport.PlacementLayer;
         var boundPath      = placementLayer == null ? null : LayerOwnerPath(dTexture, placementLayer);
-        if (placementLayer != null && boundPath != null)
-        {
-            var boundEntry = string.Equals(boundPath, diffuseOption?.GamePath, StringComparison.OrdinalIgnoreCase) ? diffuseEntry
-                : string.Equals(boundPath, indexOption?.GamePath, StringComparison.OrdinalIgnoreCase)              ? indexEntry
-                : null;
-            if (boundEntry != null)
-                EnsurePlacementBase(dTexture, placementLayer, boundEntry, mesh, boundPath);
-        }
 
-        var key = (diffuseEntry?.Version ?? -1, indexEntry?.Version ?? -1, _rowDiffuseVersion, _exclVersion,
-            placementLayer == null ? 0 : 1);
+        CompositePreviewCache.Entry? EntryFor(TextureOption? option)
+            => option == null
+                ? null
+                : previewCache.Get(dTexture, option.GamePath,
+                    string.Equals(boundPath, option.GamePath, StringComparison.OrdinalIgnoreCase) ? placementLayer : null);
+
+        var diffuseEntry = EntryFor(diffuseOption);
+        var indexEntry   = EntryFor(indexOption);
+
+        var key = new ShadingKey(diffuseEntry?.Version ?? -1, indexEntry?.Version ?? -1, _rowDiffuseVersion,
+            placementLayer != null);
         if (key == _shadingKey)
             return;
 
         _shadingKey = key;
 
-        DecodedTexture? Buffer(CompositePreviewCache.Entry? entry, string? gamePath)
-        {
-            if (entry?.Pristine == null)
-                return null;
-            if (placementLayer != null && string.Equals(gamePath, boundPath, StringComparison.OrdinalIgnoreCase))
-                return (string.Equals(_exclPath, boundPath, StringComparison.OrdinalIgnoreCase) ? _exclDecoded : null) ?? entry.Pristine;
+        static DecodedTexture? Buffer(CompositePreviewCache.Entry? entry)
+            => entry?.Pristine == null
+                ? null
+                : entry.Composited != null
+                    ? new DecodedTexture(entry.Composited, entry.Pristine.Width, entry.Pristine.Height)
+                    : entry.Pristine;
 
-            return entry.Composited != null
-                ? new DecodedTexture(entry.Composited, entry.Pristine.Width, entry.Pristine.Height)
-                : entry.Pristine;
-        }
-
-        _viewport.UpdateShading(new ViewportShading(
-            Buffer(diffuseEntry, diffuseOption?.GamePath),
-            Buffer(indexEntry, indexOption?.GamePath),
-            _rowDiffuse));
-    }
-
-    /// <summary> Debounced background composite of the bound texture excluding the layer being placed. </summary>
-    private void EnsurePlacementBase(DTexture dTexture, DecalLayer layer, CompositePreviewCache.Entry entry, MaterialMesh mesh,
-        string boundPath)
-    {
-        var wanted = (entry.Version, _editCounter, (DecalLayer?)layer, boundPath);
-        if (_exclBuilding || entry.Pristine == null || _exclWanted == wanted)
-            return;
-        if (Environment.TickCount64 - _lastEditMs < PlacementBakeDebounceMs)
-            return;
-
-        _exclBuilding = true;
-        _exclWanted   = wanted;
-        var pristine = entry.Pristine;
-        var others = dTexture.Data.Textures.GetValueOrDefault(boundPath)?
-                .Where(l => !ReferenceEquals(l, layer)).ToList()
-         ?? [];
-
-        _ = Task.Run(() =>
-        {
-            try
-            {
-                var rgba = compositor.Composite(pristine, others, mesh);
-                _exclDecoded = new DecodedTexture(rgba, pristine.Width, pristine.Height);
-                _exclPath    = boundPath;
-                ++_exclVersion;
-            }
-            catch (Exception ex)
-            {
-                DynamicTextureManager.Log.Warning($"Could not bake the placement base of {boundPath}: {ex.Message}");
-            }
-            finally
-            {
-                _exclBuilding = false;
-            }
-        });
+        _viewport.UpdateShading(new ViewportShading(Buffer(diffuseEntry), Buffer(indexEntry), _rowDiffuse));
     }
 
     #endregion
@@ -1349,11 +1325,12 @@ public sealed class DecalsTab(
     private string                _extractStatus = string.Empty;
 
     /// <summary>
-    /// Lift a decal another mod baked into the id map out into a movable decal layer. The
-    /// selection is per ROW (a slot's A and B halves separately) because a baked decal often
-    /// shares its slot with the garment — e.g. the decal on 3B while 3A colors the cloth.
-    /// The extracted content is relocated onto freshly claimed slots of its own, so
-    /// recoloring and moving it never touches the rest of the gear.
+    /// Colorset management for the material's id map: which slots the map references, a
+    /// per-slot override to hand "used" slots back to the decal allocator (the scanner
+    /// blocks a slot over a single stray texel), and extraction of baked decals. Extraction
+    /// selects per ROW (a slot's A and B halves separately) because a baked decal often
+    /// shares its slot with the garment — e.g. the decal on 3B while 3A colors the cloth —
+    /// and relocates the content onto freshly claimed slots of its own.
     /// </summary>
     private void DrawExtractionSection(DTexture dTexture)
     {
@@ -1362,12 +1339,10 @@ public sealed class DecalsTab(
             return;
 
         ImGui.Separator();
-        if (!ImUtf8.CollapsingHeader("Extract Baked Decal"u8))
+        if (!ImUtf8.CollapsingHeader("Manage Colorset"u8))
             return;
 
         using var indent = ImRaii.PushIndent();
-        ImUtf8.TextWrapped(
-            "Lift a decal that is already baked into this material's id map (e.g. by the source mod) out into a decal layer of its own: hover the eye of each row to see where it renders on your character, pick the row(s) the baked decal uses, then extract. The decal is moved onto free colorset slots of its own — the original texels are filled with the surrounding garment — so it can be recolored and repositioned without touching the rest of the gear."u8);
 
         // Which file the analysis actually reads — a stale capture (taken before the source
         // mod was enabled or updated) is the usual reason a baked decal does not show up.
@@ -1410,19 +1385,26 @@ public sealed class DecalsTab(
             "Drop the stored source capture and resolve the id map again from the currently active mods.\nUse this when the analyzed file is not the one your mod actually ships (e.g. the capture predates enabling or updating the source mod)."u8);
 
         EnsureIdStats(dTexture, option.GamePath);
-        if (_rowUsageCounts.Count == 0)
+        if (_sortedRowUsage.Count == 0)
         {
             ImUtf8.Text("No id-map statistics available for this texture."u8);
             return;
         }
 
         var claimedRows = ClaimedRowsForMaterial(dTexture, option.MaterialGamePath, null);
-        _extractRows.RemoveWhere(claimedRows.Contains);
         var rowDiffuse  = MaterialEditApplier.ResolveRowDiffuse(option.Mtrl, null);
-        var totalTexels = Math.Max(1, _rowUsageCounts.Values.Sum());
+
+        DrawSlotAvailability(dTexture, option, claimedRows, rowDiffuse);
+
+        ImGui.Separator();
+        ImUtf8.Text("Extract Baked Decal"u8);
+        ImUtf8.HoverTooltip(
+            "Lift a decal that is already baked into this id map (e.g. by the source mod) out into a decal layer of its own: hover the eye of each row to see where it renders on your character, pick the row(s) the baked decal uses, then extract. The decal is moved onto free colorset slots of its own — the original texels are filled with the surrounding garment — so it can be recolored and repositioned without touching the rest of the gear."u8);
+
+        _extractRows.RemoveWhere(claimedRows.Contains);
 
         // Small regions first — a baked decal is usually a small fraction of the garment.
-        foreach (var (row, count) in _rowUsageCounts.OrderBy(kvp => kvp.Value))
+        foreach (var (row, count) in _sortedRowUsage)
         {
             using var id      = ImUtf8.PushId(row);
             var       claimed = claimedRows.Contains(row);
@@ -1443,15 +1425,10 @@ public sealed class DecalsTab(
             ImGui.ColorButton("##rowColor",
                 new Vector4(Math.Clamp(color.X, 0f, 1f), Math.Clamp(color.Y, 0f, 1f), Math.Clamp(color.Z, 0f, 1f), 1f));
             ImGui.SameLine();
-            ImUtf8.Text($"{count} texels ({100f * count / totalTexels:F1}%){(claimed ? "  — claimed by a decal layer" : string.Empty)}");
+            ImUtf8.Text($"{count} texels ({100f * count / _statsTotalTexels:F1}%){(claimed ? "  — claimed by a decal layer" : string.Empty)}");
             ImGui.SameLine();
-            ImUtf8.IconButton(Dalamud.Interface.FontAwesomeIcon.Eye,
+            DrawRowHighlightEye(option, row,
                 "Highlights where this row dominantly renders on the character while hovered (redraws your character).\nA baked decal usually lives on a row the garment itself barely uses — often a slot's B half."u8);
-            if (ImGui.IsItemHovered())
-            {
-                _highlightHovered = true;
-                highlighter.Highlight(option.MaterialGamePath, option.Mtrl, row);
-            }
         }
 
         ImUtf8.Checkbox("Largest Connected Region Only"u8, ref _extractLargestOnly);
@@ -1467,14 +1444,78 @@ public sealed class DecalsTab(
             ImUtf8.TextWrapped(_extractStatus);
     }
 
+    /// <summary>
+    /// The material's 16 colorset slots with their allocation status: free, claimed by a
+    /// decal, or referenced by the id map — the latter with a per-slot override handing the
+    /// slot back to the allocator. The scanner blocks a slot over a single referencing
+    /// texel, so stray pixels in modded maps can lock out slots that are effectively free;
+    /// the texel counts are the judgment call.
+    /// </summary>
+    private void DrawSlotAvailability(DTexture dTexture, TextureOption option, HashSet<int> claimedRows, Vector3[]? rowDiffuse)
+    {
+        ImUtf8.Text("Slot Availability"u8);
+        ImUtf8.HoverTooltip(
+            "Which colorset slots decals may claim. Free slots are used automatically; slots the id map references are blocked — but a slot referenced by only a handful of stray texels is often fine to hand over with the Usable checkbox."u8);
+
+        var edit = dTexture.Data.Materials.GetValueOrDefault(option.MaterialGamePath);
+        for (var pair = 1; pair <= ColorRowAllocator.PairCount; ++pair)
+        {
+            using var id   = ImUtf8.PushId(pair);
+            var       rowA = (pair - 1) * 2;
+
+            var color = rowDiffuse == null ? Vector3.One : rowDiffuse[rowA];
+            ImGui.ColorButton("##slotColor",
+                new Vector4(Math.Clamp(color.X, 0f, 1f), Math.Clamp(color.Y, 0f, 1f), Math.Clamp(color.Z, 0f, 1f), 1f));
+            ImGui.SameLine();
+            ImUtf8.Text($"Slot {pair,2}");
+            ImGui.SameLine();
+
+            if (claimedRows.Contains(rowA) || claimedRows.Contains(rowA + 1))
+            {
+                ImUtf8.Text("— claimed by a decal"u8);
+                continue;
+            }
+
+            if (!_usedRowPairs.Contains(pair))
+            {
+                ImUtf8.Text("— free"u8);
+                continue;
+            }
+
+            var usable = edit?.UsableSlots.Contains(pair) ?? false;
+            if (ImUtf8.Checkbox("Usable"u8, ref usable))
+            {
+                var target = GetOrAddMaterialEdit(dTexture, option);
+                if (usable)
+                {
+                    if (!target.UsableSlots.Contains(pair))
+                        target.UsableSlots.Add(pair);
+                }
+                else
+                {
+                    target.UsableSlots.Remove(pair);
+                    if (target.IsEmpty)
+                        dTexture.Data.Materials.Remove(option.MaterialGamePath);
+                }
+
+                Save(dTexture);
+            }
+
+            ImUtf8.HoverTooltip(
+                "Let decals claim this slot even though the id map references it.\nUse when the scanner is wrong (a few stray texels) or to sacrifice the slot deliberately — decals will overwrite its rows wherever the map really renders them."u8);
+
+            ImGui.SameLine();
+            var texels = _rowUsageCounts.GetValueOrDefault(rowA) + _rowUsageCounts.GetValueOrDefault(rowA + 1);
+            ImUtf8.Text($"— used by the map, {texels} texels ({100f * texels / _statsTotalTexels:F1}%)");
+        }
+    }
+
     private void ExtractDecal(DTexture dTexture, TextureOption option, ColorTable table)
     {
         _extractStatus = string.Empty;
 
-        var diskPath = overlayMods.GetOrCaptureTextureSource(dTexture, option.GamePath);
-        if (diskPath is { Length: 0 })
-            diskPath = null; // vanilla
-
+        // An empty capture means vanilla — TextureIO.Load falls back to game data for it.
+        var diskPath   = overlayMods.GetOrCaptureTextureSource(dTexture, option.GamePath);
         var decoded    = textureIO.Load(option.GamePath, diskPath, null);
         var rowDiffuse = MaterialEditApplier.ResolveRowDiffuse(option.Mtrl, null);
         if (decoded == null || rowDiffuse == null)
@@ -1495,7 +1536,8 @@ public sealed class DecalsTab(
         // every recolor to the gear. One whole free pair per source row, like any decal.
         EnsureIdStats(dTexture, option.GamePath);
         var others     = ClaimedRowsForMaterial(dTexture, option.MaterialGamePath, null);
-        var allocation = ColorRowAllocator.Allocate(extraction.Rows.Count, _usedRowPairs, others);
+        var allocation = ColorRowAllocator.Allocate(extraction.Rows.Count,
+            EffectiveGearUsedPairs(dTexture, option.MaterialGamePath), others);
         if (!allocation.Success)
         {
             _extractStatus = allocation.Error!;
@@ -1565,14 +1607,9 @@ public sealed class DecalsTab(
             edit.Rows.Remove(newRow);
             edit.Rows.Remove(newRow + 1);
 
-            var seededA = ColorRowEdit.FromRow(newRow, table[srcRow]);
-            seededA.DyeMode    = ColorRowEdit.RowDyeMode.Disable;
-            edit.Rows[newRow]  = seededA;
-
-            var seededB = ColorRowEdit.FromRow(newRow + 1, table[srcRow]);
-            seededB.Diffuse        = [seededA.Diffuse[0] * ShadeFactor, seededA.Diffuse[1] * ShadeFactor, seededA.Diffuse[2] * ShadeFactor];
-            seededB.DyeMode        = ColorRowEdit.RowDyeMode.Disable;
-            edit.Rows[newRow + 1]  = seededB;
+            var seededA = GetOrSeedRow(edit, table, newRow, srcRow);
+            var seededB = GetOrSeedRow(edit, table, newRow + 1, srcRow);
+            seededB.Diffuse = [seededA.Diffuse[0] * ShadeFactor, seededA.Diffuse[1] * ShadeFactor, seededA.Diffuse[2] * ShadeFactor];
         }
 
         _extractRows.Clear();
@@ -1602,7 +1639,7 @@ public sealed class DecalsTab(
             return;
 
         var basePath = extracted[0].PreExtractionSource!;
-        var decoded  = textureIO.Load(gamePath, basePath.Length == 0 ? null : basePath, null);
+        var decoded  = textureIO.Load(gamePath, basePath, null);
         if (decoded == null)
         {
             DynamicTextureManager.Log.Warning($"Could not load the base source of {gamePath} to build its cleaned copy.");
@@ -1668,10 +1705,7 @@ public sealed class DecalsTab(
             return;
 
         var diskPath = overlayMods.GetOrCaptureTextureSource(dTexture, gamePath);
-        if (diskPath is { Length: 0 })
-            diskPath = null; // vanilla
-
-        var decoded = textureIO.Load(gamePath, diskPath, null);
+        var decoded  = textureIO.Load(gamePath, diskPath, null);
         if (decoded == null)
         {
             // Leave the stats empty but marked current — seeding falls back to the first
@@ -1679,6 +1713,8 @@ public sealed class DecalsTab(
             _statsTexture = gamePath;
             _usedRowPairs.Clear();
             _rowUsageCounts.Clear();
+            _sortedRowUsage.Clear();
+            _statsTotalTexels = 1;
             return;
         }
 
@@ -1692,20 +1728,22 @@ public sealed class DecalsTab(
         _rowUsageCounts.Clear();
         for (var i = 0; i < decoded.Rgba.Length; i += 4)
         {
-            var pair = Math.Clamp((int)Math.Round(decoded.Rgba[i] / 17f), 0, 15);
-            _usedRowPairs.Add(pair + 1);
-            var row = pair * 2 + (decoded.Rgba[i + 1] >= 128 ? 0 : 1);
+            _usedRowPairs.Add(IdMapTexel.Pair(decoded.Rgba[i]) + 1);
+            var row = IdMapTexel.Row(decoded.Rgba[i], decoded.Rgba[i + 1]);
             _rowUsageCounts[row] = _rowUsageCounts.GetValueOrDefault(row) + 1;
         }
+
+        // Prepared once per stats pass — the extraction list draws from these every frame.
+        _sortedRowUsage.Clear();
+        _sortedRowUsage.AddRange(_rowUsageCounts.OrderBy(kvp => kvp.Value).Select(kvp => (kvp.Key, kvp.Value)));
+        _statsTotalTexels = Math.Max(1, decoded.Rgba.Length / 4);
     }
 
     private void Save(DTexture dTexture)
     {
         dTexture.LastEdit = DateTimeOffset.UtcNow;
         previewCache.Invalidate(dTexture.Identifier);
-        _rowDiffuseDirty = true;
-        ++_editCounter;
-        _lastEditMs = Environment.TickCount64;
+        _rowDiffuseMaterial = string.Empty; // resolved row colors refresh on next draw
         saveService.DelaySave(dTexture);
         overlayMods.QueueAutoApply(dTexture);
     }

@@ -42,7 +42,7 @@ public static class TextureOptions
         return ret;
     }
 
-    /// <summary> The display label of one texture slot in the texture dropdowns. </summary>
+    /// <summary> The display label of one texture slot in texture lists and thumbnails. </summary>
     public static string SlotLabel(TextureOption option)
         => option.Slot is TextureSlot.Index ? "Colorset (ID map)" : option.Slot.ToString();
 
