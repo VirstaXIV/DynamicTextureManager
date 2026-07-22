@@ -68,7 +68,7 @@ public sealed class SourceTab(
             return;
         }
 
-        ImUtf8.Text($"Selected Materials ({source.Materials.Count}) — edits always rebuild from these source files, so changes to the base mod carry over on the next build.");
+        ImUtf8.TextWrapped($"Selected Materials ({source.Materials.Count}) — edits always rebuild from these source files, so changes to the base mod carry over on the next build.");
 
         string? remove = null;
         using (var table = ImUtf8.Table("##sourceMaterials"u8, 4, ImGuiTableFlags.SizingStretchProp | ImGuiTableFlags.RowBg))
@@ -150,7 +150,7 @@ public sealed class SourceTab(
         ImUtf8.HoverTooltip("Read the current models and materials of your character through Penumbra."u8);
 
         if (_error.Length > 0)
-            ImUtf8.Text(_error);
+            ImUtf8.TextWrapped(_error);
 
         foreach (var (group, groupIdx) in _groups.WithIndex())
         {

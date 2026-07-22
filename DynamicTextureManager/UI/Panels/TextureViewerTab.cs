@@ -193,7 +193,7 @@ public sealed class TextureViewerTab(
         }
 
         var layerCount = dTexture.Data.Textures.GetValueOrDefault(option.GamePath)?.Count(l => l.Enabled) ?? 0;
-        ImUtf8.Text($"{option.GamePath}  —  {entry.Pristine.Width}x{entry.Pristine.Height}"
+        ImUtf8.TextWrapped($"{option.GamePath}  —  {entry.Pristine.Width}x{entry.Pristine.Height}"
           + (layerCount > 0 ? $", {layerCount} layer(s)" : string.Empty)
           + (entry.Building ? "  (updating...)" : string.Empty));
 

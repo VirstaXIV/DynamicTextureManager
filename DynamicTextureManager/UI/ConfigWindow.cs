@@ -195,7 +195,7 @@ public class ConfigWindow : Window, IDisposable
         foreach (var ((directory, name), idx) in orphans.WithIndex())
         {
             using var id = ImUtf8.PushId(idx);
-            ImUtf8.Text($"{name} ({directory})");
+            ImUtf8.TextWrapped($"{name} ({directory})");
             ImGui.SameLine();
             if (ImUtf8.SmallButton("Open"u8))
                 _penumbra.OpenModInPenumbra(directory);
@@ -220,7 +220,7 @@ public class ConfigWindow : Window, IDisposable
         ImUtf8.Text($"API Version: {_penumbra.Version.Breaking}.{_penumbra.Version.Features}");
         try
         {
-            ImUtf8.Text($"Mod Directory: {_penumbra.GetModDirectory()}");
+            ImUtf8.TextWrapped($"Mod Directory: {_penumbra.GetModDirectory()}");
         }
         catch (Exception ex)
         {
