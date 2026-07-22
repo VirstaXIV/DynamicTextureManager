@@ -272,6 +272,24 @@ public sealed class DecalViewport(ITextureProvider textureProvider) : IDisposabl
         }
 
         ImGui.SameLine();
+        if (ImUtf8.SmallButton("Flip H"u8))
+        {
+            layer.FlipX = !layer.FlipX;
+            MarkEdited();
+        }
+
+        ImUtf8.HoverTooltip(layer.FlipX ? "Mirror the decal horizontally (currently flipped)."u8 : "Mirror the decal horizontally."u8);
+
+        ImGui.SameLine();
+        if (ImUtf8.SmallButton("Flip V"u8))
+        {
+            layer.FlipY = !layer.FlipY;
+            MarkEdited();
+        }
+
+        ImUtf8.HoverTooltip(layer.FlipY ? "Mirror the decal vertically (currently flipped)."u8 : "Mirror the decal vertically."u8);
+
+        ImGui.SameLine();
         if (ImUtf8.Checkbox("Highlight"u8, ref _highlightDecal))
             _renderDirty = true;
         ImUtf8.HoverTooltip("Render the decal as a bright orange footprint instead of its real colors — easier to find on busy textures."u8);
@@ -620,9 +638,12 @@ public sealed class DecalViewport(ITextureProvider textureProvider) : IDisposabl
                         var dz = Vector3.Dot(d, normalDir);
                         if (du is >= 0f and <= 1f && dv is >= 0f and <= 1f && MathF.Abs(dz) <= maxDepth)
                         {
+                            // The bake flips the source image itself; sampling mirrored here matches it.
+                            var su = layer.FlipX ? 1f - du : du;
+                            var sv = layer.FlipY ? 1f - dv : dv;
                             var sample = _decalPixels == null
                                 ? new Rgba32(255, 255, 255, 255)
-                                : SurfaceDecalBaker.SampleBilinear(_decalPixels, _decalWidth, _decalHeight, du, dv);
+                                : SurfaceDecalBaker.SampleBilinear(_decalPixels, _decalWidth, _decalHeight, su, sv);
                             if (layer.IdRemap)
                             {
                                 if (sample.A >= threshold)

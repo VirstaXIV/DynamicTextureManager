@@ -83,6 +83,11 @@ public sealed class DecalLayer : TextureLayer
 
     public float RotationDeg;
 
+    /// <summary> Mirror the decal image along its own horizontal/vertical axis. </summary>
+    public bool FlipX;
+
+    public bool FlipY;
+
     public float Opacity = 1f;
 
     /// <summary>
@@ -222,6 +227,8 @@ public sealed class DecalLayer : TextureLayer
         json["ScaleX"]         = ScaleX;
         json["ScaleY"]         = ScaleY;
         json["RotationDeg"]    = RotationDeg;
+        json["FlipX"]          = FlipX;
+        json["FlipY"]          = FlipY;
         json["Opacity"]        = Opacity;
         json["IdRemap"]        = IdRemap;
         json["MaxColors"]      = MaxColors;
@@ -267,6 +274,8 @@ public sealed class DecalLayer : TextureLayer
             ScaleX         = json["ScaleX"]?.ToObject<float>() ?? 0.25f,
             ScaleY         = json["ScaleY"]?.ToObject<float>() ?? 0.25f,
             RotationDeg    = json["RotationDeg"]?.ToObject<float>() ?? 0f,
+            FlipX          = json["FlipX"]?.ToObject<bool>() ?? false,
+            FlipY          = json["FlipY"]?.ToObject<bool>() ?? false,
             Opacity        = json["Opacity"]?.ToObject<float>() ?? 1f,
             IdRemap        = json["IdRemap"]?.ToObject<bool>() ?? false,
             MaxColors      = json["MaxColors"]?.ToObject<int>() ?? 6,
