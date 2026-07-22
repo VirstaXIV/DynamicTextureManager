@@ -28,7 +28,7 @@ public sealed class ModWriter : IService
             _finalDirectory = finalDirectory;
             _buildDirectory = finalDirectory + ".build";
             if (Directory.Exists(_buildDirectory))
-                Directory.Delete(_buildDirectory, true);
+                Retry(() => Directory.Delete(_buildDirectory, true), $"delete stale build directory {_buildDirectory}");
             Directory.CreateDirectory(_buildDirectory);
         }
 
@@ -54,21 +54,93 @@ public sealed class ModWriter : IService
             WriteMeta(modName, version);
             WriteDefaultMod();
 
-            if (Directory.Exists(_finalDirectory))
+            // Leftover from the pre-v0.5.2 rename-swap commit; clean it up opportunistically.
+            var old = _finalDirectory + ".old";
+            if (Directory.Exists(old))
+                try
+                {
+                    Retry(() => Directory.Delete(old, true), $"delete stale directory {old}");
+                }
+                catch (Exception ex)
+                {
+                    DynamicTextureManager.Log.Warning($"Could not remove stale directory {old}: {ex.Message}");
+                }
+
+            if (!Directory.Exists(_finalDirectory))
             {
-                var old = _finalDirectory + ".old";
-                if (Directory.Exists(old))
-                    Directory.Delete(old, true);
-                Directory.Move(_finalDirectory, old);
-                Directory.Move(_buildDirectory, _finalDirectory);
-                Directory.Delete(old, true);
+                Retry(() => Directory.Move(_buildDirectory, _finalDirectory), $"move {_buildDirectory} into place");
+                _committed = true;
+                return;
             }
-            else
+
+            // Existing mods are updated by replacing files IN PLACE rather than the old
+            // whole-directory rename swap: Mare-family sync plugins (PlayerSync,
+            // LightlessSync) watch the entire Penumbra directory and react to a directory
+            // rename by re-enumerating and re-hashing the renamed tree — racing our delete
+            // of it, which has crashed the game inside their watcher callbacks and also
+            // held handles that made our own renames fail. Per-file replaces are the events
+            // those watchers (and Penumbra) handle routinely. Every operation retries with
+            // backoff to wait out transient watcher/antivirus file locks.
+            var kept = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+            foreach (var file in Directory.GetFiles(_buildDirectory, "*", SearchOption.AllDirectories))
             {
-                Directory.Move(_buildDirectory, _finalDirectory);
+                var relative = Path.GetRelativePath(_buildDirectory, file);
+                kept.Add(relative);
+                var target = Path.Combine(_finalDirectory, relative);
+                Directory.CreateDirectory(Path.GetDirectoryName(target)!);
+                Retry(() => File.Move(file, target, true), $"replace {target}");
+            }
+
+            foreach (var file in Directory.GetFiles(_finalDirectory, "*", SearchOption.AllDirectories))
+                if (!kept.Contains(Path.GetRelativePath(_finalDirectory, file)))
+                    Retry(() => File.Delete(file), $"delete {file}");
+
+            DeleteEmptySubdirectories(_finalDirectory);
+            try
+            {
+                Retry(() => Directory.Delete(_buildDirectory, true), $"delete build directory {_buildDirectory}");
+            }
+            catch (Exception ex)
+            {
+                DynamicTextureManager.Log.Warning($"Could not remove build directory {_buildDirectory}: {ex.Message}");
             }
 
             _committed = true;
+        }
+
+        /// <summary> Waits out transient IO failures — file-cache watchers and antivirus briefly hold handles on fresh files. </summary>
+        private static void Retry(Action action, string what)
+        {
+            for (var attempt = 0;; ++attempt)
+            {
+                try
+                {
+                    action();
+                    return;
+                }
+                catch (Exception ex) when (attempt < 5 && ex is IOException or UnauthorizedAccessException)
+                {
+                    DynamicTextureManager.Log.Debug($"Retrying ({attempt + 1}/5) after failure to {what}: {ex.Message}");
+                    System.Threading.Thread.Sleep(50 << attempt);
+                }
+            }
+        }
+
+        private static void DeleteEmptySubdirectories(string root)
+        {
+            foreach (var dir in Directory.GetDirectories(root))
+            {
+                DeleteEmptySubdirectories(dir);
+                if (Directory.Exists(dir) && Directory.GetFileSystemEntries(dir).Length == 0)
+                    try
+                    {
+                        Retry(() => Directory.Delete(dir), $"delete empty directory {dir}");
+                    }
+                    catch (Exception ex)
+                    {
+                        DynamicTextureManager.Log.Warning($"Could not remove empty directory {dir}: {ex.Message}");
+                    }
+            }
         }
 
         public void Dispose()
