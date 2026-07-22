@@ -251,7 +251,7 @@ public sealed class DecalLibraryPanel(DecalLibrary decals, ITextureProvider text
                 _                      => "finish untouched",
             };
             var colors = preset.IdRemap ? $"{preset.MaxColors} colors" : "full color";
-            ImUtf8.Text($"Preset: {colors}, {finish}, opacity {preset.Opacity:F2}");
+            ImUtf8.TextWrapped($"Preset: {colors}, {finish}, opacity {preset.Opacity:F2}");
             ImUtf8.HoverTooltip("Settings applied when this decal is attached to gear — saved from a placed decal with \"Save Settings to Library\"."u8);
             ImGui.SameLine();
             if (ImUtf8.SmallButton("Clear Preset"u8))

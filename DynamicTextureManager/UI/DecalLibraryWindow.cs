@@ -46,8 +46,7 @@ public class DecalLibraryWindow : Window
             return;
         }
 
-        ImUtf8.Text(_pickerPrompt);
-        ImGui.SameLine();
+        ImUtf8.TextWrapped(_pickerPrompt);
         if (ImUtf8.SmallButton("Cancel"u8))
         {
             _onPick = null;

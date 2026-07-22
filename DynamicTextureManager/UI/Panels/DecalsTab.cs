@@ -131,7 +131,7 @@ public sealed class DecalsTab(
         if (DefaultTargetOption() == null)
         {
             var legacyIndex = MaterialOptions().Any(o => o is { Slot: TextureSlot.Index, DecalRecommended: false });
-            ImUtf8.Text(legacyIndex
+            ImUtf8.TextWrapped(legacyIndex
                 ? "Colorset decals require a current (Dawntrail) gear material — legacy gear, skin and other texture types are not supported yet."u8
                 : "This material exposes no texture decals can stamp onto."u8);
         }
@@ -198,8 +198,8 @@ public sealed class DecalsTab(
             return;
 
         ImGui.Separator();
-        ImUtf8.Text($"Other edited rows on this material: {string.Join(", ", strays.Select(RowName))}");
-        ImUtf8.Text("These affect the gear too — leftovers from removed decals or older experiments."u8);
+        ImUtf8.TextWrapped($"Other edited rows on this material: {string.Join(", ", strays.Select(RowName))}");
+        ImUtf8.TextWrapped("These affect the gear too — leftovers from removed decals or older experiments."u8);
         if (ImUtf8.SmallButton("Clear These Rows"u8) && ImGui.GetIO().KeyCtrl)
         {
             foreach (var row in strays)
@@ -551,7 +551,7 @@ public sealed class DecalsTab(
 
         if (decal.Extracted)
         {
-            ImUtf8.Text("Extracted from this texture's id map — relocated onto its own claimed slots, seeded from the source rows."u8);
+            ImUtf8.TextWrapped("Extracted from this texture's id map — relocated onto its own claimed slots, seeded from the source rows."u8);
             ImUtf8.HoverTooltip(
                 "This decal was lifted out of the id map and moved onto freshly claimed colorset slots that copy the source rows' authored look.\nRecoloring a slot recolors only the decal — the rest of the gear keeps its own rows."u8);
         }
@@ -707,7 +707,7 @@ public sealed class DecalsTab(
             ImUtf8.HoverTooltip(
                 "How stain colors translate to the claimed rows — detected from how the rest of this gear dyes.\nIf it reads 0, no template was detected; copy the id from a similar dyeable item."u8);
 
-            ImUtf8.Text(lead.DyeTemplate > 0
+            ImUtf8.TextWrapped(lead.DyeTemplate > 0
                 ? $"Dyes like the rest of this gear (template {lead.DyeTemplate})."
                 : "No dye template detected on this gear — the decal will not react to dyes until a template id is set above.");
         }
@@ -1258,10 +1258,10 @@ public sealed class DecalsTab(
 
             if (_placementError.Length > 0)
                 using (ImRaii.PushColor(ImGuiCol.Text, 0xFF00A0FFu))
-                    ImUtf8.Text(_placementError);
+                    ImUtf8.TextWrapped(_placementError);
             else if (decal is { AnchorX: 0f, AnchorY: 0f, AnchorZ: 0f })
                 using (ImRaii.PushColor(ImGuiCol.Text, 0xFF00A0FFu))
-                    ImUtf8.Text("NOT PLACED YET — the decal stays invisible until you place it in the 3D view below."u8);
+                    ImUtf8.TextWrapped("NOT PLACED YET — the decal stays invisible until you place it in the 3D view below."u8);
         }
         else
         {
@@ -1281,7 +1281,7 @@ public sealed class DecalsTab(
                 changed |= ImUtf8.Slider("Opacity"u8, ref decal.Opacity, "%.2f"u8, 0f, 1f);
             }
 
-            ImUtf8.Text("Flat UV placement — check the result in the 3D preview below or the Textures tab, or switch to Place on Model (3D)."u8);
+            ImUtf8.TextWrapped("Flat UV placement — check the result in the 3D preview below or the Textures tab, or switch to Place on Model (3D)."u8);
         }
 
         return changed;
@@ -1545,7 +1545,7 @@ public sealed class DecalsTab(
                  => "cleaned copy (extracted decals removed)",
             _ => Path.GetFileName(capturedPath),
         };
-        ImUtf8.Text($"Analyzing id map: {sourceLabel}");
+        ImUtf8.TextWrapped($"Analyzing id map: {sourceLabel}");
         if (capturedPath is { Length: > 0 } && ImGui.IsItemHovered())
             ImUtf8.HoverTooltip(capturedPath);
         ImGui.SameLine();
