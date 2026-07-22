@@ -222,7 +222,7 @@ public sealed class DecalViewport(ITextureProvider textureProvider) : IDisposabl
         if (_layer != null)
             DrawPlacementControls(_layer);
         else
-            ImUtf8.Text("Right-drag: orbit.  Middle-drag: pan.  Wheel: zoom.  Add or place a decal to stamp on the mesh."u8);
+            ImUtf8.TextWrapped("Right-drag: orbit.  Middle-drag: pan.  Wheel: zoom.  Add or place a decal to stamp on the mesh."u8);
 
         var avail = ImGui.GetContentRegionAvail();
         var size  = MathF.Max(200f, MathF.Min(avail.X, avail.Y));
@@ -243,7 +243,7 @@ public sealed class DecalViewport(ITextureProvider textureProvider) : IDisposabl
 
     private void DrawPlacementControls(DecalLayer layer)
     {
-        ImUtf8.Text("Left-drag: place/move decal.  Right-drag: orbit.  Middle-drag: pan.  Wheel: zoom, Ctrl+wheel: decal size, Shift+wheel: decal rotation."u8);
+        ImUtf8.TextWrapped("Left-drag: place/move decal.  Right-drag: orbit.  Middle-drag: pan.  Wheel: zoom, Ctrl+wheel: decal size, Shift+wheel: decal rotation."u8);
 
         var widthCm = layer.WorldWidth * 100f;
         ImGui.SetNextItemWidth(130 * ImUtf8.GlobalScale);
