@@ -107,6 +107,15 @@ public sealed class TextureCompositor(DecalLibrary decals) : IService
         }
     }
 
+    /// <summary> Mirror the decal image in its own space, before any resize/rotation/projection. </summary>
+    private static void ApplyFlips(Image<Rgba32> image, DecalLayer layer)
+    {
+        if (layer.FlipX)
+            image.Mutate(c => c.Flip(FlipMode.Horizontal));
+        if (layer.FlipY)
+            image.Mutate(c => c.Flip(FlipMode.Vertical));
+    }
+
     private static byte LerpByte(byte from, byte to, float t)
         => (byte)Math.Clamp((int)Math.Round(from + (to - from) * t), 0, 255);
 
@@ -128,6 +137,7 @@ public sealed class TextureCompositor(DecalLibrary decals) : IService
             }
 
             using var source = Image.Load<Rgba32>(path);
+            ApplyFlips(source, layer);
             SurfaceDecalBaker.Bake(target, source, mesh, layer, effectSlot);
             return;
         }
@@ -138,6 +148,7 @@ public sealed class TextureCompositor(DecalLibrary decals) : IService
         var height = Math.Max(1, (int)Math.Round(layer.ScaleY * scale * target.Height));
 
         using var decal = Image.Load<Rgba32>(path);
+        ApplyFlips(decal, layer);
         // Bilinear resampling invents blend colors at edges; keep colorset decals crisp so
         // every pixel nearest-maps to one of the extracted palette colors.
         if (layer.IdRemap)

@@ -321,6 +321,8 @@ public sealed class DecalsTab(
             layer.ScaleX          = preset.ScaleX;
             layer.ScaleY          = preset.ScaleY;
             layer.RotationDeg     = preset.RotationDeg;
+            layer.FlipX           = preset.FlipX;
+            layer.FlipY           = preset.FlipY;
             layer.WorldWidth      = preset.WorldWidth;
             layer.WorldHeight     = preset.WorldHeight;
             layer.NormalSmooth    = preset.NormalSmooth;
@@ -397,6 +399,8 @@ public sealed class DecalsTab(
             ScaleX          = decal.ScaleX,
             ScaleY          = decal.ScaleY,
             RotationDeg     = decal.RotationDeg,
+            FlipX           = decal.FlipX,
+            FlipY           = decal.FlipY,
             WorldWidth      = decal.WorldWidth,
             WorldHeight     = decal.WorldHeight,
         };
@@ -1280,6 +1284,22 @@ public sealed class DecalsTab(
                 ImGui.SetNextItemWidth(220 * ImUtf8.GlobalScale);
                 changed |= ImUtf8.Slider("Opacity"u8, ref decal.Opacity, "%.2f"u8, 0f, 1f);
             }
+
+            if (ImUtf8.SmallButton("Flip H"u8))
+            {
+                decal.FlipX = !decal.FlipX;
+                changed     = true;
+            }
+
+            ImUtf8.HoverTooltip("Mirror the decal horizontally."u8);
+            ImGui.SameLine();
+            if (ImUtf8.SmallButton("Flip V"u8))
+            {
+                decal.FlipY = !decal.FlipY;
+                changed     = true;
+            }
+
+            ImUtf8.HoverTooltip("Mirror the decal vertically."u8);
 
             ImUtf8.TextWrapped("Flat UV placement — check the result in the 3D preview below or the Textures tab, or switch to Place on Model (3D)."u8);
         }

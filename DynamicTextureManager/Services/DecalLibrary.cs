@@ -34,6 +34,8 @@ public sealed class DecalPreset
     public float ScaleX  = 0.25f;
     public float ScaleY  = 0.25f;
     public float RotationDeg;
+    public bool  FlipX;
+    public bool  FlipY;
     public float WorldWidth  = 0.1f;
     public float WorldHeight = 0.1f;
 
@@ -53,6 +55,8 @@ public sealed class DecalPreset
             ["ScaleX"]          = ScaleX,
             ["ScaleY"]          = ScaleY,
             ["RotationDeg"]     = RotationDeg,
+            ["FlipX"]           = FlipX,
+            ["FlipY"]           = FlipY,
             ["WorldWidth"]      = WorldWidth,
             ["WorldHeight"]     = WorldHeight,
         };
@@ -73,6 +77,8 @@ public sealed class DecalPreset
             ScaleX          = json["ScaleX"]?.ToObject<float>() ?? 0.25f,
             ScaleY          = json["ScaleY"]?.ToObject<float>() ?? 0.25f,
             RotationDeg     = json["RotationDeg"]?.ToObject<float>() ?? 0f,
+            FlipX           = json["FlipX"]?.ToObject<bool>() ?? false,
+            FlipY           = json["FlipY"]?.ToObject<bool>() ?? false,
             WorldWidth      = json["WorldWidth"]?.ToObject<float>() ?? 0.1f,
             WorldHeight     = json["WorldHeight"]?.ToObject<float>() ?? 0.1f,
         };
