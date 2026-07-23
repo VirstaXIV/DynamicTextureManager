@@ -106,6 +106,20 @@ public sealed class DecalLayer : TextureLayer
     /// <summary> Claimed colorset half-row indices (0-31); PaletteRows[i] renders PaletteColors[i]. </summary>
     public List<int> PaletteRows = [];
 
+    /// <summary>
+    /// Recolor mode for diffuse-target decals (skin, legacy gear): decal pixels nearest-map
+    /// to <see cref="PaletteColors"/> and render <see cref="TintColors"/>[i] instead, baked
+    /// into the texture at composite time — the diffuse counterpart of colorset row recolors.
+    /// </summary>
+    public bool TintEnabled;
+
+    /// <summary> Replacement colors, packed Rgba32; index-parallel to <see cref="PaletteColors"/>. </summary>
+    public List<uint> TintColors = [];
+
+    /// <summary> Whether the tint is active and consistent enough to apply. </summary>
+    public bool HasTint
+        => TintEnabled && PaletteColors.Count > 0 && TintColors.Count == PaletteColors.Count;
+
     /// <summary> Runtime-only allocation failure shown in the UI; the layer auto-disables when set. </summary>
     public string? RowError;
 
@@ -234,6 +248,8 @@ public sealed class DecalLayer : TextureLayer
         json["MaxColors"]      = MaxColors;
         json["PaletteColors"]  = new JArray(PaletteColors);
         json["PaletteRows"]    = new JArray(PaletteRows);
+        json["TintEnabled"]    = TintEnabled;
+        json["TintColors"]     = new JArray(TintColors);
         json["AlphaThreshold"] = AlphaThreshold;
         json["NormalSmooth"]    = NormalSmooth;
         json["Finish"]          = (int)Finish;
@@ -281,6 +297,8 @@ public sealed class DecalLayer : TextureLayer
             MaxColors      = json["MaxColors"]?.ToObject<int>() ?? 6,
             PaletteColors  = json["PaletteColors"]?.ToObject<List<uint>>() ?? [],
             PaletteRows    = json["PaletteRows"]?.ToObject<List<int>>() ?? [],
+            TintEnabled    = json["TintEnabled"]?.ToObject<bool>() ?? false,
+            TintColors     = json["TintColors"]?.ToObject<List<uint>>() ?? [],
             AlphaThreshold = json["AlphaThreshold"]?.ToObject<float>() ?? 0.5f,
             NormalSmooth   = json["NormalSmooth"]?.ToObject<float>() ?? 0f,
             // "Finish" replaced the pre-v0.5 "MaskPreset" key; old Matte/Glossy values map 1:1.

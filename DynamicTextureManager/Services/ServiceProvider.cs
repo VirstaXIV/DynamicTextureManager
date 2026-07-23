@@ -63,6 +63,7 @@ public static class ServiceProvider
     private static ServiceManager AddInterop(this ServiceManager services)
         => services.AddSingleton<PenumbraService>()
                    .AddSingleton<CharacterModelState>()
+                   .AddSingleton<SkinColorReader>()
                    .AddSingleton<TargetResolver>()
                    .AddSingleton<ShaderHandlerRegistry>()
                    .AddSingleton<SourceFileProvider>()

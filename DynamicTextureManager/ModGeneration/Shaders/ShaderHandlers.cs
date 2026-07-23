@@ -20,6 +20,13 @@ public abstract class ShaderHandlerBase : IShaderHandler
     public virtual bool SupportsDecals
         => true;
 
+    public virtual MaterialKind Kind(MtrlFile material)
+        => MaterialKind.Unknown;
+
+    /// <summary> Whether the material binds a diffuse/base color texture. </summary>
+    protected static bool HasDiffuse(MtrlFile material)
+        => material.ShaderPackage.Samplers.Any(s => s.SamplerId == ShpkFile.DiffuseSamplerId && s.TextureIndex < material.Textures.Length);
+
     public virtual IReadOnlyList<TextureSlotInfo> ClassifyTextures(MtrlFile material)
     {
         var ret = new List<TextureSlotInfo>(material.Textures.Length);
@@ -65,16 +72,27 @@ public sealed class CharacterShaderHandler : ShaderHandlerBase
 
     public override bool SupportsColorsetDecals(MtrlFile material)
         => material.Table is ColorTable;
+
+    public override MaterialKind Kind(MtrlFile material)
+        => material.Table is ColorTable ? MaterialKind.ModernColorset : MaterialKind.Unknown;
 }
 
-/// <summary> Pre-Dawntrail character shader with the legacy 16-row table. </summary>
+/// <summary>
+/// Pre-Dawntrail character shader with the legacy 16-row table. The legacy colorset row is
+/// selected through the normal map's alpha with fractional interpolation between adjacent
+/// rows and its color is multiplied with the diffuse — there is no id-map pair scheme to
+/// claim rows through, so decal colors are baked into the diffuse texture instead.
+/// </summary>
 public sealed class CharacterLegacyShaderHandler : ShaderHandlerBase
 {
     public override bool Matches(string shpkName)
         => string.Equals(shpkName, "characterlegacy.shpk", StringComparison.OrdinalIgnoreCase);
+
+    public override MaterialKind Kind(MtrlFile material)
+        => HasDiffuse(material) ? MaterialKind.LegacyDiffuse : MaterialKind.Unknown;
 }
 
-/// <summary> Skin shader (body/face): decals on the diffuse texture, no colorset UI. </summary>
+/// <summary> Skin shader (body/face): tattoo-style decals baked into the diffuse texture, no colorset. </summary>
 public sealed class SkinShaderHandler : ShaderHandlerBase
 {
     public override bool Matches(string shpkName)
@@ -82,6 +100,9 @@ public sealed class SkinShaderHandler : ShaderHandlerBase
 
     public override bool SupportsColorSet(MtrlFile material)
         => false;
+
+    public override MaterialKind Kind(MtrlFile material)
+        => MaterialKind.Skin;
 }
 
 /// <summary> Unknown shaders: expose the raw texture list, no colorset, decals only on decodable diffuse textures. </summary>

@@ -1,6 +1,7 @@
 using System;
 using System.Collections.Generic;
 using System.Linq;
+using DynamicTextureManager.DTextures.Data;
 using SixLabors.ImageSharp;
 using SixLabors.ImageSharp.PixelFormats;
 using SixLabors.ImageSharp.Processing.Processors.Quantization;
@@ -76,6 +77,20 @@ public static class DecalQuantizer
         }
 
         return best;
+    }
+
+    /// <summary>
+    /// The composite-time recolor for diffuse-target decals: the pixel's RGB is replaced by
+    /// the tint color of its nearest palette slot, its alpha kept — so opacity still fades
+    /// the whole decal after tinting. No-op unless the layer's tint is active and consistent.
+    /// </summary>
+    public static Rgba32 ApplyTint(in Rgba32 sample, DecalLayer layer)
+    {
+        if (!layer.HasTint)
+            return sample;
+
+        var tint = new Rgba32(layer.TintColors[NearestIndex(sample, layer.PaletteColors)]);
+        return new Rgba32(tint.R, tint.G, tint.B, sample.A);
     }
 
     /// <summary>

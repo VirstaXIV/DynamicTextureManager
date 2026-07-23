@@ -7,6 +7,7 @@ using Dalamud.Interface.Textures;
 using Dalamud.Interface.Textures.TextureWraps;
 using Dalamud.Plugin.Services;
 using DynamicTextureManager.DTextures;
+using DynamicTextureManager.DTextures.Data;
 using DynamicTextureManager.ModGeneration;
 using DynamicTextureManager.ModGeneration.Shaders;
 using DynamicTextureManager.Services;
@@ -28,7 +29,9 @@ public sealed class TextureViewerTab(
     CompositePreviewCache previewCache,
     ModelUvReader uvReader,
     ITextureProvider textureProvider,
-    Configuration config)
+    Configuration config,
+    OverlayModManager overlayMods,
+    SaveService saveService)
     : IService, IDisposable
 {
     private Guid                 _cacheOwner = Guid.Empty;
@@ -167,6 +170,8 @@ public sealed class TextureViewerTab(
             _showComposited = true;
         ImUtf8.HoverTooltip("The composited result the build writes: all decal layers and material effects applied."u8);
 
+        DrawReloadSource(dTexture, option);
+
         ImGui.SameLine();
         var showSeams = config.ShowUvSeams;
         if (ImUtf8.Checkbox("Show UV Seams"u8, ref showSeams))
@@ -198,6 +203,36 @@ public sealed class TextureViewerTab(
           + (entry.Building ? "  (updating...)" : string.Empty));
 
         DrawCanvas(dTexture, option, wrap);
+    }
+
+    /// <summary>
+    /// Drop the stored source capture and force a fresh one on next composite — the escape
+    /// hatch for a stale or poisoned pristine (e.g. a capture that predates enabling/updating
+    /// the source mod, or one that pointed into a generated mod under a name the poison check
+    /// didn't recognize). Index maps with active extractions use the rebase-aware version in
+    /// the Decals tab's "Manage Colorset" section instead, so this one steps aside there to
+    /// avoid two reload paths disagreeing about the cleaned copy.
+    /// </summary>
+    private void DrawReloadSource(DTexture dTexture, TextureOption option)
+    {
+        var hasExtractions = dTexture.Data.Textures.GetValueOrDefault(option.GamePath)?
+            .OfType<DecalLayer>().Any(l => l is { Extracted: true, PreExtractionSource: not null }) ?? false;
+
+        ImGui.SameLine();
+        using (ImRaii.Disabled(hasExtractions))
+        {
+            if (ImUtf8.SmallButton("Reload Source"u8) && !hasExtractions)
+            {
+                dTexture.Data.TextureSourcePaths.Remove(option.GamePath);
+                previewCache.Invalidate(dTexture.Identifier, option.GamePath);
+                overlayMods.GetOrCaptureTextureSource(dTexture, option.GamePath);
+                saveService.QueueSave(dTexture);
+            }
+        }
+
+        ImUtf8.HoverTooltip(hasExtractions
+            ? "This id map has extracted decals — reload it from the Decals tab's \"Manage Colorset\" section, which rebases them onto the fresh capture."u8
+            : "Drop the stored source capture and resolve this texture again from the currently active mods.\nUse this when the shown texture is not the one your mod actually ships (e.g. the capture predates enabling or updating the source mod, or is otherwise stuck)."u8);
     }
 
     private IDalamudTextureWrap? DisplayWrap(CompositePreviewCache.Entry entry)

@@ -1,4 +1,5 @@
 using System;
+using System.Collections.Generic;
 using System.Numerics;
 using DynamicTextureManager.DTextures.Data;
 using DynamicTextureManager.ModGeneration.Shaders;
@@ -9,9 +10,10 @@ namespace DynamicTextureManager.ModGeneration;
 
 /// <summary>
 /// Bakes a surface-projected decal into texture space: the decal is projected onto the
-/// bind-pose mesh through a planar frame at its anchor point, then every mesh triangle is
-/// rasterized in UV space with the projected decal sampled per texel. The result conforms
-/// to the geometry, stretches with the actual UV density and continues across UV seams.
+/// bind-pose mesh through a curvature-following frame anchored at its placement point (see
+/// <see cref="ComputeSurfaceProjection"/>), then every mesh triangle is rasterized in UV space
+/// with the projected decal sampled per texel. The result conforms to the geometry, stretches
+/// with the actual UV density and continues across UV seams.
 /// </summary>
 public static class SurfaceDecalBaker
 {
@@ -36,9 +38,6 @@ public static class SurfaceDecalBaker
         var worldWidth  = layer.WorldWidth * effectScale;
         var worldHeight = layer.WorldHeight * effectScale;
 
-        // Limit projection depth so the decal cannot wrap through the body onto the far side
-        // or catch nearby lining/trim pieces as stray fragments.
-        var maxDepth  = MathF.Max(worldWidth, worldHeight) * 0.4f;
         var threshold = layer.AlphaThresholdByte;
         var opacity   = Math.Clamp(layer.Opacity, 0f, 1f);
 
@@ -51,6 +50,8 @@ public static class SurfaceDecalBaker
         var decalPixels = new Rgba32[decal.Width * decal.Height];
         decal.CopyPixelDataTo(decalPixels);
 
+        var projection = ComputeSurfaceProjection(mesh, anchor, normal, tangent, bitangent, WalkRadius(worldWidth, worldHeight));
+
         // Rasterize the same morphed surface that was clicked when placing.
         var indices = mesh.IndicesWithShapes(layer.SurfaceShapes);
 
@@ -58,7 +59,11 @@ public static class SurfaceDecalBaker
         {
             // Stay on the stamped mesh part and off geometry that was hidden at stamp time —
             // overlapping pieces (linings, variant panels) must not catch the projection.
+            // Context geometry (other materials of the model set) has UVs in a different
+            // texture and must never be rasterized into this one.
             var triangle = i / 3;
+            if (!mesh.TriangleEditable[triangle])
+                continue;
             if (layer.SurfaceLimitToPart && layer.SurfacePart >= 0 && mesh.TriangleParts[triangle] != layer.SurfacePart)
                 continue;
             if ((mesh.TriangleAttributeMasks[triangle] & ~layer.SurfaceAttributes) != 0)
@@ -68,44 +73,231 @@ public static class SurfaceDecalBaker
             var i1 = indices[i + 1];
             var i2 = indices[i + 2];
 
-            var p0 = mesh.Positions[i0];
-            var p1 = mesh.Positions[i1];
-            var p2 = mesh.Positions[i2];
-
-            // Only surfaces facing the projector receive the decal — this also stops the
-            // projection from hitting the far side of the mesh within the depth window.
-            var faceNormal = Vector3.Cross(p1 - p0, p2 - p0);
-            if (faceNormal.LengthSquared() < 1e-12f || Vector3.Dot(Vector3.Normalize(faceNormal), normal) < 0.2f)
+            // Vertices outside the walk radius (too far from the anchor along the surface)
+            // never receive the decal — this replaces both the old flat depth clamp and the
+            // projector-facing cull, and correctly follows curvature instead of assuming a
+            // single flat plane.
+            if (!projection.Reached[i0] || !projection.Reached[i1] || !projection.Reached[i2])
                 continue;
 
-            // Decal-plane coordinates (0..1 across the decal) and projection depth per vertex.
-            Vector3 Local(Vector3 p)
-            {
-                var d = p - anchor;
-                return new Vector3(
-                    Vector3.Dot(d, tangent) / worldWidth + 0.5f,
-                    Vector3.Dot(d, bitangent) / worldHeight + 0.5f,
-                    Vector3.Dot(d, normal));
-            }
-
-            var d0 = Local(p0);
-            var d1 = Local(p1);
-            var d2 = Local(p2);
+            // Decal-plane coordinates (0..1 across the decal) per vertex, in world units
+            // converted to decal space.
+            var d0 = new Vector2(projection.Local[i0].X / worldWidth + 0.5f, projection.Local[i0].Y / worldHeight + 0.5f);
+            var d1 = new Vector2(projection.Local[i1].X / worldWidth + 0.5f, projection.Local[i1].Y / worldHeight + 0.5f);
+            var d2 = new Vector2(projection.Local[i2].X / worldWidth + 0.5f, projection.Local[i2].Y / worldHeight + 0.5f);
 
             if ((d0.X < 0f && d1.X < 0f && d2.X < 0f) || (d0.X > 1f && d1.X > 1f && d2.X > 1f)
-             || (d0.Y < 0f && d1.Y < 0f && d2.Y < 0f) || (d0.Y > 1f && d1.Y > 1f && d2.Y > 1f)
-             || (MathF.Abs(d0.Z) > maxDepth && MathF.Abs(d1.Z) > maxDepth && MathF.Abs(d2.Z) > maxDepth))
+             || (d0.Y < 0f && d1.Y < 0f && d2.Y < 0f) || (d0.Y > 1f && d1.Y > 1f && d2.Y > 1f))
                 continue;
 
             RasterizeTriangle(target, decalPixels, decal.Width, decal.Height,
-                mesh.Uvs[i0], mesh.Uvs[i1], mesh.Uvs[i2], d0, d1, d2, maxDepth, threshold, opacity, layer, effectSlot);
+                mesh.Uvs[i0], mesh.Uvs[i1], mesh.Uvs[i2], d0, d1, d2, threshold, opacity, layer, effectSlot);
         }
+    }
+
+    /// <summary>
+    /// Whether a decal's footprint touches ANY editable triangle of a (possibly different)
+    /// mesh — used to decide whether an overlay-part texture (nails, accents) needs a companion
+    /// bake job synthesized for a body-skin decal at all. Mirrors <see cref="Bake"/>'s own
+    /// triangle-acceptance test (reached by the walk, then inside the [0,1]x[0,1] decal square)
+    /// without actually rasterizing anything.
+    /// </summary>
+    public static bool FootprintTouches(MaterialMesh mesh, DecalLayer layer)
+    {
+        var anchor = new Vector3(layer.AnchorX, layer.AnchorY, layer.AnchorZ);
+        var normal = new Vector3(layer.NormalX, layer.NormalY, layer.NormalZ);
+        if (normal.LengthSquared() < 1e-6f || layer.WorldWidth <= 0f || layer.WorldHeight <= 0f)
+            return false;
+
+        normal = Vector3.Normalize(normal);
+        var (tangent, bitangent) = TangentFrame(normal, layer.RotationDeg);
+        var projection = ComputeSurfaceProjection(mesh, anchor, normal, tangent, bitangent, WalkRadius(layer.WorldWidth, layer.WorldHeight));
+
+        var indices = mesh.IndicesWithShapes(layer.SurfaceShapes);
+        for (var i = 0; i + 2 < indices.Length; i += 3)
+        {
+            var triangle = i / 3;
+            if (!mesh.TriangleEditable[triangle])
+                continue;
+
+            var i0 = indices[i];
+            var i1 = indices[i + 1];
+            var i2 = indices[i + 2];
+            if (!projection.Reached[i0] || !projection.Reached[i1] || !projection.Reached[i2])
+                continue;
+
+            var d0 = new Vector2(projection.Local[i0].X / layer.WorldWidth + 0.5f, projection.Local[i0].Y / layer.WorldHeight + 0.5f);
+            var d1 = new Vector2(projection.Local[i1].X / layer.WorldWidth + 0.5f, projection.Local[i1].Y / layer.WorldHeight + 0.5f);
+            var d2 = new Vector2(projection.Local[i2].X / layer.WorldWidth + 0.5f, projection.Local[i2].Y / layer.WorldHeight + 0.5f);
+            if ((d0.X < 0f && d1.X < 0f && d2.X < 0f) || (d0.X > 1f && d1.X > 1f && d2.X > 1f)
+             || (d0.Y < 0f && d1.Y < 0f && d2.Y < 0f) || (d0.Y > 1f && d1.Y > 1f && d2.Y > 1f))
+                continue;
+
+            return true;
+        }
+
+        return false;
+    }
+
+    /// <summary>
+    /// Per-vertex decal-space coordinates that follow the mesh surface instead of a single
+    /// flat plane: a radius-bounded Dijkstra walk from the anchor over the position-welded
+    /// vertex graph (<see cref="MaterialMesh.GetOrBuildAdjacency"/>), accumulating (tangent,
+    /// bitangent) displacement in world units with the local frame parallel-transported (the
+    /// minimal rotation between consecutive vertex normals) at each step.
+    /// </summary>
+    /// <remarks>
+    /// A flat plane is only exact infinitesimally close to the anchor — on curved body parts
+    /// (limbs, torso) it increasingly stretches the decal the further a point lies from the
+    /// anchor, which is what made tattoos look warped/broken on flat-looking-but-curved
+    /// surfaces (2026-07 investigation). This same computation feeds both <see cref="Bake"/>
+    /// and the live viewport preview so they always agree. Vertices outside
+    /// <paramref name="maxWalkDistance"/> — measured along the surface, not as the crow flies —
+    /// are left unreached; callers treat them as outside the decal's footprint.
+    /// </remarks>
+    public static SurfaceProjection ComputeSurfaceProjection(MaterialMesh mesh, Vector3 anchor, Vector3 normal,
+        Vector3 tangent, Vector3 bitangent, float maxWalkDistance)
+    {
+        var local   = new Vector2[mesh.VertexCount];
+        var reached = new bool[mesh.VertexCount];
+        var (canonical, neighbors) = mesh.GetOrBuildAdjacency();
+
+        var seed = NearestVertex(mesh, anchor);
+        if (seed < 0)
+            return new SurfaceProjection { Local = local, Reached = reached };
+
+        var seedCanonical = canonical[seed];
+        var toSeed        = mesh.Positions[seedCanonical] - anchor;
+        var seedDist       = toSeed.Length();
+        if (seedDist > maxWalkDistance)
+            return new SurfaceProjection { Local = local, Reached = reached };
+
+        var bestDistance = new float[mesh.VertexCount];
+        Array.Fill(bestDistance, float.MaxValue);
+        var canonLocal    = new Vector2[mesh.VertexCount];
+        var canonTangent  = new Vector3[mesh.VertexCount];
+        var canonBitangent = new Vector3[mesh.VertexCount];
+        var canonReached  = new bool[mesh.VertexCount];
+
+        var planarSeed = toSeed - normal * Vector3.Dot(toSeed, normal);
+        canonLocal[seedCanonical]     = new Vector2(Vector3.Dot(planarSeed, tangent), Vector3.Dot(planarSeed, bitangent));
+        canonTangent[seedCanonical]   = tangent;
+        canonBitangent[seedCanonical] = bitangent;
+        canonReached[seedCanonical]   = true;
+        bestDistance[seedCanonical]   = seedDist;
+
+        var queue = new PriorityQueue<int, float>();
+        queue.Enqueue(seedCanonical, seedDist);
+
+        while (queue.TryDequeue(out var u, out var du))
+        {
+            if (du > bestDistance[u])
+                continue; // stale entry superseded by a shorter path already processed
+
+            var uTangent   = canonTangent[u];
+            var uBitangent = canonBitangent[u];
+            var uNormal    = mesh.Normals[u].LengthSquared() > 1e-8f ? Vector3.Normalize(mesh.Normals[u]) : normal;
+            var uLocal     = canonLocal[u];
+            var uPos       = mesh.Positions[u];
+
+            foreach (var v in neighbors[u])
+            {
+                var edge    = mesh.Positions[v] - uPos;
+                var edgeLen = edge.Length();
+                if (edgeLen < 1e-9f)
+                    continue;
+
+                var newDist = du + edgeLen;
+                if (newDist > maxWalkDistance || newDist >= bestDistance[v])
+                    continue;
+
+                var planar = edge - uNormal * Vector3.Dot(edge, uNormal);
+                canonLocal[v]     = uLocal + new Vector2(Vector3.Dot(planar, uTangent), Vector3.Dot(planar, uBitangent));
+                var vNormal       = mesh.Normals[v].LengthSquared() > 1e-8f ? Vector3.Normalize(mesh.Normals[v]) : uNormal;
+                var rotation      = MinimalRotation(uNormal, vNormal);
+                canonTangent[v]   = Vector3.Normalize(Vector3.Transform(uTangent, rotation));
+                canonBitangent[v] = Vector3.Normalize(Vector3.Transform(uBitangent, rotation));
+                canonReached[v]   = true;
+                bestDistance[v]   = newDist;
+                queue.Enqueue(v, newDist);
+            }
+        }
+
+        for (var i = 0; i < mesh.VertexCount; ++i)
+        {
+            var c = canonical[i];
+            if (!canonReached[c])
+                continue;
+
+            local[i]   = canonLocal[c];
+            reached[i] = true;
+        }
+
+        return new SurfaceProjection { Local = local, Reached = reached };
+    }
+
+    /// <summary>
+    /// How far <see cref="ComputeSurfaceProjection"/> should walk from the anchor to safely
+    /// cover a decal of this size. Must exceed the decal's half-diagonal (the farthest a
+    /// corner can be from the anchor at any rotation) by a wide margin: the walk measures
+    /// distance along mesh EDGES, which on an irregular or elongated local triangulation can
+    /// noticeably exceed the true straight-line/geodesic distance — and does so unevenly by
+    /// direction, so an insufficient margin clips one side of the decal before the other
+    /// (observed 2026-07: a heart's right lobe clipped while the left stayed intact at a 1.8x
+    /// margin). The flat pad on top covers small decals on coarse/sparse mesh regions where
+    /// even a generous multiplier isn't enough absolute slack.
+    /// </summary>
+    public static float WalkRadius(float worldWidth, float worldHeight)
+        => 0.5f * MathF.Sqrt(worldWidth * worldWidth + worldHeight * worldHeight) * 2.5f + 0.03f;
+
+    /// <summary> The nearest raw vertex index to a point, by straight-line distance — the walk's seed. </summary>
+    private static int NearestVertex(MaterialMesh mesh, Vector3 point)
+    {
+        var best     = -1;
+        var bestDist = float.MaxValue;
+        for (var i = 0; i < mesh.Positions.Length; ++i)
+        {
+            var dist = (mesh.Positions[i] - point).LengthSquared();
+            if (dist < bestDist)
+            {
+                bestDist = dist;
+                best     = i;
+            }
+        }
+
+        return best;
+    }
+
+    /// <summary> The shortest-arc rotation that maps one direction onto another. </summary>
+    private static Quaternion MinimalRotation(Vector3 from, Vector3 to)
+    {
+        var dot = Vector3.Dot(from, to);
+        if (dot > 0.9999f)
+            return Quaternion.Identity;
+
+        if (dot < -0.9999f)
+        {
+            var axis = Vector3.Cross(from, MathF.Abs(from.X) < 0.9f ? Vector3.UnitX : Vector3.UnitY);
+            axis = Vector3.Normalize(axis);
+            return Quaternion.CreateFromAxisAngle(axis, MathF.PI);
+        }
+
+        var cross = Vector3.Cross(from, to);
+        var q     = new Quaternion(cross.X, cross.Y, cross.Z, 1f + dot);
+        return Quaternion.Normalize(q);
+    }
+
+    /// <summary> Per-vertex decal-space projection, see <see cref="ComputeSurfaceProjection"/>. </summary>
+    public sealed class SurfaceProjection
+    {
+        public required Vector2[] Local { get; init; }
+        public required bool[]    Reached { get; init; }
     }
 
     /// <summary> Rasterize one triangle in texture space, sampling the decal through the interpolated projection coordinates. </summary>
     private static void RasterizeTriangle(Image<Rgba32> target, Rgba32[] decal, int decalWidth, int decalHeight,
-        Vector2 uv0, Vector2 uv1, Vector2 uv2, Vector3 d0, Vector3 d1, Vector3 d2,
-        float maxDepth, byte threshold, float opacity, DecalLayer layer, TextureSlot? effectSlot)
+        Vector2 uv0, Vector2 uv1, Vector2 uv2, Vector2 d0, Vector2 d1, Vector2 d2,
+        byte threshold, float opacity, DecalLayer layer, TextureSlot? effectSlot)
     {
         var a = new Vector2(uv0.X * target.Width, uv0.Y * target.Height);
         var b = new Vector2(uv1.X * target.Width, uv1.Y * target.Height);
@@ -134,7 +326,7 @@ public static class SurfaceDecalBaker
                     continue;
 
                 var local = d0 * w0 + d1 * w1 + d2 * w2;
-                if (local.X is < 0f or > 1f || local.Y is < 0f or > 1f || MathF.Abs(local.Z) > maxDepth)
+                if (local.X is < 0f or > 1f || local.Y is < 0f or > 1f)
                     continue;
 
                 var sample = SampleBilinear(decal, decalWidth, decalHeight, local.X, local.Y);
@@ -156,6 +348,7 @@ public static class SurfaceDecalBaker
                 }
                 else
                 {
+                    sample = DecalQuantizer.ApplyTint(sample, layer);
                     var alpha = sample.A / 255f * opacity;
                     if (alpha <= 0f)
                         continue;

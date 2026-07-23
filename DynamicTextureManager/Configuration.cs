@@ -32,6 +32,21 @@ public class Configuration: IPluginConfiguration, ISavable
     /// <summary> Folder decal images are stored in; empty uses the default inside the plugin config directory. </summary>
     public string DecalStorageFolder { get; set; } = string.Empty;
 
+    /// <summary>
+    /// Preview-only skin tone (packed Rgba32) multiplied onto skin materials in the 3D
+    /// viewport. Skin diffuse textures are pale neutral maps the game tints with the
+    /// character's customize skin color in-shader; without a stand-in tone the preview
+    /// looks nothing like in-game skin. Never written into any texture.
+    /// </summary>
+    public uint PreviewSkinTone { get; set; } = 0xFF8AAAD6;
+
+    /// <summary>
+    /// Whether <see cref="PreviewSkinTone"/> was ever set deliberately (manual ColorEdit or the
+    /// "Use my character's skin color" button) — gates the Load Skin auto-populate from
+    /// clobbering a choice the user actually made.
+    /// </summary>
+    public bool PreviewSkinToneUserSet { get; set; } = false;
+
     /// <summary> Debug tunables for the empirical mask-map finish semantics, see ModGeneration.FinishMapping. </summary>
     public int MaskRoughnessChannel { get; set; } = 1;
 
