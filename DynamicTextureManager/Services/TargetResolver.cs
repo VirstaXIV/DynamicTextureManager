@@ -20,6 +20,9 @@ public sealed record ResolvedMaterial(
 {
     public bool IsModded
         => ModDirectory.Length > 0;
+
+    /// <summary> Whether this is an overlay-part material (nails, accents) — see DTextures.Data.SourcePath.Overlay. </summary>
+    public bool IsOverlayPart { get; init; }
 }
 
 /// <summary> A group of materials belonging to one model (equipment piece, body part, ...). </summary>

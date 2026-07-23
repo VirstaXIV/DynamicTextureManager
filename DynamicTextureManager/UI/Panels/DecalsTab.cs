@@ -48,7 +48,8 @@ public sealed class DecalsTab(
     CompositePreviewCache previewCache,
     FilenameService filenames,
     Configuration config,
-    DecalLibraryWindow decalLibraryWindow)
+    DecalLibraryWindow decalLibraryWindow,
+    SkinColorReader skinColorReader)
     : IService, IDisposable
 {
     private const long SlotPreviewDebounceMs = 400;
@@ -65,6 +66,7 @@ public sealed class DecalsTab(
     private Guid                 _cacheOwner = Guid.Empty;
     private string               _sourceFingerprint = string.Empty;
     private List<TextureOption>? _options;
+    private List<TextureOption>? _overlayOptions;
     private string               _selectedMaterial = string.Empty;
     private bool                 _highlightHovered;
 
@@ -75,6 +77,8 @@ public sealed class DecalsTab(
     private readonly Dictionary<int, int>      _rowUsageCounts = [];
     private readonly List<(int Row, int Count)> _sortedRowUsage = [];
     private int                                _statsTotalTexels = 1;
+
+    private string _skinToneReadError = string.Empty;
 
     public void Dispose()
         => _viewport.Dispose();
@@ -98,6 +102,7 @@ public sealed class DecalsTab(
             _cacheOwner        = dTexture.Identifier;
             _sourceFingerprint = fingerprint;
             _options           = null;
+            _overlayOptions    = null;
             _selectedMaterial  = string.Empty;
             _statsTexture      = string.Empty;
             _mdlHealAttempted  = false;
@@ -113,10 +118,27 @@ public sealed class DecalsTab(
             return;
         }
 
-        _options ??= TextureOptions.Collect(dTexture.Data, sourceFiles, shaderHandlers);
+        // Overlay-part sources (nails, accents) are excluded here even though they're valid
+        // Source.Materials entries: selecting one directly merges most of the body mesh into
+        // unpaintable "context" (framed around the tiny overlay geometry) sampling the wrong
+        // texture at the wrong UVs — confusing, not useful. They're painted automatically by an
+        // overlapping body-skin tattoo (OverlayModManager companion bake) and stay visible
+        // read-only in the Textures tab, which does NOT filter them. Their diffuse options are
+        // kept separately (_overlayOptions) so the 3D viewport can still show them, composited,
+        // as extra rendered entries — see BuildOverlayEntries.
+        if (_options == null)
+        {
+            var overlayPaths = dTexture.Data.Source.Materials.Where(m => m.Overlay).Select(m => m.GamePath).ToHashSet(StringComparer.OrdinalIgnoreCase);
+            var all = TextureOptions.Collect(dTexture.Data, sourceFiles, shaderHandlers);
+            _options        = all.Where(o => !overlayPaths.Contains(o.MaterialGamePath)).ToList();
+            _overlayOptions = all.Where(o => overlayPaths.Contains(o.MaterialGamePath) && o.Slot is TextureSlot.Diffuse).ToList();
+        }
+
         if (_options.Count == 0)
         {
-            ImUtf8.Text("The source materials expose no textures."u8);
+            ImUtf8.Text(dTexture.Data.Source.Materials.All(m => m.Overlay)
+                ? "Only overlay-part sources (nails, accents) are selected — they're painted automatically by an overlapping body tattoo. Add the body itself to place one."u8
+                : "The source materials expose no textures."u8);
             return;
         }
 
@@ -126,14 +148,61 @@ public sealed class DecalsTab(
         ImUtf8.LabeledHelpMarker("Material"u8,
             "Decals work per material: they stamp onto the right texture automatically (the colorset id map on colorset-driven gear, else the color texture) and their material effects touch the normal/mask maps.\nThe finished textures are viewable in the Textures tab."u8);
 
-        // Colorset decals only work on current gear materials; other setups (legacy gear,
-        // skin, hair, vfx) need their own flows and are gated off until those exist.
+        // Modern gear stamps the colorset id map; skin and legacy gear stamp the diffuse.
+        // Materials exposing neither (colorset-only legacy gear, hair, vfx) stay gated off.
         if (DefaultTargetOption() == null)
         {
             var legacyIndex = MaterialOptions().Any(o => o is { Slot: TextureSlot.Index, DecalRecommended: false });
             ImUtf8.TextWrapped(legacyIndex
-                ? "Colorset decals require a current (Dawntrail) gear material — legacy gear, skin and other texture types are not supported yet."u8
+                ? "This material has no color texture — its look comes entirely from its colorset, which decals cannot stamp onto yet."u8
                 : "This material exposes no texture decals can stamp onto."u8);
+        }
+        else
+        {
+            switch (SelectedKind())
+            {
+                case MaterialKind.Skin:
+                {
+                    ImUtf8.TextWrapped("Skin material — decals bake directly into the skin texture like tattoos and conform to the body."u8);
+                    var packed = new Rgba32(config.PreviewSkinTone);
+                    var tone   = new Vector3(packed.R / 255f, packed.G / 255f, packed.B / 255f);
+                    ImGui.SetNextItemWidth(250 * ImUtf8.GlobalScale);
+                    if (ImUtf8.ColorEdit("Preview Skin Tone"u8, ref tone, ImGuiColorEditFlags.Float))
+                        config.PreviewSkinTone = new Rgba32(tone.X, tone.Y, tone.Z).PackedValue;
+                    if (ImGui.IsItemDeactivatedAfterEdit())
+                    {
+                        config.PreviewSkinToneUserSet = true;
+                        config.Save();
+                    }
+
+                    ImUtf8.HoverTooltip(
+                        "Preview-only: match your character's skin color so the 3D preview looks like your skin.\nThe game applies the real skin color in its shader — this never changes any texture."u8);
+
+                    ImGui.SameLine();
+                    if (ImUtf8.SmallButton("Use My Character's Skin Color"u8))
+                    {
+                        if (skinColorReader.TryGetLocalPlayerSkin(out var liveTone))
+                        {
+                            config.PreviewSkinTone         = new Rgba32(liveTone.X, liveTone.Y, liveTone.Z).PackedValue;
+                            config.PreviewSkinToneUserSet  = true;
+                            config.Save();
+                        }
+                        else
+                        {
+                            _skinToneReadError = "Could not read your character's skin color — not loaded, or not human.";
+                        }
+                    }
+
+                    ImUtf8.HoverTooltip(
+                        "Reads your currently loaded character's actual configured skin color from the game.\nRequires your character to be loaded and human."u8);
+                    if (_skinToneReadError.Length > 0)
+                        ImUtf8.TextWrapped(_skinToneReadError);
+                    break;
+                }
+                case MaterialKind.LegacyDiffuse:
+                    ImUtf8.TextWrapped("Legacy material — decal colors are baked into the color texture. Recoloring rebuilds the mod; dyes never affect the decal."u8);
+                    break;
+            }
         }
 
         ImGui.Separator();
@@ -165,6 +234,10 @@ public sealed class DecalsTab(
         return _materialOptionsCache;
     }
 
+    /// <summary> The selected material's editing family, from its shader handler. </summary>
+    private MaterialKind SelectedKind()
+        => MaterialOptions().FirstOrDefault()?.Kind ?? MaterialKind.Unknown;
+
     /// <summary> The material's colorset id map, when the shader supports colorset decals on it. </summary>
     private TextureOption? IndexOption()
         => MaterialOptions().Find(o => o is { Slot: TextureSlot.Index, DecalRecommended: true });
@@ -172,9 +245,12 @@ public sealed class DecalsTab(
     private TextureOption? DiffuseOption()
         => MaterialOptions().Find(o => o.Slot is TextureSlot.Diffuse);
 
-    /// <summary> Where a new decal goes: the colorset id map when supported, else the diffuse. </summary>
+    /// <summary>
+    /// Where a new decal goes: modern gear prefers the colorset id map; skin, legacy and
+    /// unknown materials take color decals on their diffuse.
+    /// </summary>
     private TextureOption? DefaultTargetOption()
-        => IndexOption() ?? DiffuseOption();
+        => SelectedKind() is MaterialKind.ModernColorset ? IndexOption() ?? DiffuseOption() : DiffuseOption();
 
     private TextureOption? OptionFor(string gamePath)
         => _options?.Find(o => string.Equals(o.GamePath, gamePath, StringComparison.OrdinalIgnoreCase));
@@ -311,6 +387,11 @@ public sealed class DecalsTab(
             MaxColors = config.DefaultDecalMaxColors,
             Surface   = true,
         };
+        // Body skin is one canvas but MANY connected parts (the genital strip and similar
+        // meshes sit flush on the torso) — the clicked-part limit punches holes through
+        // tattoos that cross them. The tight depth window still contains the projection.
+        if (target.Kind is MaterialKind.Skin)
+            layer.SurfaceLimitToPart = false;
         if (preset != null)
         {
             // The preset may opt out of colorset mode, but never forces it onto a diffuse target.
@@ -351,6 +432,17 @@ public sealed class DecalsTab(
                     GetOrSeedRow(edit, table, layer.PaletteRows[i] + 1).Diffuse =
                         [color.R / 255f * ShadeFactor, color.G / 255f * ShadeFactor, color.B / 255f * ShadeFactor];
                 }
+            }
+        }
+        else if (preset is { PaletteColors.Count: > 0 })
+        {
+            // Diffuse target: the preset's saved recolors return as a composite-time tint.
+            // Same determinism rule as colorset presets — a palette count mismatch means the
+            // image or settings changed, and the decal's own pixels win.
+            if (ExtractTintPalette(layer) && layer.PaletteColors.Count == preset.PaletteColors.Count)
+            {
+                layer.TintColors  = preset.PaletteColors.ToList();
+                layer.TintEnabled = true;
             }
         }
 
@@ -412,6 +504,8 @@ public sealed class DecalsTab(
                     : i < decal.PaletteColors.Count
                         ? decal.PaletteColors[i]
                         : uint.MaxValue);
+        else if (decal.HasTint)
+            preset.PaletteColors.AddRange(decal.TintColors);
 
         decals.SetPreset(decal.DecalId, preset);
     }
@@ -477,6 +571,8 @@ public sealed class DecalsTab(
             var changed = false;
             if (decal.IdRemap)
                 changed |= DrawIdRemapSettings(dTexture, option, decal);
+            else
+                changed |= DrawTintSettings(decal);
 
             changed |= DrawMaterialEffects(dTexture, option, decal);
             changed |= DrawPlacementSettings(dTexture, decal);
@@ -739,6 +835,119 @@ public sealed class DecalsTab(
     }
 
     /// <summary>
+    /// The recolor editor for diffuse-target decals (skin tattoos, legacy gear): the decal is
+    /// quantized to at most Max Colors and each extracted color gets an editable replacement,
+    /// baked into the texture at composite time — the diffuse counterpart of the colorset
+    /// slot editor. No material rows are involved, so recolors rebuild the textures instead.
+    /// </summary>
+    private bool DrawTintSettings(DecalLayer decal)
+    {
+        var changed = false;
+
+        var tintEnabled = decal.TintEnabled;
+        if (ImUtf8.Checkbox("Recolor Decal"u8, ref tintEnabled))
+        {
+            decal.TintEnabled = tintEnabled;
+            if (tintEnabled && !decal.HasTint && ExtractTintPalette(decal))
+                decal.TintColors = decal.PaletteColors.ToList();
+            changed = true;
+        }
+
+        ImUtf8.HoverTooltip(
+            "Extracts the decal's main colors and lets each be replaced — the recolors are baked into the texture on the next build.\nOff, the decal keeps its original image colors."u8);
+
+        if (!decal.TintEnabled)
+            return changed;
+
+        ImGui.SetNextItemWidth(220 * ImUtf8.GlobalScale);
+        var maxColors = decal.MaxColors;
+        if (ImUtf8.Slider("Max Colors"u8, ref maxColors, "%d"u8, 1, 12))
+            decal.MaxColors = Math.Clamp(maxColors, 1, 12);
+        if (ImGui.IsItemDeactivatedAfterEdit() && ExtractTintPalette(decal))
+        {
+            decal.TintColors = decal.PaletteColors.ToList();
+            changed          = true;
+        }
+
+        ImUtf8.HoverTooltip(
+            "The decal is reduced to at most this many colors — similar colors merge.\nChanging it re-extracts the colors and discards the recolors below."u8);
+
+        ImGui.SameLine();
+        if (ImUtf8.SmallButton("Re-extract Colors"u8) && ExtractTintPalette(decal))
+        {
+            decal.TintColors = decal.PaletteColors.ToList();
+            changed          = true;
+        }
+
+        ImUtf8.HoverTooltip("Quantize the decal image again — discards the recolors below."u8);
+
+        if (decal.PaletteColors.Count == 0)
+        {
+            ImUtf8.TextWrapped("Could not extract any colors from the decal image — is the extraction threshold too high?"u8);
+            return changed;
+        }
+
+        // One editable color per extracted color; the extracted swatch stays as reference so
+        // recoloring never loses which image color it replaces.
+        for (var i = 0; i < decal.PaletteColors.Count && i < decal.TintColors.Count; ++i)
+        {
+            using var id     = ImUtf8.PushId(i);
+            var       source = new Rgba32(decal.PaletteColors[i]);
+
+            ImGui.ColorButton("##extracted", new Vector4(source.R / 255f, source.G / 255f, source.B / 255f, 1f));
+            if (ImGui.IsItemHovered())
+                ImUtf8.HoverTooltip("The color extracted from the decal image — image pixels closest to it render in the replacement color."u8);
+
+            ImGui.SameLine();
+            var tint  = new Rgba32(decal.TintColors[i]);
+            var color = new Vector3(tint.R / 255f, tint.G / 255f, tint.B / 255f);
+            ImGui.SetNextItemWidth(250 * ImUtf8.GlobalScale);
+            if (ImUtf8.ColorEdit($"Color {i + 1}", ref color, ImGuiColorEditFlags.Float))
+                decal.TintColors[i] = new Rgba32(color.X, color.Y, color.Z).PackedValue;
+            // A save rebuilds the mod's textures — commit once the edit ends, not per drag frame.
+            if (ImGui.IsItemDeactivatedAfterEdit())
+                changed = true;
+
+            if (ImGui.IsItemHovered())
+                ImUtf8.HoverTooltip("This part of the decal renders in this color — recolor it without touching the image."u8);
+        }
+
+        ImGui.SetNextItemWidth(220 * ImUtf8.GlobalScale);
+        ImUtf8.Slider("Extraction Threshold"u8, ref decal.AlphaThreshold, "%.2f"u8, 0.05f, 1f);
+        if (ImGui.IsItemDeactivatedAfterEdit())
+        {
+            if (ExtractTintPalette(decal))
+                decal.TintColors = decal.PaletteColors.ToList();
+            changed = true;
+        }
+
+        ImUtf8.HoverTooltip(
+            "Decal pixels whose alpha is at or above this value feed the color extraction.\nBlending keeps the image's soft edges either way — this only affects which pixels count as colors."u8);
+
+        return changed;
+    }
+
+    /// <summary> Quantize the decal image into the palette a tint maps against. Returns false when nothing usable was extracted. </summary>
+    private bool ExtractTintPalette(DecalLayer decal)
+    {
+        var path = decals.FilePath(decal.DecalId);
+        if (!File.Exists(path))
+            return false;
+
+        try
+        {
+            decal.PaletteColors = DecalQuantizer.ExtractPalette(path, decal.MaxColors, decal.AlphaThreshold).ToList();
+        }
+        catch (Exception ex)
+        {
+            DynamicTextureManager.Log.Error($"Failed to quantize decal {decal.DecalId}: {ex}");
+            decal.PaletteColors = [];
+        }
+
+        return decal.PaletteColors.Count > 0;
+    }
+
+    /// <summary>
     /// Quantize the decal image and claim one free colorset row per extracted color. Rows
     /// the gear renders or other decals claim stay untouched; when not enough rows are free
     /// the layer is disabled with an error until rows free up or Max Colors shrinks.
@@ -870,8 +1079,9 @@ public sealed class DecalsTab(
         var hasMask = _options!.Any(o => string.Equals(o.MaterialGamePath, option.MaterialGamePath, StringComparison.OrdinalIgnoreCase)
          && o.Slot is TextureSlot.Mask);
         // Colorset decals carry their finish on the claimed rows, so the control works even
-        // without a mask sibling.
-        var showFinish = hasMask || decal.IdRemap;
+        // without a mask sibling. Mask finish semantics are authored for modern gear masks —
+        // skin and legacy mask/specular maps encode different channels and stay untouched.
+        var showFinish = decal.IdRemap || (hasMask && option.Kind is MaterialKind.ModernColorset);
         if (!hasNormal && !showFinish)
             return false;
 
@@ -1325,6 +1535,10 @@ public sealed class DecalsTab(
         var bestDist = float.MaxValue;
         for (var i = 0; i + 2 < mesh.Indices.Length; i += 3)
         {
+            // Context triangles map into a different texture — their UVs mean nothing here.
+            if (!mesh.TriangleEditable[i / 3])
+                continue;
+
             var a = mesh.Uvs[mesh.Indices[i]];
             var b = mesh.Uvs[mesh.Indices[i + 1]];
             var c = mesh.Uvs[mesh.Indices[i + 2]];
@@ -1377,6 +1591,20 @@ public sealed class DecalsTab(
             var dPdv = (e2 * duv1.X - e1 * duv2.X) / det;
             decal.WorldWidth  = Math.Clamp(decal.ScaleX * dPdu.Length(), 0.005f, 2f);
             decal.WorldHeight = Math.Clamp(decal.ScaleY * dPdv.Length(), 0.005f, 2f);
+
+            // A quarter of a full-BODY texture seeds a poster-sized projector whose depth
+            // window (0.4 × size) catches arms and both thighs in one stamp. Seed body
+            // tattoos at a sane size instead — the size sliders still go up from there.
+            if (ModelUvReader.IsBodySkinMaterial(mesh.GamePath))
+            {
+                var maxDim = MathF.Max(decal.WorldWidth, decal.WorldHeight);
+                if (maxDim > 0.15f)
+                {
+                    var scale = 0.15f / maxDim;
+                    decal.WorldWidth  *= scale;
+                    decal.WorldHeight *= scale;
+                }
+            }
         }
 
         decal.AnchorX     = anchor.X;
@@ -1398,7 +1626,9 @@ public sealed class DecalsTab(
 
         // The worn model can differ from the one captured at selection time (e.g. another
         // size option) — re-resolve so the viewport shows the variant actually in use.
-        if (source is { MdlGamePath.Length: > 0 } && penumbra.Available)
+        // Body skin meshes resolve their own SmallClothes model set at load time; healing
+        // their recorded model here would only poison the single-model fallback.
+        if (source is { MdlGamePath.Length: > 0 } && penumbra.Available && !ModelUvReader.IsBodySkinMaterial(source.GamePath))
             try
             {
                 var resolved  = penumbra.ResolvePlayerPath(source.MdlGamePath);
@@ -1421,7 +1651,9 @@ public sealed class DecalsTab(
         var mesh = source == null ? null : uvReader.GetMesh(source);
         if (mesh == null)
         {
-            _placementError = "No mesh geometry available — re-add the material in the Source tab while wearing the gear.";
+            _placementError = source != null && ModelUvReader.IsBodySkinMaterial(source.GamePath)
+                ? "Your current body does not use this skin material — run Load Skin in the Source tab again and add the body material listed there."
+                : "No mesh geometry available — re-add the material in the Source tab while wearing the gear.";
             return;
         }
 
@@ -1434,7 +1666,7 @@ public sealed class DecalsTab(
 
     #region 3D preview shading
 
-    private readonly record struct ShadingKey(int DiffuseVersion, int IndexVersion, int RowVersion, bool Placement);
+    private readonly record struct ShadingKey(int DiffuseVersion, int IndexVersion, int RowVersion, bool Placement, uint SkinTone, int OverlayVersionHash);
 
     private Vector3[]?  _rowDiffuse;
     private int         _rowDiffuseVersion;
@@ -1455,7 +1687,9 @@ public sealed class DecalsTab(
         var mesh   = source == null ? null : uvReader.GetMesh(source);
         if (mesh == null)
         {
-            ImUtf8.Text("No mesh geometry available for a 3D preview — re-add the material in the Source tab while wearing the gear."u8);
+            ImUtf8.TextWrapped(source != null && ModelUvReader.IsBodySkinMaterial(source.GamePath)
+                ? "Your current body does not use this skin material — run Load Skin in the Source tab again and add the body material listed there."u8
+                : "No mesh geometry available for a 3D preview — re-add the material in the Source tab while wearing the gear."u8);
             return;
         }
 
@@ -1508,8 +1742,18 @@ public sealed class DecalsTab(
         var diffuseEntry = EntryFor(diffuseOption);
         var indexEntry   = EntryFor(indexOption);
 
+        // Skin diffuse textures are pale neutral maps the game tints with the customize skin
+        // color — stand in with the configured preview tone so the preview resembles skin.
+        var skinTone = SelectedKind() is MaterialKind.Skin ? config.PreviewSkinTone : 0u;
+
+        // Overlay-part meshes (nails, accents) rendered alongside the body, each with its own
+        // composited texture from the SAME preview cache the companion bake writes through —
+        // so the live preview matches the built result, including mid-drag. Only relevant when
+        // the body itself is the selected/primary mesh (overlays share its model set).
+        var overlayEntries = BuildOverlayEntries(dTexture, placementLayer, boundPath, out var overlayVersionHash);
+
         var key = new ShadingKey(diffuseEntry?.Version ?? -1, indexEntry?.Version ?? -1, _rowDiffuseVersion,
-            placementLayer != null);
+            placementLayer != null, skinTone, overlayVersionHash);
         if (key == _shadingKey)
             return;
 
@@ -1522,7 +1766,53 @@ public sealed class DecalsTab(
                     ? new DecodedTexture(entry.Composited, entry.Pristine.Width, entry.Pristine.Height)
                     : entry.Pristine;
 
-        _viewport.UpdateShading(new ViewportShading(Buffer(diffuseEntry), Buffer(indexEntry), _rowDiffuse));
+        Vector3? tone = null;
+        if (skinTone != 0u)
+        {
+            var packed = new Rgba32(skinTone);
+            tone = new Vector3(packed.R / 255f, packed.G / 255f, packed.B / 255f);
+        }
+
+        _viewport.UpdateShading(new ViewportShading(Buffer(diffuseEntry), Buffer(indexEntry), _rowDiffuse, tone));
+        _viewport.SetOverlays(overlayEntries);
+    }
+
+    /// <summary>
+    /// Overlay-part viewport entries (nails, accents): each gets its own mesh (routes through
+    /// <see cref="ModelUvReader.GetBodyMesh"/> exactly like Part B's companion bake, so the
+    /// editable geometry matches) and its own composited diffuse from the shared preview cache.
+    /// Empty unless the selected/primary material is the body itself — overlays share its
+    /// SmallClothes model set and would be meaningless alongside an unrelated gear mesh.
+    /// </summary>
+    private List<ViewportOverlay> BuildOverlayEntries(DTexture dTexture, DecalLayer? placementLayer, string? boundPath,
+        out int versionHash)
+    {
+        versionHash = 0;
+        var result = new List<ViewportOverlay>();
+        if (_overlayOptions is not { Count: > 0 } || !ModelUvReader.IsBodySkinMaterial(_selectedMaterial))
+            return result;
+
+        foreach (var option in _overlayOptions)
+        {
+            var source = dTexture.Data.Source.Materials.FirstOrDefault(m
+                => string.Equals(m.GamePath, option.MaterialGamePath, StringComparison.OrdinalIgnoreCase));
+            var mesh = source == null ? null : uvReader.GetMesh(source);
+            if (mesh == null)
+                continue;
+
+            var entry = previewCache.Get(dTexture, option.GamePath,
+                string.Equals(boundPath, option.GamePath, StringComparison.OrdinalIgnoreCase) ? placementLayer : null);
+            versionHash = HashCode.Combine(versionHash, entry.Version);
+
+            var diffuse = entry.Pristine == null
+                ? null
+                : entry.Composited != null
+                    ? new DecodedTexture(entry.Composited, entry.Pristine.Width, entry.Pristine.Height)
+                    : entry.Pristine;
+            result.Add(new ViewportOverlay(mesh, diffuse, option.Kind is MaterialKind.Skin));
+        }
+
+        return result;
     }
 
     #endregion

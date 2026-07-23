@@ -367,14 +367,10 @@ public sealed class OverlayModManager : IService, IDisposable
             return Fail("A build is already running.");
         if (!penumbra.Available)
             return Fail("Penumbra is not available.");
-        if (dTexture.Data.Source.IsEmpty)
-            return Fail("No source selected.");
-        if (!dTexture.Data.HasEdits)
-            return Fail("No edits to apply.");
 
         Busy = true;
         string    dirName, modDirectory;
-        bool      isNew;
+        bool      isNew, cleaning;
         BuildPlan plan;
         try
         {
@@ -389,11 +385,21 @@ public sealed class OverlayModManager : IService, IDisposable
             modDirectory = Path.Combine(modRoot, dirName);
             isNew        = !Directory.Exists(modDirectory);
 
-            plan = PrepareBuild(dTexture, modDirectory);
-            if (plan.MaterialFiles.Count == 0 && plan.TextureJobs.Count == 0)
+            // Removing the last decal or source material must clean the built mod too — its
+            // old baked files keep applying otherwise. With nothing left to build, an EXISTING
+            // mod gets an empty commit (the per-file commit deletes everything stale); without
+            // a built mod there is nothing to clean and the request fails like before.
+            var emptyReason = dTexture.Data.Source.IsEmpty ? "No source selected."
+                : !dTexture.Data.HasEdits ? "No edits to apply."
+                : null;
+            plan = emptyReason == null
+                ? PrepareBuild(dTexture, modDirectory)
+                : new BuildPlan(new Dictionary<string, byte[]>(StringComparer.OrdinalIgnoreCase), []);
+            cleaning = plan.MaterialFiles.Count == 0 && plan.TextureJobs.Count == 0;
+            if (cleaning && isNew)
             {
                 Busy = false;
-                return Fail("No files could be built from the current edits.");
+                return Fail(emptyReason ?? "No files could be built from the current edits.");
             }
         }
         catch (Exception ex)
@@ -408,10 +414,10 @@ public sealed class OverlayModManager : IService, IDisposable
         {
             try
             {
-                var written = await BuildAndWriteAsync(dTexture, modDirectory, plan).ConfigureAwait(false);
+                var written = await BuildAndWriteAsync(dTexture, modDirectory, plan, commitWhenEmpty: cleaning).ConfigureAwait(false);
                 await framework.RunOnFrameworkThread(() =>
                 {
-                    if (written == 0)
+                    if (written == 0 && !cleaning)
                     {
                         Fail("No files could be built from the current edits.");
                         return;
@@ -428,8 +434,14 @@ public sealed class OverlayModManager : IService, IDisposable
                     saveService.QueueSave(dTexture);
                     InvalidateCaches();
 
-                    penumbra.RedrawObject(0);
-                    LastResult = $"Applied {written} file(s) as mod \"{dirName}\"{statusDetail}.";
+                    // Redraw EVERYONE, not just the player: body skin textures are shared —
+                    // any other actor using the same file (retainers, synced players) keeps
+                    // the old texture referenced, and a cached resource never reloads while
+                    // referenced. Redrawing only the player left every rebuild invisible.
+                    penumbra.RedrawAll();
+                    LastResult = cleaning
+                        ? $"Cleared mod \"{dirName}\" — nothing left to apply, its old files were removed."
+                        : $"Applied {written} file(s) as mod \"{dirName}\"{statusDetail}.";
                     DynamicTextureManager.Log.Information(LastResult);
                 }).ConfigureAwait(false);
             }
@@ -466,8 +478,11 @@ public sealed class OverlayModManager : IService, IDisposable
 
             if (mtrl.Table is not ColorTable)
             {
-                DynamicTextureManager.Log.Warning(
-                    $"Material {gamePath} does not use a Dawntrail color table (shader {mtrl.ShaderPackage.Name}), skipped. Legacy tables are not supported yet.");
+                // Skin/legacy materials never carry row edits (their decals are texture-only);
+                // only warn when actual colorset edits would be dropped.
+                if (edit.Rows.Count > 0)
+                    DynamicTextureManager.Log.Warning(
+                        $"Material {gamePath} has colorset row edits but no Dawntrail color table (shader {mtrl.ShaderPackage.Name}) — colorset edits require one, skipped.");
                 continue;
             }
 
@@ -475,6 +490,26 @@ public sealed class OverlayModManager : IService, IDisposable
                 continue;
 
             materials[gamePath] = mtrl.Write();
+        }
+
+        // Layer stacks can outlive their material: removing a source while another material
+        // fails to load skips pruning (deliberately — a transient failure must never delete
+        // layers), leaving stacks nothing in the UI shows anymore. Those must never build,
+        // or ghost decals from removed sources keep shipping invisibly. When any source
+        // material cannot be enumerated the filter is skipped — incomplete data must not
+        // drop legitimate stacks either.
+        HashSet<string>? exposed = new(StringComparer.OrdinalIgnoreCase);
+        foreach (var source in dTexture.Data.Source.Materials)
+        {
+            var sourceMtrl = sourceFiles.GetMaterial(source, modDirectory);
+            if (sourceMtrl == null)
+            {
+                exposed = null;
+                break;
+            }
+
+            foreach (var info in shaderHandlers.For(sourceMtrl).ClassifyTextures(sourceMtrl))
+                exposed?.Add(info.GamePath);
         }
 
         var textures = new List<TextureJob>();
@@ -485,6 +520,13 @@ public sealed class OverlayModManager : IService, IDisposable
         foreach (var (gamePath, layers) in dTexture.Data.Textures.Where(kvp
                      => kvp.Value.Any(l => l.Enabled || l is DTextures.Data.DecalLayer { Extracted: true, PreExtractionSource: not null })))
         {
+            if (exposed != null && !exposed.Contains(gamePath))
+            {
+                DynamicTextureManager.Log.Warning(
+                    $"Texture {gamePath} has {layers.Count} layer(s) but no current source material exposes it — skipped (leftover from a removed source).");
+                continue;
+            }
+
             // Always bake from the pristine source captured when the layer was added — a
             // build-time resolve would return our own generated file and compound the bake.
             var diskPath = GetOrCaptureTextureSource(dTexture, gamePath);
@@ -504,6 +546,12 @@ public sealed class OverlayModManager : IService, IDisposable
         }
 
         AddSiblingEffectJobs(dTexture, textures);
+        AddOverlayCompanionJobs(dTexture, textures);
+
+        // One compact line of what actually builds — the first thing to check when a decal
+        // ships that the UI no longer shows.
+        DynamicTextureManager.Log.Debug(
+            $"Build plan: {materials.Count} material(s); textures [{string.Join(", ", textures.Select(t => $"{t.GamePath} ({t.Layers.Count} layer(s))"))}]");
 
         return new BuildPlan(materials, textures);
     }
@@ -554,6 +602,40 @@ public sealed class OverlayModManager : IService, IDisposable
     }
 
     /// <summary>
+    /// Overlay-part textures (nails, accents — added as their own source materials) an enabled
+    /// body-skin surface decal's footprint overlaps: the SAME layer reprojects onto the
+    /// overlay's own mesh through the normal decal-application path (not a material-effect
+    /// replay — this makes the tattoo itself appear there, in full color), so it continues
+    /// seamlessly across the seam. One source of truth — no separate decal layers to keep in
+    /// sync when the user edits or moves the original. Discovery shared with the preview cache
+    /// via <see cref="CompositePlanner"/>, so the viewport shows the same result.
+    /// </summary>
+    private void AddOverlayCompanionJobs(DTexture dTexture, List<TextureJob> textures)
+    {
+        foreach (var target in CompositePlanner.OverlayCompanionTargets(dTexture.Data, shaderHandlers, sourceFiles, uvReader))
+        {
+            var mesh = uvReader.GetMesh(target.Owner);
+            if (mesh == null)
+            {
+                DynamicTextureManager.Log.Warning(
+                    $"No mesh geometry for {target.Owner.GamePath} — a body tattoo overlapping it will be skipped this build.");
+                continue;
+            }
+
+            var existing = textures.FindIndex(j => string.Equals(j.GamePath, target.GamePath, StringComparison.OrdinalIgnoreCase));
+            if (existing >= 0)
+            {
+                var job = textures[existing];
+                textures[existing] = job with { Layers = [.. job.Layers, .. target.Layers], Mesh = job.Mesh ?? mesh };
+                continue;
+            }
+
+            var diskPath = GetOrCaptureTextureSource(dTexture, target.GamePath);
+            textures.Add(new TextureJob(target.GamePath, diskPath is { Length: > 0 } ? diskPath : null, [.. target.Layers], mesh));
+        }
+    }
+
+    /// <summary>
     /// The pristine source file of a layered texture: the stored capture, else a fresh
     /// resolve (rejecting our own generated mod), else a search through the source mods'
     /// own file lists — the recovery path when our mod already owns the resolution.
@@ -562,7 +644,17 @@ public sealed class OverlayModManager : IService, IDisposable
     public string? GetOrCaptureTextureSource(DTexture dTexture, string gamePath)
     {
         if (dTexture.Data.TextureSourcePaths.TryGetValue(gamePath, out var stored))
-            return stored;
+        {
+            // A capture pointing into ANY generated overlay is poisoned — a remove/re-add
+            // race can capture while an overlay still owns the resolution. Recapture instead
+            // of baking generated output back in as "pristine".
+            if (!IsGeneratedModFile(stored))
+                return stored;
+
+            DynamicTextureManager.Log.Warning(
+                $"Texture source of {gamePath} pointed into a generated mod (\"{stored}\") — dropping it and recapturing.");
+            dTexture.Data.TextureSourcePaths.Remove(gamePath);
+        }
 
         if (!penumbra.Available)
             return null;
@@ -571,12 +663,11 @@ public sealed class OverlayModManager : IService, IDisposable
         try
         {
             var modRoot = penumbra.GetModDirectory();
-            var ownMod  = Path.Combine(modRoot, ModDirectoryName(dTexture));
 
             var resolved = penumbra.ResolvePlayerPath(gamePath);
             if (string.Equals(resolved, gamePath, StringComparison.OrdinalIgnoreCase))
                 found = string.Empty; // vanilla
-            else if (!PathUtil.IsInside(resolved, ownMod))
+            else if (!IsGeneratedModFile(resolved))
                 found = resolved;
             else
                 foreach (var sourceMod in dTexture.Data.Source.Materials
@@ -592,6 +683,9 @@ public sealed class OverlayModManager : IService, IDisposable
                         break;
                     }
                 }
+
+            DynamicTextureManager.Log.Debug(
+                $"Captured texture source of {gamePath}: {(found == null ? "(none)" : found.Length == 0 ? "(vanilla)" : $"\"{found}\"")}.");
         }
         catch (Exception ex)
         {
@@ -611,8 +705,51 @@ public sealed class OverlayModManager : IService, IDisposable
         return found;
     }
 
-    /// <summary> Background part of the build: decode, composite and BC-compress textures, then commit the folder. </summary>
-    private async Task<int> BuildAndWriteAsync(DTexture dTexture, string modDirectory, BuildPlan plan)
+    /// <summary>
+    /// Whether a disk path points into any of our own generated overlay mods — never a
+    /// pristine source. Checked two ways: by directory identity against every dTexture's
+    /// currently tracked <see cref="DTextures.DTextureData.OutputModDirectory"/> (renames are
+    /// tracked via <see cref="OnPenumbraModMoved"/>, so this catches a mod the user or Penumbra
+    /// renamed away from the "DTM_" prefix — a real poisoning vector: a rename made the name
+    /// check below blind to the mod, so its own baked output got captured and persisted as
+    /// "pristine" forever, surviving even a removed/re-added decal), and by the "DTM_" name
+    /// prefix as a fallback for mods not yet tracked (e.g. mid-build, or another dTexture this
+    /// session hasn't loaded from storage).
+    /// </summary>
+    private bool IsGeneratedModFile(string path)
+    {
+        if (path.Length == 0 || !Path.IsPathRooted(path))
+            return false;
+
+        try
+        {
+            var modRoot = penumbra.GetModDirectory();
+            if (modRoot.Length == 0 || !PathUtil.IsInside(path, modRoot))
+                return false;
+
+            foreach (var dTexture in storage)
+            {
+                var dir = dTexture.Data.OutputModDirectory;
+                if (dir.Length > 0 && PathUtil.IsInside(path, Path.Combine(modRoot, dir)))
+                    return true;
+            }
+
+            var firstSegment = Path.GetRelativePath(modRoot, path).Split('/', '\\')[0];
+            return firstSegment.StartsWith("DTM_", StringComparison.OrdinalIgnoreCase);
+        }
+        catch
+        {
+            return false;
+        }
+    }
+
+    /// <summary>
+    /// Background part of the build: decode, composite and BC-compress textures, then commit
+    /// the folder. <paramref name="commitWhenEmpty"/> commits a deliberately empty build (a
+    /// cleanup that deletes the mod's stale files); an ACCIDENTALLY empty result — every job
+    /// failed to decode — must never commit, or it would wipe a previously good mod.
+    /// </summary>
+    private async Task<int> BuildAndWriteAsync(DTexture dTexture, string modDirectory, BuildPlan plan, bool commitWhenEmpty = false)
     {
         using var build   = modWriter.StartBuild(modDirectory);
         var       written = 0;
@@ -636,7 +773,7 @@ public sealed class OverlayModManager : IService, IDisposable
             ++written;
         }
 
-        if (written > 0)
+        if (written > 0 || commitWhenEmpty)
             build.Commit(ModName(dTexture), DynamicTextureManager.Version);
 
         return written;

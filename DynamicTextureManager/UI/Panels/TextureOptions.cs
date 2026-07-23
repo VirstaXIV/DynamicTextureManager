@@ -17,7 +17,8 @@ public sealed record TextureOption(
     string MaterialLabel,
     bool DecalRecommended,
     string MaterialGamePath,
-    MtrlFile Mtrl);
+    MtrlFile Mtrl,
+    MaterialKind Kind);
 
 /// <summary> Shared material/texture enumeration and the material dropdown of the Decals and Textures tabs. </summary>
 public static class TextureOptions
@@ -32,10 +33,12 @@ public static class TextureOptions
             if (mtrl == null)
                 continue;
 
-            foreach (var info in shaderHandlers.For(mtrl).ClassifyTextures(mtrl))
+            var handler = shaderHandlers.For(mtrl);
+            var kind    = handler.Kind(mtrl);
+            foreach (var info in handler.ClassifyTextures(mtrl))
             {
                 if (!ret.Any(o => string.Equals(o.GamePath, info.GamePath, StringComparison.OrdinalIgnoreCase)))
-                    ret.Add(new TextureOption(info.GamePath, info.Slot, source.Label, info.SupportsDecals, source.GamePath, mtrl));
+                    ret.Add(new TextureOption(info.GamePath, info.Slot, source.Label, info.SupportsDecals, source.GamePath, mtrl, kind));
             }
         }
 

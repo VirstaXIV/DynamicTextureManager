@@ -1,5 +1,7 @@
 using System;
+using System.Collections.Generic;
 using System.IO;
+using System.Linq;
 using System.Numerics;
 using Dalamud.Bindings.ImGui;
 using Dalamud.Interface.Textures;
@@ -18,7 +20,15 @@ namespace DynamicTextureManager.UI.Panels;
 /// composited diffuse, the composited id map and the 32 resolved colorset row diffuse
 /// colors (the dTexture's edits applied). Any part may be null and falls back to gray.
 /// </summary>
-public sealed record ViewportShading(DecodedTexture? Diffuse, DecodedTexture? IdMap, Vector3[]? RowDiffuse);
+public sealed record ViewportShading(DecodedTexture? Diffuse, DecodedTexture? IdMap, Vector3[]? RowDiffuse, Vector3? SkinTone = null);
+
+/// <summary>
+/// An extra mesh rendered alongside the primary selected material — overlay parts (nails,
+/// accents) sharing the same body model set but painted with their OWN composited texture,
+/// so the viewport shows a companion-baked tattoo continuing onto them instead of the dimmed,
+/// wrong-UV "context" look. Additive to the primary render path: never affects it.
+/// </summary>
+public sealed record ViewportOverlay(MaterialMesh Mesh, DecodedTexture? Diffuse, bool ApplySkinTone);
 
 /// <summary>
 /// The 3D preview of the selected material: the gear mesh software-rendered in its bind
@@ -42,6 +52,8 @@ public sealed class DecalViewport(ITextureProvider textureProvider) : IDisposabl
 
     private ViewportShading? _shading;
     private bool             _highlightDecal;
+
+    private IReadOnlyList<ViewportOverlay> _overlays = [];
 
     private Rgba32[]? _decalPixels;
     private int       _decalWidth;
@@ -73,18 +85,31 @@ public sealed class DecalViewport(ITextureProvider textureProvider) : IDisposabl
     /// </summary>
     public void Open(DTexture dTexture, MaterialMesh mesh, uint visibleAttributes)
     {
-        var changed = !ReferenceEquals(_mesh, mesh) || !ReferenceEquals(_dTexture, dTexture);
+        var dTextureChanged = !ReferenceEquals(_dTexture, dTexture);
+        var meshChanged     = !ReferenceEquals(_mesh, mesh);
+        var firstMesh       = _mesh == null;
         _dTexture = dTexture;
         if (_visibleAttributes != visibleAttributes)
             _renderDirty = true;
         _visibleAttributes = visibleAttributes;
-        if (changed)
+
+        if (dTextureChanged && _layer != null)
         {
+            // A different project: the placement binding belongs to its layers, drop it.
+            DynamicTextureManager.Log.Debug("Viewport placement unbound — the selected dTexture changed.");
+            _layer     = null;
+            _onChanged = null;
+        }
+
+        if (meshChanged)
+        {
+            // The mesh instance can turn over without a real subject change (the reader's
+            // caches re-resolve while rebuilds reload the mod) — keep an active placement
+            // and the camera; the Decals tab already unbinds when the MATERIAL changes.
             _mesh        = mesh;
-            _layer       = null;
-            _onChanged   = null;
             _renderDirty = true;
-            FrameCamera();
+            if (dTextureChanged || firstMesh)
+                FrameCamera();
         }
 
         _open = true;
@@ -118,10 +143,29 @@ public sealed class DecalViewport(ITextureProvider textureProvider) : IDisposabl
     {
         if (ReferenceEquals(_shading?.Diffuse, shading?.Diffuse)
          && ReferenceEquals(_shading?.IdMap, shading?.IdMap)
-         && ReferenceEquals(_shading?.RowDiffuse, shading?.RowDiffuse))
+         && ReferenceEquals(_shading?.RowDiffuse, shading?.RowDiffuse)
+         && Nullable.Equals(_shading?.SkinTone, shading?.SkinTone))
             return;
 
         _shading     = shading;
+        _renderDirty = true;
+    }
+
+    /// <summary>
+    /// Swap in the overlay-part entries (nails, accents); re-renders only when the set actually
+    /// changed. Additive — never touches the primary mesh/shading, so it cannot regress the
+    /// single-texture preview when there are no overlays (the common case: gear, non-skin
+    /// materials, or skin materials with no overlay parts added).
+    /// </summary>
+    public void SetOverlays(IReadOnlyList<ViewportOverlay> overlays)
+    {
+        if (_overlays.Count == overlays.Count
+         && _overlays.Zip(overlays, (a, b)
+                => ReferenceEquals(a.Mesh, b.Mesh) && ReferenceEquals(a.Diffuse, b.Diffuse) && a.ApplySkinTone == b.ApplySkinTone)
+            .All(same => same))
+            return;
+
+        _overlays    = overlays;
         _renderDirty = true;
     }
 
@@ -366,6 +410,16 @@ public sealed class DecalViewport(ITextureProvider textureProvider) : IDisposabl
             }
         }
 
+        // One diagnostic line per CLICK (not per drag frame): the first thing to check when
+        // "clicking does nothing" — distinguishes a lost binding from a missed pick.
+        if (hovered && ImGui.IsMouseClicked(ImGuiMouseButton.Left))
+        {
+            var probe = (ImGui.GetMousePos() - start) / size;
+            DynamicTextureManager.Log.Debug(_layer == null
+                ? $"Viewport click at ({probe.X:F2}, {probe.Y:F2}) — no placement layer bound."
+                : $"Viewport click at ({probe.X:F2}, {probe.Y:F2}) — pick {(TryPick(probe, out _, out _, out _) ? "hit" : "MISSED the mesh")}.");
+        }
+
         if (hovered && _layer != null && ImGui.IsMouseDown(ImGuiMouseButton.Left))
         {
             var local = (ImGui.GetMousePos() - start) / size;
@@ -421,7 +475,8 @@ public sealed class DecalViewport(ITextureProvider textureProvider) : IDisposabl
         var bary    = Vector3.Zero;
         for (var i = 0; i + 2 < _mesh.Indices.Length; i += 3)
         {
-            if ((_mesh.TriangleAttributeMasks[i / 3] & ~_visibleAttributes) != 0)
+            // Context geometry (other materials of the model set) cannot take decals.
+            if (!_mesh.TriangleEditable[i / 3] || (_mesh.TriangleAttributeMasks[i / 3] & ~_visibleAttributes) != 0)
                 continue;
 
             if (!RayTriangle(origin, direction,
@@ -483,8 +538,13 @@ public sealed class DecalViewport(ITextureProvider textureProvider) : IDisposabl
         return true;
     }
 
-    /// <summary> The material's base color at a UV coordinate: diffuse sample times colorset row color. </summary>
-    private static Vector3 SampleAlbedo(DecodedTexture? diffuse, DecodedTexture? idMap, Vector3[]? rows, Vector2 uv)
+    /// <summary>
+    /// The material's base color at a UV coordinate: diffuse sample times colorset row color.
+    /// Materials without a colorset (skin, legacy diffuse) shade from the diffuse alone; skin
+    /// additionally multiplies the preview skin tone weighted by the diffuse alpha — the
+    /// stand-in for the customize skin color the game applies in-shader.
+    /// </summary>
+    private static Vector3 SampleAlbedo(DecodedTexture? diffuse, DecodedTexture? idMap, Vector3[]? rows, Vector3? skinTone, Vector2 uv)
     {
         var albedo = Vector3.One;
         var shaded = false;
@@ -494,7 +554,9 @@ public sealed class DecalViewport(ITextureProvider textureProvider) : IDisposabl
             var y = Math.Clamp((int)(uv.Y * diffuse.Height), 0, diffuse.Height - 1);
             var i = (y * diffuse.Width + x) * 4;
             albedo *= new Vector3(diffuse.Rgba[i] / 255f, diffuse.Rgba[i + 1] / 255f, diffuse.Rgba[i + 2] / 255f);
-            shaded  = true;
+            if (skinTone is { } tone)
+                albedo *= Vector3.Lerp(Vector3.One, tone, diffuse.Rgba[i + 3] / 255f);
+            shaded = true;
         }
 
         if (idMap != null && rows != null)
@@ -515,7 +577,19 @@ public sealed class DecalViewport(ITextureProvider textureProvider) : IDisposabl
     private readonly byte[]  _renderRgba  = new byte[RenderSize * RenderSize * 4];
     private readonly float[] _renderDepth = new float[RenderSize * RenderSize];
 
-    /// <summary> Software-render the mesh with the material's shading and the bound decal projected live. </summary>
+    // Marks pixels the primary mesh's OWN editable geometry has claimed this frame, so its
+    // OWN dimmed/context geometry (which can sit almost exactly coincident with it — e.g. a
+    // piercing accessory nearly touching the skin underneath) can never win the pixel back via
+    // floating-point depth noise. See the pass-based split in RasterizeMesh.
+    private readonly bool[] _editableTouched = new bool[RenderSize * RenderSize];
+
+    /// <summary>
+    /// Software-render the primary mesh (with the material's shading and the bound decal
+    /// projected live) plus any bound overlay-part meshes (nails, accents — see
+    /// <see cref="SetOverlays"/>), all into one shared framebuffer/depth-buffer so occlusion
+    /// between them is correct. Overlays are strictly additive: with none bound, this renders
+    /// byte-identical to the original single-mesh path.
+    /// </summary>
     private void Render()
     {
         if (_mesh == null)
@@ -525,6 +599,7 @@ public sealed class DecalViewport(ITextureProvider textureProvider) : IDisposabl
         var rgba  = _renderRgba;
         var depth = _renderDepth;
         Array.Fill(depth, float.MaxValue);
+        Array.Clear(_editableTouched);
         for (var i = 0; i < size * size; ++i)
         {
             rgba[i * 4]     = 28;
@@ -532,11 +607,6 @@ public sealed class DecalViewport(ITextureProvider textureProvider) : IDisposabl
             rgba[i * 4 + 2] = 34;
             rgba[i * 4 + 3] = 255;
         }
-
-        // Hoisted out of the per-pixel path — invariant for the whole render.
-        var shadingDiffuse = _shading?.Diffuse;
-        var shadingIdMap   = _shading?.IdMap;
-        var shadingRows    = _shading?.RowDiffuse;
 
         var viewProjection = ViewProjection();
         _lastViewProjection = viewProjection;
@@ -551,124 +621,208 @@ public sealed class DecalViewport(ITextureProvider textureProvider) : IDisposabl
             : (Vector3.UnitX, Vector3.UnitZ);
         if (normalDir.LengthSquared() > 1e-6f)
             normalDir = Vector3.Normalize(normalDir);
-        var maxDepth  = layer == null ? 0f : MathF.Max(layer.WorldWidth, layer.WorldHeight) * 0.4f;
         var threshold = layer?.AlphaThresholdByte ?? (byte)128;
         var rows      = _shading?.RowDiffuse;
         var realColor = !_highlightDecal && layer != null
          && (!layer.IdRemap || (rows != null && layer.PaletteRows.Count > 0 && layer.PaletteRows.Count == layer.PaletteColors.Count));
 
-        Span<Vector2> screen = stackalloc Vector2[3];
-        Span<float>   depths = stackalloc float[3];
-        for (var i = 0; i + 2 < _mesh.Indices.Length; i += 3)
+        // Renders one mesh into the shared framebuffer/depth-buffer. `skipContext` is true for
+        // overlay entries: their OWN merged mesh includes the whole body as dimmed context
+        // (same as the primary), which would duplicate-render it — only their own editable
+        // (real) geometry is new here, the body itself already came from the primary pass.
+        void RasterizeMesh(MaterialMesh mesh, DecodedTexture? meshDiffuse, DecodedTexture? meshIdMap, Vector3? meshSkinTone, bool skipContext)
         {
-            var triangle = i / 3;
-            if ((_mesh.TriangleAttributeMasks[triangle] & ~_visibleAttributes) != 0)
-                continue;
-
-            var i0 = _mesh.Indices[i];
-            var i1 = _mesh.Indices[i + 1];
-            var i2 = _mesh.Indices[i + 2];
-            var clipped = false;
-            for (var k = 0; k < 3; ++k)
+            // Curvature-following per-vertex decal-space coordinates — the same computation the
+            // bake uses (SurfaceDecalBaker.ComputeSurfaceProjection), so the live preview always
+            // matches the built texture, including how it wraps/warps on curved surfaces, and
+            // now also how it continues onto this specific mesh (the companion-bake reprojection).
+            SurfaceDecalBaker.SurfaceProjection? projection = null;
+            if (anchored && layer != null)
             {
-                var p    = _mesh.Positions[k == 0 ? i0 : k == 1 ? i1 : i2];
-                var clip = Vector4.Transform(new Vector4(p, 1f), viewProjection);
-                if (clip.W <= 0.001f)
-                {
-                    clipped = true;
-                    break;
-                }
-
-                var ndc = new Vector3(clip.X, clip.Y, clip.Z) / clip.W;
-                screen[k] = new Vector2((ndc.X + 1f) / 2f * size, (1f - ndc.Y) / 2f * size);
-                depths[k] = ndc.Z;
+                var walkRadius = SurfaceDecalBaker.WalkRadius(layer.WorldWidth, layer.WorldHeight);
+                projection = SurfaceDecalBaker.ComputeSurfaceProjection(mesh, anchor, normalDir, tangent, bitangent, walkRadius);
             }
 
-            if (clipped)
-                continue;
+            Span<Vector2> screen = stackalloc Vector2[3];
+            Span<float>   depths = stackalloc float[3];
 
-            var area = (screen[1].X - screen[0].X) * (screen[2].Y - screen[0].Y)
-              - (screen[1].Y - screen[0].Y) * (screen[2].X - screen[0].X);
-            if (MathF.Abs(area) < 1e-4f)
-                continue;
-
-            var minX = Math.Max(0, (int)MathF.Floor(MathF.Min(screen[0].X, MathF.Min(screen[1].X, screen[2].X))));
-            var maxX = Math.Min(size - 1, (int)MathF.Ceiling(MathF.Max(screen[0].X, MathF.Max(screen[1].X, screen[2].X))));
-            var minY = Math.Max(0, (int)MathF.Floor(MathF.Min(screen[0].Y, MathF.Min(screen[1].Y, screen[2].Y))));
-            var maxY = Math.Min(size - 1, (int)MathF.Ceiling(MathF.Max(screen[0].Y, MathF.Max(screen[1].Y, screen[2].Y))));
-            if (minX > maxX || minY > maxY)
-                continue;
-
-            var dimmed = layer is { SurfaceLimitToPart: true, SurfacePart: >= 0 } && _mesh.TriangleParts[triangle] != layer.SurfacePart;
-
-            for (var y = minY; y <= maxY; ++y)
+            // Two passes for the primary mesh only (skipContext:false): editable geometry
+            // first, so every pixel it touches is recorded in _editableTouched and can never
+            // be reclaimed by this SAME mesh's own dimmed/context geometry afterwards — the
+            // two frequently sit almost exactly coincident (e.g. a piercing accessory nearly
+            // touching the skin underneath), and a plain depth test lets floating-point noise
+            // decide the winner per-pixel, flickering a decal into fragments wherever context
+            // happens to win. Overlay calls (skipContext:true) already exclude dimmed
+            // triangles entirely at the top of the loop, so one pass suffices and they compete
+            // normally (real depth test) against whatever the primary already drew.
+            var passCount = skipContext ? 1 : 2;
+            for (var pass = 0; pass < passCount; ++pass)
             {
-                for (var x = minX; x <= maxX; ++x)
+                var wantDimmed = pass == 1;
+
+                for (var i = 0; i + 2 < mesh.Indices.Length; i += 3)
                 {
-                    var px = new Vector2(x + 0.5f, y + 0.5f);
-                    var w0 = ((screen[1].X - px.X) * (screen[2].Y - px.Y) - (screen[1].Y - px.Y) * (screen[2].X - px.X)) / area;
-                    var w1 = ((screen[2].X - px.X) * (screen[0].Y - px.Y) - (screen[2].Y - px.Y) * (screen[0].X - px.X)) / area;
-                    var w2 = 1f - w0 - w1;
-                    if (w0 < 0f || w1 < 0f || w2 < 0f)
+                    var triangle = i / 3;
+                    if (skipContext && !mesh.TriangleEditable[triangle])
+                        continue;
+                    if ((mesh.TriangleAttributeMasks[triangle] & ~_visibleAttributes) != 0)
                         continue;
 
-                    var z     = depths[0] * w0 + depths[1] * w1 + depths[2] * w2;
-                    var index = y * size + x;
-                    if (z >= depth[index])
+                    // Context geometry (other materials of the model set) renders dimmed for
+                    // orientation — it shows the whole body/model, but decals cannot land on it.
+                    var dimmed = !mesh.TriangleEditable[triangle]
+                     || (layer is { SurfaceLimitToPart: true, SurfacePart: >= 0 } && mesh.TriangleParts[triangle] != layer.SurfacePart);
+                    if (!skipContext && dimmed != wantDimmed)
                         continue;
 
-                    depth[index] = z;
-
-                    var position = _mesh.Positions[i0] * w0 + _mesh.Positions[i1] * w1 + _mesh.Positions[i2] * w2;
-                    var pixelNormal = _mesh.Normals[i0] * w0 + _mesh.Normals[i1] * w1 + _mesh.Normals[i2] * w2;
-                    var light = pixelNormal.LengthSquared() > 1e-8f
-                        ? 0.35f + 0.65f * MathF.Abs(Vector3.Dot(Vector3.Normalize(pixelNormal), eyeDirection))
-                        : 0.6f;
-
-                    var uv    = _mesh.Uvs[i0] * w0 + _mesh.Uvs[i1] * w1 + _mesh.Uvs[i2] * w2;
-                    var color = SampleAlbedo(shadingDiffuse, shadingIdMap, shadingRows, uv) * 255f;
-                    if (dimmed)
-                        color *= 0.4f;
-
-                    if (anchored && !dimmed && layer != null)
+                    var i0 = mesh.Indices[i];
+                    var i1 = mesh.Indices[i + 1];
+                    var i2 = mesh.Indices[i + 2];
+                    var clipped = false;
+                    for (var k = 0; k < 3; ++k)
                     {
-                        var d  = position - anchor;
-                        var du = Vector3.Dot(d, tangent) / layer.WorldWidth + 0.5f;
-                        var dv = Vector3.Dot(d, bitangent) / layer.WorldHeight + 0.5f;
-                        var dz = Vector3.Dot(d, normalDir);
-                        if (du is >= 0f and <= 1f && dv is >= 0f and <= 1f && MathF.Abs(dz) <= maxDepth)
+                        var p    = mesh.Positions[k == 0 ? i0 : k == 1 ? i1 : i2];
+                        var clip = Vector4.Transform(new Vector4(p, 1f), viewProjection);
+                        if (clip.W <= 0.001f)
                         {
-                            // The bake flips the source image itself; sampling mirrored here matches it.
-                            var su = layer.FlipX ? 1f - du : du;
-                            var sv = layer.FlipY ? 1f - dv : dv;
-                            var sample = _decalPixels == null
-                                ? new Rgba32(255, 255, 255, 255)
-                                : SurfaceDecalBaker.SampleBilinear(_decalPixels, _decalWidth, _decalHeight, su, sv);
-                            if (layer.IdRemap)
+                            clipped = true;
+                            break;
+                        }
+
+                        var ndc = new Vector3(clip.X, clip.Y, clip.Z) / clip.W;
+                        screen[k] = new Vector2((ndc.X + 1f) / 2f * size, (1f - ndc.Y) / 2f * size);
+                        depths[k] = ndc.Z;
+                    }
+
+                    if (clipped)
+                        continue;
+
+                    var area = (screen[1].X - screen[0].X) * (screen[2].Y - screen[0].Y)
+                      - (screen[1].Y - screen[0].Y) * (screen[2].X - screen[0].X);
+                    if (MathF.Abs(area) < 1e-4f)
+                        continue;
+
+                    var minX = Math.Max(0, (int)MathF.Floor(MathF.Min(screen[0].X, MathF.Min(screen[1].X, screen[2].X))));
+                    var maxX = Math.Min(size - 1, (int)MathF.Ceiling(MathF.Max(screen[0].X, MathF.Max(screen[1].X, screen[2].X))));
+                    var minY = Math.Max(0, (int)MathF.Floor(MathF.Min(screen[0].Y, MathF.Min(screen[1].Y, screen[2].Y))));
+                    var maxY = Math.Min(size - 1, (int)MathF.Ceiling(MathF.Max(screen[0].Y, MathF.Max(screen[1].Y, screen[2].Y))));
+                    if (minX > maxX || minY > maxY)
+                        continue;
+
+                    // Curvature-following projection reached all three corners — same gate the bake
+                    // uses; triangles outside the walk radius never receive the decal.
+                    var triProjected = !dimmed && anchored && layer != null && projection != null
+                     && projection.Reached[i0] && projection.Reached[i1] && projection.Reached[i2];
+                    var proj0 = triProjected ? projection!.Local[i0] : default;
+                    var proj1 = triProjected ? projection!.Local[i1] : default;
+                    var proj2 = triProjected ? projection!.Local[i2] : default;
+
+                    for (var y = minY; y <= maxY; ++y)
+                    {
+                        for (var x = minX; x <= maxX; ++x)
+                        {
+                            var px = new Vector2(x + 0.5f, y + 0.5f);
+                            var w0 = ((screen[1].X - px.X) * (screen[2].Y - px.Y) - (screen[1].Y - px.Y) * (screen[2].X - px.X)) / area;
+                            var w1 = ((screen[2].X - px.X) * (screen[0].Y - px.Y) - (screen[2].Y - px.Y) * (screen[0].X - px.X)) / area;
+                            var w2 = 1f - w0 - w1;
+                            if (w0 < 0f || w1 < 0f || w2 < 0f)
+                                continue;
+
+                            var z     = depths[0] * w0 + depths[1] * w1 + depths[2] * w2;
+                            var index = y * size + x;
+
+                            if (!skipContext && wantDimmed)
                             {
-                                if (sample.A >= threshold)
-                                    color = realColor
-                                        ? _shading!.RowDiffuse![layer.PaletteRows[DecalQuantizer.NearestIndex(sample, layer.PaletteColors)]] * 255f
-                                        : new Vector3(255f, 140f, 0f);
+                                // Dimmed pass: a pixel the editable pass already claimed is
+                                // permanently off-limits (even if this dimmed triangle's true
+                                // depth is marginally closer — that's exactly the z-fighting
+                                // this split exists to avoid), otherwise compete normally
+                                // against whatever else was already drawn this pass.
+                                if (_editableTouched[index] || z >= depth[index])
+                                    continue;
                             }
                             else
                             {
-                                var alpha = sample.A / 255f * Math.Clamp(layer.Opacity, 0f, 1f);
-                                if (alpha > 0f)
-                                    color = realColor
-                                        ? Vector3.Lerp(color, new Vector3(sample.R, sample.G, sample.B), alpha)
-                                        : new Vector3(255f, 140f, 0f);
+                                if (z >= depth[index])
+                                    continue;
                             }
+
+                            depth[index] = z;
+                            if (!skipContext && !wantDimmed)
+                                _editableTouched[index] = true;
+
+                            var pixelNormal = mesh.Normals[i0] * w0 + mesh.Normals[i1] * w1 + mesh.Normals[i2] * w2;
+                            var light = pixelNormal.LengthSquared() > 1e-8f
+                                ? 0.35f + 0.65f * MathF.Abs(Vector3.Dot(Vector3.Normalize(pixelNormal), eyeDirection))
+                                : 0.6f;
+
+                            // Dimmed/context geometry belongs to a DIFFERENT material than the one
+                            // shaded here — its UVs point into a texture this pass never loaded, so
+                            // sampling it would read essentially random texels (the "wrong-looking
+                            // patch of mesh/color" artifact, e.g. a piercing's tiny jewelry mesh
+                            // reading garbage from the body's own diffuse). It's shown only for
+                            // orientation, so use a flat neutral gray instead of sampling at all.
+                            Vector3 color;
+                            if (dimmed)
+                            {
+                                color = new Vector3(190f) * 0.4f;
+                            }
+                            else
+                            {
+                                var uv = mesh.Uvs[i0] * w0 + mesh.Uvs[i1] * w1 + mesh.Uvs[i2] * w2;
+                                color = SampleAlbedo(meshDiffuse, meshIdMap, rows, meshSkinTone, uv) * 255f;
+                            }
+
+                            if (triProjected)
+                            {
+                                var local = proj0 * w0 + proj1 * w1 + proj2 * w2;
+                                var du    = local.X / layer!.WorldWidth + 0.5f;
+                                var dv    = local.Y / layer.WorldHeight + 0.5f;
+                                if (du is >= 0f and <= 1f && dv is >= 0f and <= 1f)
+                                {
+                                    // The bake flips the source image itself; sampling mirrored here matches it.
+                                    var su = layer.FlipX ? 1f - du : du;
+                                    var sv = layer.FlipY ? 1f - dv : dv;
+                                    var sample = _decalPixels == null
+                                        ? new Rgba32(255, 255, 255, 255)
+                                        : SurfaceDecalBaker.SampleBilinear(_decalPixels, _decalWidth, _decalHeight, su, sv);
+                                    if (layer.IdRemap)
+                                    {
+                                        if (sample.A >= threshold)
+                                            color = realColor
+                                                ? _shading!.RowDiffuse![layer.PaletteRows[DecalQuantizer.NearestIndex(sample, layer.PaletteColors)]] * 255f
+                                                : new Vector3(255f, 140f, 0f);
+                                    }
+                                    else
+                                    {
+                                        sample = DecalQuantizer.ApplyTint(sample, layer);
+                                        var alpha = sample.A / 255f * Math.Clamp(layer.Opacity, 0f, 1f);
+                                        if (alpha > 0f)
+                                        {
+                                            // Baked ink gets tinted by the skin color in-game like the
+                                            // rest of the diffuse — preview it the same way.
+                                            var decalColor = new Vector3(sample.R, sample.G, sample.B);
+                                            if (meshSkinTone is { } tone)
+                                                decalColor *= tone;
+                                            color = realColor ? Vector3.Lerp(color, decalColor, alpha) : new Vector3(255f, 140f, 0f);
+                                        }
+                                    }
+                                }
+                            }
+
+                            color *= light;
+                            rgba[index * 4]     = (byte)Math.Clamp((int)color.X, 0, 255);
+                            rgba[index * 4 + 1] = (byte)Math.Clamp((int)color.Y, 0, 255);
+                            rgba[index * 4 + 2] = (byte)Math.Clamp((int)color.Z, 0, 255);
                         }
                     }
-
-                    color *= light;
-                    rgba[index * 4]     = (byte)Math.Clamp((int)color.X, 0, 255);
-                    rgba[index * 4 + 1] = (byte)Math.Clamp((int)color.Y, 0, 255);
-                    rgba[index * 4 + 2] = (byte)Math.Clamp((int)color.Z, 0, 255);
                 }
             }
         }
+
+        RasterizeMesh(_mesh, _shading?.Diffuse, _shading?.IdMap, _shading?.SkinTone, skipContext: false);
+        foreach (var overlay in _overlays)
+            RasterizeMesh(overlay.Mesh, overlay.Diffuse, null, overlay.ApplySkinTone ? _shading?.SkinTone : null, skipContext: true);
 
         _wrap?.Dispose();
         _wrap = textureProvider.CreateFromRaw(RawImageSpecification.Rgba32(size, size), rgba, "DTM Viewport");

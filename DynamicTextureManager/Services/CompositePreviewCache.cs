@@ -22,7 +22,11 @@ namespace DynamicTextureManager.Services;
 public sealed class CompositePreviewCache : IService, IDisposable
 {
     private const long DebounceMs = 500;
-    private const int  MaxEntries = 8;
+
+    // Body diffuse + id map, each potentially with an exclude-layer placement variant, plus an
+    // overlay-part diffuse (nails, accents) per added overlay source — 8 was tight even before
+    // overlays existed and would thrash during placement on a body with several of them added.
+    private const int MaxEntries = 16;
 
     public sealed class Entry
     {
@@ -195,6 +199,21 @@ public sealed class CompositePreviewCache : IService, IDisposable
                     .Where(l => !ReferenceEquals(l, excludeLayer)).ToList()
              ?? [];
 
+            // Companion-target discovery parses materials too — skip it unless there is more
+            // than one body-family source material present at all (the body itself plus at
+            // least one added overlay part), so previews of ordinary gear/skin textures never
+            // pay for it. Merged into the regular layer list (not effect layers): a companion
+            // decal should render in full color exactly like a normal layer, so the Textures
+            // tab's "Generated" view for nails/accents matches what actually gets built.
+            var anyBodyFamily = dTexture.Data.Source.Materials.Count(m => ModelUvReader.IsBodySkinMaterial(m.GamePath)) > 1;
+            if (anyBodyFamily)
+            {
+                var companion = CompositePlanner.OverlayCompanionTargets(dTexture.Data, _shaderHandlers, _sourceFiles, _uvReader)
+                    .FirstOrDefault(t => string.Equals(t.GamePath, gamePath, StringComparison.OrdinalIgnoreCase));
+                if (companion != null)
+                    layers = [.. layers, .. companion.Layers.Where(l => !ReferenceEquals(l, excludeLayer))];
+            }
+
             // Sibling-target discovery parses materials — skip it entirely unless some layer
             // actually carries material effects.
             var anyEffects = dTexture.Data.Textures.Values
@@ -223,6 +242,10 @@ public sealed class CompositePreviewCache : IService, IDisposable
             entry.Building = false;
             return;
         }
+
+        DynamicTextureManager.Log.Debug(
+            $"Preview composite {gamePath}: source {(diskPath == null ? "(none → vanilla)" : diskPath.Length == 0 ? "(vanilla)" : $"\"{diskPath}\"")}, "
+          + $"{layers.Count} layer(s), {effectLayers.Count} effect layer(s).");
 
         _ = Task.Run(() =>
         {

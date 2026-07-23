@@ -85,4 +85,73 @@ public static class CompositePlanner
 
         return targets;
     }
+
+    /// <summary>
+    /// A body-overlay texture (nails, accents — added as its own source material, see
+    /// ModelUvReader.GetBodyOverlayMaterials) whose mesh an enabled body-skin surface decal's
+    /// footprint overlaps: that decal's layer(s) should also bake onto this texture, so a
+    /// tattoo continues seamlessly across the seam.
+    /// </summary>
+    public sealed record OverlayCompanionTarget(string GamePath, List<TextureLayer> Layers, SourcePath Owner);
+
+    /// <summary>
+    /// Every pair of body-skin-family source materials (the body itself, plus any added overlay
+    /// parts) where one's enabled surface decal footprint touches the other's own mesh —
+    /// see SurfaceDecalBaker.FootprintTouches. Materials sharing the same diffuse (a body split
+    /// across torso/legs materials) are already one editable canvas via
+    /// ModelUvReader.GetBodyMesh and are skipped here to avoid a redundant companion of itself.
+    /// One source of truth: the original layer, still owned by its own texture — no separate
+    /// decal layers to keep in sync when the user edits/moves it.
+    /// </summary>
+    public static List<OverlayCompanionTarget> OverlayCompanionTargets(DTextureData data, ShaderHandlerRegistry handlers,
+        SourceFileProvider files, ModelUvReader uvReader)
+    {
+        var targets = new List<OverlayCompanionTarget>();
+
+        var bodyFamily = new List<(SourcePath Source, string Diffuse, List<DecalLayer> SurfaceLayers)>();
+        foreach (var source in data.Source.Materials)
+        {
+            if (!ModelUvReader.IsBodySkinMaterial(source.GamePath))
+                continue;
+
+            var mtrl = files.GetMaterial(source, null);
+            if (mtrl == null)
+                continue;
+
+            var diffuse = handlers.For(mtrl).ClassifyTextures(mtrl).FirstOrDefault(t => t.Slot is TextureSlot.Diffuse).GamePath;
+            if (diffuse == null)
+                continue;
+
+            var layers = data.Textures.GetValueOrDefault(diffuse)?.OfType<DecalLayer>()
+                    .Where(l => l is { Enabled: true, Surface: true }).ToList()
+             ?? [];
+            bodyFamily.Add((source, diffuse, layers));
+        }
+
+        if (bodyFamily.Count < 2)
+            return targets; // nothing else in the body family to continue onto
+
+        foreach (var (targetSource, targetDiffuse, _) in bodyFamily)
+        {
+            var mesh = uvReader.GetMesh(targetSource);
+            if (mesh == null)
+                continue;
+
+            var touching = new List<TextureLayer>();
+            foreach (var (otherSource, otherDiffuse, otherLayers) in bodyFamily)
+            {
+                if (ReferenceEquals(otherSource, targetSource) || string.Equals(otherDiffuse, targetDiffuse, StringComparison.OrdinalIgnoreCase))
+                    continue;
+
+                foreach (var layer in otherLayers)
+                    if (SurfaceDecalBaker.FootprintTouches(mesh, layer))
+                        touching.Add(layer);
+            }
+
+            if (touching.Count > 0)
+                targets.Add(new OverlayCompanionTarget(targetDiffuse, touching, targetSource));
+        }
+
+        return targets;
+    }
 }

@@ -41,6 +41,17 @@ public sealed class SourcePath
     /// <summary> The file that model resolved to at selection time. </summary>
     public string MdlActualPath = string.Empty;
 
+    /// <summary>
+    /// Whether this source is an overlay part (nails, accents — see ModelUvReader.
+    /// GetBodyOverlayMaterials) rather than a primary editable canvas: shown and viewable in
+    /// the Textures tab like any other source, but excluded from the Decals tab's material
+    /// selector — decorating it directly there merges most of the body mesh into unpaintable
+    /// "context" (framed around the tiny overlay geometry) and renders it sampling the wrong
+    /// texture at the wrong UVs, which is confusing, not useful. Its texture is instead painted
+    /// automatically by a body-skin tattoo that overlaps it (OverlayModManager companion bake).
+    /// </summary>
+    public bool Overlay = false;
+
     public bool IsModded
         => ModDirectory.Length > 0;
 
@@ -54,6 +65,7 @@ public sealed class SourcePath
             ["ModName"]       = ModName,
             ["MdlGamePath"]   = MdlGamePath,
             ["MdlActualPath"] = MdlActualPath,
+            ["Overlay"]       = Overlay,
         };
 
     public static SourcePath Load(JObject json)
@@ -66,6 +78,7 @@ public sealed class SourcePath
             ModName       = json["ModName"]?.ToObject<string>() ?? string.Empty,
             MdlGamePath   = json["MdlGamePath"]?.ToObject<string>() ?? string.Empty,
             MdlActualPath = json["MdlActualPath"]?.ToObject<string>() ?? string.Empty,
+            Overlay       = json["Overlay"]?.ToObject<bool>() ?? false,
         };
 }
 

@@ -166,8 +166,46 @@ public sealed class TextureCompositor(DecalLibrary decals) : IService
             ApplyFlatEffect(target, decal, layer, x, y, slot);
         else if (layer.IdRemap)
             ApplyIdRemap(target, decal, layer, x, y);
+        else if (layer.HasTint)
+            ApplyTintedDecal(target, decal, layer, x, y);
         else
             target.Mutate(c => c.DrawImage(decal, new Point(x, y), layer.Opacity));
+    }
+
+    /// <summary>
+    /// Recolored diffuse decal: each pixel renders its tint color and alpha-blends into the
+    /// target's RGB only — the target's alpha channel can carry material data (skin) and
+    /// must survive the stamp. Soft edges stay soft; the alpha threshold gates only palette
+    /// extraction, not blending.
+    /// </summary>
+    private static void ApplyTintedDecal(Image<Rgba32> target, Image<Rgba32> decal, DecalLayer layer, int offsetX, int offsetY)
+    {
+        var opacity = Math.Clamp(layer.Opacity, 0f, 1f);
+
+        for (var dy = 0; dy < decal.Height; ++dy)
+        {
+            var ty = offsetY + dy;
+            if (ty < 0 || ty >= target.Height)
+                continue;
+
+            for (var dx = 0; dx < decal.Width; ++dx)
+            {
+                var tx = offsetX + dx;
+                if (tx < 0 || tx >= target.Width)
+                    continue;
+
+                var sample = DecalQuantizer.ApplyTint(decal[dx, dy], layer);
+                var alpha  = sample.A / 255f * opacity;
+                if (alpha <= 0f)
+                    continue;
+
+                var pixel = target[tx, ty];
+                pixel.R        = LerpByte(pixel.R, sample.R, alpha);
+                pixel.G        = LerpByte(pixel.G, sample.G, alpha);
+                pixel.B        = LerpByte(pixel.B, sample.B, alpha);
+                target[tx, ty] = pixel;
+            }
+        }
     }
 
     /// <summary>
