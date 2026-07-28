@@ -149,12 +149,28 @@ public sealed class TextureCompositor(DecalLibrary decals) : IService
 
         using var decal = Image.Load<Rgba32>(path);
         ApplyFlips(decal, layer);
+        var sourceWidth = decal.Width;
         // Bilinear resampling invents blend colors at edges; keep colorset decals crisp so
         // every pixel nearest-maps to one of the extracted palette colors.
         if (layer.IdRemap)
             decal.Mutate(c => c.Resize(width, height, KnownResamplers.NearestNeighbor));
         else
             decal.Mutate(c => c.Resize(width, height));
+
+        // A heavy shrink area-averages sub-texel detail into faint smears; put the contrast
+        // back the way an artist redrawing at the smaller size would (see ImageFilters).
+        if (!layer.IdRemap && sourceWidth > 2 * decal.Width)
+        {
+            var pixels = new Rgba32[decal.Width * decal.Height];
+            decal.CopyPixelDataTo(pixels);
+            ImageFilters.SharpenPremultiplied(pixels, decal.Width, decal.Height, 0.6f);
+            decal.ProcessPixelRows(accessor =>
+            {
+                for (var row = 0; row < accessor.Height; ++row)
+                    pixels.AsSpan(row * accessor.Width, accessor.Width).CopyTo(accessor.GetRowSpan(row));
+            });
+        }
+
         if (Math.Abs(layer.RotationDeg) > 0.01f)
             decal.Mutate(c => c.Rotate(layer.RotationDeg));
 
@@ -166,19 +182,18 @@ public sealed class TextureCompositor(DecalLibrary decals) : IService
             ApplyFlatEffect(target, decal, layer, x, y, slot);
         else if (layer.IdRemap)
             ApplyIdRemap(target, decal, layer, x, y);
-        else if (layer.HasTint)
-            ApplyTintedDecal(target, decal, layer, x, y);
         else
-            target.Mutate(c => c.DrawImage(decal, new Point(x, y), layer.Opacity));
+            ApplyColorDecal(target, decal, layer, x, y);
     }
 
     /// <summary>
-    /// Recolored diffuse decal: each pixel renders its tint color and alpha-blends into the
-    /// target's RGB only — the target's alpha channel can carry material data (skin) and
-    /// must survive the stamp. Soft edges stay soft; the alpha threshold gates only palette
-    /// extraction, not blending.
+    /// Diffuse decal stamp, recolored or plain: each pixel renders its (possibly tinted)
+    /// color and alpha-blends into the target's RGB only — the target's alpha channel can
+    /// carry material data (skin) and must survive the stamp, which rules out DrawImage
+    /// (it composites alpha too). Soft edges stay soft; the alpha threshold gates only
+    /// palette extraction, not blending.
     /// </summary>
-    private static void ApplyTintedDecal(Image<Rgba32> target, Image<Rgba32> decal, DecalLayer layer, int offsetX, int offsetY)
+    private static void ApplyColorDecal(Image<Rgba32> target, Image<Rgba32> decal, DecalLayer layer, int offsetX, int offsetY)
     {
         var opacity = Math.Clamp(layer.Opacity, 0f, 1f);
 
@@ -282,10 +297,13 @@ public sealed class TextureCompositor(DecalLibrary decals) : IService
 
     /// <summary>
     /// Colorset decal: each opaque decal pixel is nearest-mapped to the layer's extracted
-    /// palette and its ID texel remapped to the claimed slot rendering that color by writing
-    /// ONLY the R channel (pair index). G carries the garment's baked shading — it blends
-    /// the slot's A row (the color) toward its B row (the darkened shade partner), so the
-    /// cloth shading stays visible on the decal and edge interpolation only darkens.
+    /// palette and its ID texel remapped to the claimed slot rendering that color. Solo
+    /// slots write ONLY the R channel (pair index) — G carries the garment's baked shading,
+    /// blending the slot's A row (the color) toward its B row (the darkened shade partner),
+    /// so the cloth shading stays visible on the decal and edge interpolation only darkens.
+    /// Gradient pairs (two blend-compatible colors sharing one pair) write G too: the
+    /// pixel's own position between the pair's colors, preserving the decal's gradient and
+    /// anti-aliasing detail.
     /// </summary>
     private static void ApplyIdRemap(Image<Rgba32> target, Image<Rgba32> decal, DecalLayer layer, int offsetX, int offsetY)
     {
@@ -296,6 +314,7 @@ public sealed class TextureCompositor(DecalLibrary decals) : IService
         }
 
         var threshold = layer.AlphaThresholdByte;
+        var partners  = DecalQuantizer.GradientPartners(layer);
 
         for (var dy = 0; dy < decal.Height; ++dy)
         {
@@ -313,9 +332,21 @@ public sealed class TextureCompositor(DecalLibrary decals) : IService
                 if (source.A < threshold)
                     continue;
 
-                var row   = layer.PaletteRows[DecalQuantizer.NearestIndex(source, layer.PaletteColors)];
+                var index = DecalQuantizer.NearestIndex(source, layer.PaletteColors);
+                var row   = layer.PaletteRows[index];
                 var pixel = target[tx, ty];
-                IdMapTexel.StampRow(ref pixel, row, source.A, layer.WriteBlendFromAlpha);
+                if (partners[index] >= 0)
+                {
+                    var aIndex = row % 2 == 0 ? index : partners[index];
+                    var bIndex = row % 2 == 0 ? partners[index] : index;
+                    IdMapTexel.StampGradient(ref pixel, row,
+                        DecalQuantizer.GradientG(source, layer.PaletteColors[aIndex], layer.PaletteColors[bIndex]));
+                }
+                else
+                {
+                    IdMapTexel.StampRow(ref pixel, row, source.A, layer.WriteBlendFromAlpha);
+                }
+
                 target[tx, ty] = pixel;
             }
         }

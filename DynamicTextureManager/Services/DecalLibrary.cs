@@ -19,6 +19,7 @@ public sealed class DecalPreset
     // Colors
     public bool       IdRemap        = true;
     public int        MaxColors      = 6;
+    public float      ColorMerge     = 20f;
     public float      AlphaThreshold = 0.5f;
     public List<uint> PaletteColors  = [];
 
@@ -44,6 +45,7 @@ public sealed class DecalPreset
         {
             ["IdRemap"]         = IdRemap,
             ["MaxColors"]       = MaxColors,
+            ["ColorMerge"]      = ColorMerge,
             ["AlphaThreshold"]  = AlphaThreshold,
             ["PaletteColors"]   = new JArray(PaletteColors),
             ["NormalSmooth"]    = NormalSmooth,
@@ -66,6 +68,7 @@ public sealed class DecalPreset
         {
             IdRemap         = json["IdRemap"]?.ToObject<bool>() ?? true,
             MaxColors       = json["MaxColors"]?.ToObject<int>() ?? 6,
+            ColorMerge      = json["ColorMerge"]?.ToObject<float>() ?? 20f,
             AlphaThreshold  = json["AlphaThreshold"]?.ToObject<float>() ?? 0.5f,
             PaletteColors   = json["PaletteColors"]?.ToObject<List<uint>>() ?? [],
             NormalSmooth    = json["NormalSmooth"]?.ToObject<float>() ?? 0f,

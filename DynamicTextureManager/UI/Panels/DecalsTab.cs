@@ -397,6 +397,7 @@ public sealed class DecalsTab(
             // The preset may opt out of colorset mode, but never forces it onto a diffuse target.
             layer.IdRemap        &= preset.IdRemap;
             layer.MaxColors       = preset.MaxColors;
+            layer.ColorMerge      = preset.ColorMerge;
             layer.AlphaThreshold  = preset.AlphaThreshold;
             layer.Opacity         = preset.Opacity;
             layer.ScaleX          = preset.ScaleX;
@@ -428,9 +429,13 @@ public sealed class DecalsTab(
                 for (var i = 0; i < layer.PaletteRows.Count; ++i)
                 {
                     var color = new Rgba32(preset.PaletteColors[i]);
-                    GetOrSeedRow(edit, table, layer.PaletteRows[i]).Diffuse = [color.R / 255f, color.G / 255f, color.B / 255f];
-                    GetOrSeedRow(edit, table, layer.PaletteRows[i] + 1).Diffuse =
-                        [color.R / 255f * ShadeFactor, color.G / 255f * ShadeFactor, color.B / 255f * ShadeFactor];
+                    var row   = layer.PaletteRows[i];
+                    GetOrSeedRow(edit, table, row).Diffuse = [color.R / 255f, color.G / 255f, color.B / 255f];
+                    // Gradient pairs restore each half from its own preset entry; only a solo
+                    // slot's B half carries the derived shade.
+                    if (!layer.PaletteRows.Contains(row ^ 1))
+                        GetOrSeedRow(edit, table, row + 1).Diffuse =
+                            [color.R / 255f * ShadeFactor, color.G / 255f * ShadeFactor, color.B / 255f * ShadeFactor];
                 }
             }
         }
@@ -481,6 +486,7 @@ public sealed class DecalsTab(
         {
             IdRemap         = decal.IdRemap,
             MaxColors       = decal.MaxColors,
+            ColorMerge      = decal.ColorMerge,
             AlphaThreshold  = decal.AlphaThreshold,
             NormalSmooth    = decal.NormalSmooth,
             Finish          = decal.Finish,
@@ -622,9 +628,10 @@ public sealed class DecalsTab(
 
     /// <summary>
     /// A colorset decal renders through automatically claimed colorset rows: the image is
-    /// quantized to at most Max Colors and each extracted color gets its own free row — A
-    /// and B halves of a pair serve as two independent colors. This editor bundles the
-    /// color list, dye behavior and shape threshold — the one place all colorset settings live.
+    /// quantized to at most Max Colors, blend-compatible colors share one slot as a gradient
+    /// pair (A = lighter, B = darker, per-texel G blends between them), and the rest claim a
+    /// slot alone. This editor bundles the color list, dye behavior and shape threshold —
+    /// the one place all colorset settings live.
     /// </summary>
     private bool DrawIdRemapSettings(DTexture dTexture, TextureOption option, DecalLayer decal)
     {
@@ -635,14 +642,15 @@ public sealed class DecalsTab(
         var changed = false;
 
         // Old saves and layers whose allocation was cleared claim their rows on first draw.
-        // Saves from older schemes (a slot shared with another decal, or a slot's B half used
-        // as its own color) fringe at decal edges — heal them by reallocating onto whole,
-        // exclusively owned slots. Extracted layers own gear-authored rows and are never
-        // re-quantized onto new ones.
+        // Saves from older schemes (a slot shared with another decal, or a B half claimed
+        // WITHOUT its A partner) fringe at decal edges — heal them by reallocating onto
+        // whole, exclusively owned slots. A B half whose A half the same decal owns is a
+        // gradient pair, not a conflict. Extracted layers own gear-authored rows and are
+        // never re-quantized onto new ones.
         if (decal is { Extracted: false, Enabled: true, RowError: null })
         {
             var conflict = decal.PaletteRows.Count > 0
-             && (decal.PaletteRows.Any(r => r % 2 == 1)
+             && (decal.PaletteRows.Any(r => r % 2 == 1 && !decal.PaletteRows.Contains(r ^ 1))
                  || (ClaimedRowsForMaterial(dTexture, option.MaterialGamePath, decal) is var otherRows
                      && decal.PaletteRows.Any(otherRows.Contains)));
             if (decal.PaletteRows.Count == 0 || conflict)
@@ -658,13 +666,16 @@ public sealed class DecalsTab(
         else
         {
             ImGui.SetNextItemWidth(220 * ImUtf8.GlobalScale);
-            var maxColors = decal.MaxColors;
-            if (ImUtf8.Slider("Max Colors"u8, ref maxColors, "%d"u8, 1, 12))
-                decal.MaxColors = Math.Clamp(maxColors, 1, 12);
+            var merge = decal.ColorMerge;
+            if (ImUtf8.Slider("Color Merge"u8, ref merge, "%.0f"u8, 4f, 64f))
+                decal.ColorMerge = Math.Clamp(merge, 4f, 64f);
             if (ImGui.IsItemDeactivatedAfterEdit())
                 changed |= ReallocateDecal(dTexture, option, table, decal);
             ImUtf8.HoverTooltip(
-                "The decal is reduced to at most this many colors — similar colors merge.\nEach color claims one whole free colorset slot: its A row carries the color, its B row a darker shade the game blends toward where the gear baked its cloth shading.\nSo 6 colors need 6 fully free slots, and slots are never shared."u8);
+                "The decal picks how many colors it needs on its own: the fewest whose blended rendering still matches the image within this distance. Raise to merge similar colors harder (fewer slots), lower to keep more apart.\nColors that blend cleanly (shades of one hue, black/white, outline + fill) share one colorset slot as a gradient pair, keeping the decal's smooth shading and anti-aliasing; unrelated hues claim a whole slot each."u8);
+
+            ImGui.SameLine();
+            ImUtf8.Text($"Colors: {decal.PaletteColors.Count} (auto)");
 
             ImGui.SameLine();
             if (ImUtf8.SmallButton("Re-extract Colors"u8))
@@ -707,12 +718,17 @@ public sealed class DecalsTab(
             ImGui.SameLine();
             var color = new Vector3(rowEdit.Diffuse[0], rowEdit.Diffuse[1], rowEdit.Diffuse[2]);
             ImGui.SetNextItemWidth(250 * ImUtf8.GlobalScale);
-            if (ImUtf8.ColorEdit($"Slot {row / 2 + 1}", ref color, ImGuiColorEditFlags.Float))
+            // Gradient pairs render two of the decal's colors on one slot's halves — each is
+            // its own editable color, so no shade sync (that would clobber the partner).
+            var partnered = decal.PaletteRows.Contains(row ^ 1);
+            var label     = partnered ? $"Slot {row / 2 + 1}{(row % 2 == 0 ? "A" : "B")}" : $"Slot {row / 2 + 1}";
+            if (ImUtf8.ColorEdit(label, ref color, ImGuiColorEditFlags.Float))
             {
                 rowEdit.Diffuse = [color.X, color.Y, color.Z];
-                // Keep the slot's B row a darkened copy so the baked shading blend darkens.
-                GetOrSeedRow(edit, table, row + 1).Diffuse =
-                    [color.X * ShadeFactor, color.Y * ShadeFactor, color.Z * ShadeFactor];
+                // Keep a solo slot's B row a darkened copy so the baked shading blend darkens.
+                if (!partnered)
+                    GetOrSeedRow(edit, table, row + 1).Diffuse =
+                        [color.X * ShadeFactor, color.Y * ShadeFactor, color.Z * ShadeFactor];
                 changed = true;
             }
 
@@ -860,9 +876,9 @@ public sealed class DecalsTab(
             return changed;
 
         ImGui.SetNextItemWidth(220 * ImUtf8.GlobalScale);
-        var maxColors = decal.MaxColors;
-        if (ImUtf8.Slider("Max Colors"u8, ref maxColors, "%d"u8, 1, 12))
-            decal.MaxColors = Math.Clamp(maxColors, 1, 12);
+        var merge = decal.ColorMerge;
+        if (ImUtf8.Slider("Color Merge"u8, ref merge, "%.0f"u8, 4f, 64f))
+            decal.ColorMerge = Math.Clamp(merge, 4f, 64f);
         if (ImGui.IsItemDeactivatedAfterEdit() && ExtractTintPalette(decal))
         {
             decal.TintColors = decal.PaletteColors.ToList();
@@ -870,7 +886,10 @@ public sealed class DecalsTab(
         }
 
         ImUtf8.HoverTooltip(
-            "The decal is reduced to at most this many colors — similar colors merge.\nChanging it re-extracts the colors and discards the recolors below."u8);
+            "The decal picks how many colors it needs on its own: the fewest whose blended rendering still matches the image within this distance.\nRaise to merge similar colors harder, lower to keep more apart. Changing it re-extracts the colors and discards the recolors below."u8);
+
+        ImGui.SameLine();
+        ImUtf8.Text($"Colors: {decal.PaletteColors.Count} (auto)");
 
         ImGui.SameLine();
         if (ImUtf8.SmallButton("Re-extract Colors"u8) && ExtractTintPalette(decal))
@@ -936,7 +955,7 @@ public sealed class DecalsTab(
 
         try
         {
-            decal.PaletteColors = DecalQuantizer.ExtractPalette(path, decal.MaxColors, decal.AlphaThreshold).ToList();
+            decal.PaletteColors = DecalQuantizer.ExtractPaletteAuto(path, decal.AlphaThreshold, decal.ColorMerge).ToList();
         }
         catch (Exception ex)
         {
@@ -975,7 +994,7 @@ public sealed class DecalsTab(
         uint[] palette;
         try
         {
-            palette = DecalQuantizer.ExtractPalette(path, decal.MaxColors, decal.AlphaThreshold);
+            palette = DecalQuantizer.ExtractPaletteAuto(path, decal.AlphaThreshold, decal.ColorMerge);
         }
         catch (Exception ex)
         {
@@ -991,23 +1010,38 @@ public sealed class DecalsTab(
         }
         else
         {
-            var result = ColorRowAllocator.Allocate(palette.Length, EffectiveGearUsedPairs(dTexture, option.MaterialGamePath), others);
+            // Blend-compatible colors share one slot (gradient pair: lighter color on the A
+            // half, darker on B, per-texel G carries the decal's own gradient between them),
+            // so the decal claims the minimum number of slots and keeps its anti-aliasing.
+            var groups = ColorRowAllocator.GroupGradientPairs(palette);
+            var result = ColorRowAllocator.Allocate(groups.Count, EffectiveGearUsedPairs(dTexture, option.MaterialGamePath), others);
             decal.RowError = result.Error;
             if (result.Success)
             {
-                decal.PaletteRows = result.Rows;
-                for (var i = 0; i < result.Rows.Count; ++i)
+                var rowByColor = new int[palette.Length];
+                for (var g = 0; g < groups.Count; ++g)
                 {
-                    // The slot's A row carries the color; its B row gets a darkened copy —
-                    // the id map's G channel blends A toward B exactly where the garment
-                    // baked its cloth shading, so the shading stays visible on the decal.
-                    var color = new Rgba32(palette[i]);
-                    edit.Rows.Remove(result.Rows[i]);
-                    edit.Rows.Remove(result.Rows[i] + 1);
-                    GetOrSeedRow(edit, table, result.Rows[i]).Diffuse = [color.R / 255f, color.G / 255f, color.B / 255f];
-                    GetOrSeedRow(edit, table, result.Rows[i] + 1).Diffuse =
-                        [color.R / 255f * ShadeFactor, color.G / 255f * ShadeFactor, color.B / 255f * ShadeFactor];
+                    var rowA = result.Rows[g];
+                    rowByColor[groups[g].Light] = rowA;
+                    if (groups[g].Dark >= 0)
+                        rowByColor[groups[g].Dark] = rowA + 1;
+
+                    var light = new Rgba32(palette[groups[g].Light]);
+                    edit.Rows.Remove(rowA);
+                    edit.Rows.Remove(rowA + 1);
+                    GetOrSeedRow(edit, table, rowA).Diffuse = [light.R / 255f, light.G / 255f, light.B / 255f];
+
+                    // A gradient pair's B row carries its own real color; a solo slot's B row
+                    // gets a darkened copy — the id map's G channel blends A toward B exactly
+                    // where the garment baked its cloth shading, so the shading stays visible
+                    // on the decal.
+                    var dark = groups[g].Dark >= 0
+                        ? new Rgba32(palette[groups[g].Dark])
+                        : new Rgba32((byte)(light.R * ShadeFactor), (byte)(light.G * ShadeFactor), (byte)(light.B * ShadeFactor));
+                    GetOrSeedRow(edit, table, rowA + 1).Diffuse = [dark.R / 255f, dark.G / 255f, dark.B / 255f];
                 }
+
+                decal.PaletteRows = rowByColor.ToList();
 
                 // Freshly seeded rows carry the template's finish; re-apply the layer's own.
                 ApplyFinishToClaimedRows(edit, table, decal);

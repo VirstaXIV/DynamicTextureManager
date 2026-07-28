@@ -5,6 +5,7 @@ using DynamicTextureManager.DTextures.Data;
 using DynamicTextureManager.ModGeneration.Shaders;
 using SixLabors.ImageSharp;
 using SixLabors.ImageSharp.PixelFormats;
+using SixLabors.ImageSharp.Processing;
 
 namespace DynamicTextureManager.ModGeneration;
 
@@ -47,13 +48,16 @@ public static class SurfaceDecalBaker
             return;
         }
 
-        var decalPixels = new Rgba32[decal.Width * decal.Height];
-        decal.CopyPixelDataTo(decalPixels);
-
         var projection = ComputeSurfaceProjection(mesh, anchor, normal, tangent, bitangent, WalkRadius(worldWidth, worldHeight));
 
         // Rasterize the same morphed surface that was clicked when placing.
         var indices = mesh.IndicesWithShapes(layer.SurfaceShapes);
+
+        // Accept triangles once, feeding both the density measurement below and the
+        // rasterization — the two passes must agree on the footprint.
+        var accepted  = new List<(int I0, int I1, int I2, Vector2 D0, Vector2 D1, Vector2 D2)>();
+        var decalArea = 0.0;
+        var texelArea = 0.0;
 
         for (var i = 0; i + 2 < indices.Length; i += 3)
         {
@@ -90,9 +94,62 @@ public static class SurfaceDecalBaker
              || (d0.Y < 0f && d1.Y < 0f && d2.Y < 0f) || (d0.Y > 1f && d1.Y > 1f && d2.Y > 1f))
                 continue;
 
-            RasterizeTriangle(target, decalPixels, decal.Width, decal.Height,
-                mesh.Uvs[i0], mesh.Uvs[i1], mesh.Uvs[i2], d0, d1, d2, threshold, opacity, layer, effectSlot);
+            accepted.Add((i0, i1, i2, d0, d1, d2));
+            decalArea += MathF.Abs(Cross(d1 - d0, d2 - d0));
+            var t0 = new Vector2(mesh.Uvs[i0].X * target.Width, mesh.Uvs[i0].Y * target.Height);
+            var t1 = new Vector2(mesh.Uvs[i1].X * target.Width, mesh.Uvs[i1].Y * target.Height);
+            var t2 = new Vector2(mesh.Uvs[i2].X * target.Width, mesh.Uvs[i2].Y * target.Height);
+            texelArea += MathF.Abs(Cross(t1 - t0, t2 - t0));
         }
+
+        if (accepted.Count == 0)
+            return;
+
+        var (decalPixels, decalWidth, decalHeight) = PrepareDecalPixels(decal, layer, decalArea, texelArea);
+        var gradientPartners = DecalQuantizer.GradientPartners(layer);
+
+        foreach (var (i0, i1, i2, d0, d1, d2) in accepted)
+            RasterizeTriangle(target, decalPixels, decalWidth, decalHeight,
+                mesh.Uvs[i0], mesh.Uvs[i1], mesh.Uvs[i2], d0, d1, d2, threshold, opacity, layer, effectSlot, gradientPartners);
+    }
+
+    /// <summary>
+    /// The decal pixels the rasterizer samples, pre-shrunk toward the footprint's texel
+    /// density when the decal is clearly oversized for the area it lands on. A detail-dense
+    /// decal squeezed onto few texels aliases under per-texel taps no matter the tap count;
+    /// ImageSharp's resize filters any shrink ratio correctly, and the 2x headroom left here
+    /// keeps local density variation (UV stretch per triangle) within reach of the subsample
+    /// grid in <see cref="RasterizeTriangle"/>. Colorset decals are exempt — resampling
+    /// invents blend colors between palette entries, and every pixel must nearest-map to an
+    /// extracted palette color.
+    /// </summary>
+    private static (Rgba32[] Pixels, int Width, int Height) PrepareDecalPixels(Image<Rgba32> decal, DecalLayer layer,
+        double decalArea, double texelArea)
+    {
+        // Aggregate decal-pixels-per-texel over the whole footprint (both sums are twice the
+        // triangle areas, so the factor cancels).
+        var density = texelArea > 1e-3
+            ? Math.Sqrt(decalArea * decal.Width * decal.Height / texelArea)
+            : 0.0;
+
+        if (layer.IdRemap || density <= 2.0)
+        {
+            var pixels = new Rgba32[decal.Width * decal.Height];
+            decal.CopyPixelDataTo(pixels);
+            return (pixels, decal.Width, decal.Height);
+        }
+
+        var factor = 2.0 / density;
+        var width  = Math.Max(1, (int)Math.Round(decal.Width * factor));
+        var height = Math.Max(1, (int)Math.Round(decal.Height * factor));
+
+        using var shrunk = decal.Clone(c => c.Resize(width, height));
+        var shrunkPixels = new Rgba32[width * height];
+        shrunk.CopyPixelDataTo(shrunkPixels);
+        // A heavy shrink area-averages sub-texel detail into faint smears; put the contrast
+        // back the way an artist redrawing at the smaller size would (see ImageFilters).
+        ImageFilters.SharpenPremultiplied(shrunkPixels, width, height, 0.6f);
+        return (shrunkPixels, width, height);
     }
 
     /// <summary>
@@ -297,7 +354,7 @@ public static class SurfaceDecalBaker
     /// <summary> Rasterize one triangle in texture space, sampling the decal through the interpolated projection coordinates. </summary>
     private static void RasterizeTriangle(Image<Rgba32> target, Rgba32[] decal, int decalWidth, int decalHeight,
         Vector2 uv0, Vector2 uv1, Vector2 uv2, Vector2 d0, Vector2 d1, Vector2 d2,
-        byte threshold, float opacity, DecalLayer layer, TextureSlot? effectSlot)
+        byte threshold, float opacity, DecalLayer layer, TextureSlot? effectSlot, int[] gradientPartners)
     {
         var a = new Vector2(uv0.X * target.Width, uv0.Y * target.Height);
         var b = new Vector2(uv1.X * target.Width, uv1.Y * target.Height);
@@ -314,6 +371,30 @@ public static class SurfaceDecalBaker
         if (minX > maxX || minY > maxY)
             return;
 
+        Vector2 LocalAt(Vector2 p)
+        {
+            var w0 = Cross(b - p, c - p) / area;
+            var w1 = Cross(c - p, a - p) / area;
+            return d0 * w0 + d1 * w1 + d2 * (1f - w0 - w1);
+        }
+
+        // One texel's footprint in decal space — the barycentric mapping is affine, so it is
+        // constant across the triangle. Where the decal is denser than the texel grid, a
+        // single tap skips source pixels and aliases; average a subsample grid instead. The
+        // pre-shrink in Bake keeps the density within reach of a 4x4 grid. Colorset decals
+        // keep the single tap: averaged colors would not nearest-map to the palette anymore.
+        var origin = new Vector2(minX + 0.5f, minY + 0.5f);
+        var l0     = LocalAt(origin);
+        var stepX  = LocalAt(origin + Vector2.UnitX) - l0;
+        var stepY  = LocalAt(origin + Vector2.UnitY) - l0;
+        var nx     = 1;
+        var ny     = 1;
+        if (!layer.IdRemap)
+        {
+            nx = Math.Clamp((int)MathF.Ceiling(MathF.Max(MathF.Abs(stepX.X), MathF.Abs(stepY.X)) * decalWidth), 1, 4);
+            ny = Math.Clamp((int)MathF.Ceiling(MathF.Max(MathF.Abs(stepX.Y), MathF.Abs(stepY.Y)) * decalHeight), 1, 4);
+        }
+
         for (var y = minY; y <= maxY; ++y)
         {
             for (var x = minX; x <= maxX; ++x)
@@ -329,7 +410,9 @@ public static class SurfaceDecalBaker
                 if (local.X is < 0f or > 1f || local.Y is < 0f or > 1f)
                     continue;
 
-                var sample = SampleBilinear(decal, decalWidth, decalHeight, local.X, local.Y);
+                var sample = nx == 1 && ny == 1
+                    ? SampleBilinear(decal, decalWidth, decalHeight, local.X, local.Y)
+                    : SampleArea(decal, decalWidth, decalHeight, local, stepX, stepY, nx, ny);
                 if (effectSlot is { } slot)
                 {
                     var pixel = target[x, y];
@@ -341,9 +424,21 @@ public static class SurfaceDecalBaker
                     if (sample.A < threshold)
                         continue;
 
-                    var row   = layer.PaletteRows[DecalQuantizer.NearestIndex(sample, layer.PaletteColors)];
+                    var index = DecalQuantizer.NearestIndex(sample, layer.PaletteColors);
+                    var row   = layer.PaletteRows[index];
                     var pixel = target[x, y];
-                    IdMapTexel.StampRow(ref pixel, row, sample.A, layer.WriteBlendFromAlpha);
+                    if (gradientPartners[index] >= 0)
+                    {
+                        var aIndex = row % 2 == 0 ? index : gradientPartners[index];
+                        var bIndex = row % 2 == 0 ? gradientPartners[index] : index;
+                        IdMapTexel.StampGradient(ref pixel, row,
+                            DecalQuantizer.GradientG(sample, layer.PaletteColors[aIndex], layer.PaletteColors[bIndex]));
+                    }
+                    else
+                    {
+                        IdMapTexel.StampRow(ref pixel, row, sample.A, layer.WriteBlendFromAlpha);
+                    }
+
                     target[x, y] = pixel;
                 }
                 else
@@ -385,6 +480,45 @@ public static class SurfaceDecalBaker
 
     private static float Cross(Vector2 a, Vector2 b)
         => a.X * b.Y - a.Y * b.X;
+
+    /// <summary>
+    /// Alpha-weighted box average of an Nx x Ny bilinear tap grid spread across one texel's
+    /// decal-space footprint — the minification filter of the surface bake. Weighting color
+    /// by alpha is the premultiplied average: soft edges stay soft without transparent
+    /// pixels dragging the color toward black. Subsamples outside the decal square count as
+    /// transparent (they are outside the decal).
+    /// </summary>
+    private static Rgba32 SampleArea(Rgba32[] pixels, int width, int height, Vector2 center, Vector2 stepX, Vector2 stepY,
+        int nx, int ny)
+    {
+        float a = 0f, r = 0f, g = 0f, b = 0f;
+        for (var sy = 0; sy < ny; ++sy)
+        {
+            var oy = (sy + 0.5f) / ny - 0.5f;
+            for (var sx = 0; sx < nx; ++sx)
+            {
+                var ox = (sx + 0.5f) / nx - 0.5f;
+                var p  = center + stepX * ox + stepY * oy;
+                if (p.X is < 0f or > 1f || p.Y is < 0f or > 1f)
+                    continue;
+
+                var s = SampleBilinear(pixels, width, height, p.X, p.Y);
+                a += s.A;
+                r += s.R * s.A;
+                g += s.G * s.A;
+                b += s.B * s.A;
+            }
+        }
+
+        if (a <= 0f)
+            return new Rgba32(0, 0, 0, 0);
+
+        return new Rgba32(
+            (byte)Math.Clamp((int)MathF.Round(r / a), 0, 255),
+            (byte)Math.Clamp((int)MathF.Round(g / a), 0, 255),
+            (byte)Math.Clamp((int)MathF.Round(b / a), 0, 255),
+            (byte)Math.Clamp((int)MathF.Round(a / (nx * ny)), 0, 255));
+    }
 
     /// <summary> Bilinear RGBA sample of a pixel buffer at normalized coordinates, shared with the 3D viewport. </summary>
     public static Rgba32 SampleBilinear(Rgba32[] pixels, int width, int height, float u, float v)
