@@ -625,6 +625,7 @@ public sealed class DecalViewport(ITextureProvider textureProvider) : IDisposabl
         var rows      = _shading?.RowDiffuse;
         var realColor = !_highlightDecal && layer != null
          && (!layer.IdRemap || (rows != null && layer.PaletteRows.Count > 0 && layer.PaletteRows.Count == layer.PaletteColors.Count));
+        var gradientPartners = layer is { IdRemap: true } ? DecalQuantizer.GradientPartners(layer) : [];
 
         // Renders one mesh into the shared framebuffer/depth-buffer. `skipContext` is true for
         // overlay entries: their OWN merged mesh includes the whole body as dimmed context
@@ -789,9 +790,33 @@ public sealed class DecalViewport(ITextureProvider textureProvider) : IDisposabl
                                     if (layer.IdRemap)
                                     {
                                         if (sample.A >= threshold)
-                                            color = realColor
-                                                ? _shading!.RowDiffuse![layer.PaletteRows[DecalQuantizer.NearestIndex(sample, layer.PaletteColors)]] * 255f
-                                                : new Vector3(255f, 140f, 0f);
+                                        {
+                                            if (!realColor)
+                                            {
+                                                color = new Vector3(255f, 140f, 0f);
+                                            }
+                                            else
+                                            {
+                                                // Mirror the bake: gradient pairs blend the two
+                                                // halves' row colors by the pixel's own G.
+                                                var palIdx = DecalQuantizer.NearestIndex(sample, layer.PaletteColors);
+                                                var row    = layer.PaletteRows[palIdx];
+                                                if (gradientPartners[palIdx] >= 0)
+                                                {
+                                                    var aIndex = row % 2 == 0 ? palIdx : gradientPartners[palIdx];
+                                                    var bIndex = row % 2 == 0 ? gradientPartners[palIdx] : palIdx;
+                                                    var blend  = DecalQuantizer.GradientG(sample,
+                                                        layer.PaletteColors[aIndex], layer.PaletteColors[bIndex]) / 255f;
+                                                    var pair = row / 2;
+                                                    color = Vector3.Lerp(_shading!.RowDiffuse![pair * 2 + 1],
+                                                        _shading.RowDiffuse[pair * 2], blend) * 255f;
+                                                }
+                                                else
+                                                {
+                                                    color = _shading!.RowDiffuse![row] * 255f;
+                                                }
+                                            }
+                                        }
                                     }
                                     else
                                     {

@@ -100,6 +100,13 @@ public sealed class DecalLayer : TextureLayer
     /// <summary> Quantization cap: the decal image is reduced to at most this many colors. </summary>
     public int MaxColors = 6;
 
+    /// <summary>
+    /// How aggressively similar colors merge during extraction (RGB distance, 0-255 scale):
+    /// the smallest palette whose blended rendering stays within this distance of the image
+    /// wins — the color count itself is automatic.
+    /// </summary>
+    public float ColorMerge = 20f;
+
     /// <summary> Extracted palette, packed Rgba32 (0xAABBGGRR); order matches <see cref="PaletteRows"/>. </summary>
     public List<uint> PaletteColors = [];
 
@@ -246,6 +253,7 @@ public sealed class DecalLayer : TextureLayer
         json["Opacity"]        = Opacity;
         json["IdRemap"]        = IdRemap;
         json["MaxColors"]      = MaxColors;
+        json["ColorMerge"]     = ColorMerge;
         json["PaletteColors"]  = new JArray(PaletteColors);
         json["PaletteRows"]    = new JArray(PaletteRows);
         json["TintEnabled"]    = TintEnabled;
@@ -295,6 +303,7 @@ public sealed class DecalLayer : TextureLayer
             Opacity        = json["Opacity"]?.ToObject<float>() ?? 1f,
             IdRemap        = json["IdRemap"]?.ToObject<bool>() ?? false,
             MaxColors      = json["MaxColors"]?.ToObject<int>() ?? 6,
+            ColorMerge     = json["ColorMerge"]?.ToObject<float>() ?? 20f,
             PaletteColors  = json["PaletteColors"]?.ToObject<List<uint>>() ?? [],
             PaletteRows    = json["PaletteRows"]?.ToObject<List<int>>() ?? [],
             TintEnabled    = json["TintEnabled"]?.ToObject<bool>() ?? false,

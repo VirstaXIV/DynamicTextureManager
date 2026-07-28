@@ -11,12 +11,16 @@ namespace DynamicTextureManager.ModGeneration;
 ///
 /// INVARIANT: stamping writes R only; G keeps carrying the garment's baked blend, so a
 /// decal's claimed pair (A = color, B = darkened shade) darkens exactly where the cloth
-/// shades. Sanctioned exceptions, both flowing through this type:
+/// shades. Sanctioned exceptions, all flowing through this type:
 ///  1. Relocated extracted decals write G from the stamp's alpha (<see cref="StampRow"/>
 ///     with writeBlendFromAlpha) — their content lived on specific A/B halves of shared
 ///     pairs, so the blend must be steered onto the new pair's A row.
 ///  2. The extraction erase-fill writes both channels (<see cref="PairByte"/> + a fill
 ///     blend) to restore the surrounding garment values where a baked decal was lifted out.
+///  3. Gradient pairs (<see cref="StampGradient"/>): two blend-compatible decal colors share
+///     one pair and G carries where each pixel sits between them — the decal's own gradient
+///     and anti-aliasing detail. The decal owns its footprint's shading there; the garment's
+///     cloth blend is overwritten by design.
 /// </summary>
 public static class IdMapTexel
 {
@@ -51,5 +55,12 @@ public static class IdMapTexel
         pixel.R = RowPairByte(row);
         if (writeBlendFromAlpha)
             pixel.G = sampleAlpha;
+    }
+
+    /// <summary> Stamp a gradient-pair texel: the pair in R, the pixel's own B→A blend in G (sanctioned exception 3). </summary>
+    public static void StampGradient(ref Rgba32 pixel, int row, byte blend)
+    {
+        pixel.R = RowPairByte(row);
+        pixel.G = blend;
     }
 }

@@ -647,12 +647,14 @@ public sealed class OverlayModManager : IService, IDisposable
         {
             // A capture pointing into ANY generated overlay is poisoned — a remove/re-add
             // race can capture while an overlay still owns the resolution. Recapture instead
-            // of baking generated output back in as "pristine".
-            if (!IsGeneratedModFile(stored))
+            // of baking generated output back in as "pristine". A capture whose file is gone
+            // (source mod updated or removed) must recapture too — decoding would silently
+            // fall back to vanilla and downgrade a hi-res base.
+            if (!IsGeneratedModFile(stored) && (stored.Length == 0 || File.Exists(stored)))
                 return stored;
 
             DynamicTextureManager.Log.Warning(
-                $"Texture source of {gamePath} pointed into a generated mod (\"{stored}\") — dropping it and recapturing.");
+                $"Texture source of {gamePath} {(IsGeneratedModFile(stored) ? "pointed into a generated mod" : "no longer exists")} (\"{stored}\") — dropping it and recapturing.");
             dTexture.Data.TextureSourcePaths.Remove(gamePath);
         }
 
@@ -766,6 +768,7 @@ public sealed class OverlayModManager : IService, IDisposable
             if (decoded == null)
                 continue;
 
+            DynamicTextureManager.Log.Debug($"Building {job.GamePath} at {decoded.Width}x{decoded.Height} (source {(job.DiskPath == null ? "vanilla" : $"\"{job.DiskPath}\"")}).");
             var rgba = compositor.CompositeFull(decoded, job.Layers, job.EffectLayers, job.EffectSlot, job.Mesh);
 
             var outFile = build.PrepareFile(job.GamePath);
