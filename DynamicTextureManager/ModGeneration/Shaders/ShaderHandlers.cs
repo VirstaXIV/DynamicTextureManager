@@ -4,6 +4,7 @@ using System.Linq;
 using OtterGui.Services;
 using Penumbra.GameData.Files;
 using Penumbra.GameData.Files.MaterialStructs;
+using Penumbra.GameData.Files.ShaderStructs;
 
 namespace DynamicTextureManager.ModGeneration.Shaders;
 
@@ -105,6 +106,40 @@ public sealed class SkinShaderHandler : ShaderHandlerBase
         => MaterialKind.Skin;
 }
 
+/// <summary>
+/// Hair shader: no diffuse and no colorset — the wearer's customize hair/highlight colors are
+/// blended in-shader by the normal map's blue channel (0 = main color, 1 = highlight color), so
+/// decals target the normal texture and stamp highlight patterns rather than colors. Materials
+/// whose GetSubColor key selects the Face variant (brows/lashes) reinterpret that channel as the
+/// race-feature color and are left unsupported.
+/// </summary>
+public sealed class HairShaderHandler : ShaderHandlerBase
+{
+    private static readonly uint SubColorKey  = new Name("GetSubColor").Crc32;
+    private static readonly uint SubColorFace = new Name("GetSubColorFace").Crc32;
+
+    public override bool Matches(string shpkName)
+        => string.Equals(shpkName, "hair.shpk", StringComparison.OrdinalIgnoreCase);
+
+    public override bool SupportsColorSet(MtrlFile material)
+        => false;
+
+    /// <summary> An absent GetSubColor key means the default Hair variant; only an explicit Face value gates off. </summary>
+    public static bool IsFaceVariant(MtrlFile material)
+        => material.ShaderPackage.ShaderKeys.Any(k => k.Key == SubColorKey && k.Value == SubColorFace);
+
+    public override MaterialKind Kind(MtrlFile material)
+        => IsFaceVariant(material) ? MaterialKind.Unknown : MaterialKind.Hair;
+
+    public override IReadOnlyList<TextureSlotInfo> ClassifyTextures(MtrlFile material)
+    {
+        var ret = base.ClassifyTextures(material);
+        return Kind(material) is MaterialKind.Hair
+            ? ret.Select(i => i.Slot is TextureSlot.Normal ? i with { SupportsDecals = true } : i).ToList()
+            : ret;
+    }
+}
+
 /// <summary> Unknown shaders: expose the raw texture list, no colorset, decals only on decodable diffuse textures. </summary>
 public sealed class FallbackShaderHandler : ShaderHandlerBase
 {
@@ -123,6 +158,7 @@ public sealed class ShaderHandlerRegistry : IService
         new CharacterShaderHandler(),
         new CharacterLegacyShaderHandler(),
         new SkinShaderHandler(),
+        new HairShaderHandler(),
         new FallbackShaderHandler(),
     ];
 

@@ -441,6 +441,17 @@ public static class SurfaceDecalBaker
 
                     target[x, y] = pixel;
                 }
+                else if (layer.HairHighlightMode)
+                {
+                    sample = DecalQuantizer.ApplyTint(sample, layer);
+                    var alpha = sample.A / 255f * opacity;
+                    if (alpha <= 0f)
+                        continue;
+
+                    var pixel = target[x, y];
+                    TextureCompositor.ApplyHairHighlightPixel(ref pixel, sample, alpha, layer);
+                    target[x, y] = pixel;
+                }
                 else
                 {
                     sample = DecalQuantizer.ApplyTint(sample, layer);

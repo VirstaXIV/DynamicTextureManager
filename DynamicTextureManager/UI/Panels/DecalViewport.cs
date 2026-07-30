@@ -19,16 +19,25 @@ namespace DynamicTextureManager.UI.Panels;
 /// Everything the viewport samples to shade the mesh with the material's real look: the
 /// composited diffuse, the composited id map and the 32 resolved colorset row diffuse
 /// colors (the dTexture's edits applied). Any part may be null and falls back to gray.
+/// For hair materials <paramref name="HairColors"/> is set and <paramref name="Diffuse"/>
+/// carries the composited NORMAL map instead — hair has no diffuse; its blue channel blends
+/// the main color toward the highlight color and its alpha is the card cutout.
+/// <paramref name="HairMask"/> optionally carries the composited hair mask, whose alpha
+/// (ambient occlusion) shades the strands — without it a light-colored hairstyle washes out
+/// to a flat silhouette.
 /// </summary>
-public sealed record ViewportShading(DecodedTexture? Diffuse, DecodedTexture? IdMap, Vector3[]? RowDiffuse, Vector3? SkinTone = null);
+public sealed record ViewportShading(DecodedTexture? Diffuse, DecodedTexture? IdMap, Vector3[]? RowDiffuse, Vector3? SkinTone = null,
+    (Vector3 Main, Vector3 Highlight)? HairColors = null, DecodedTexture? HairMask = null);
 
 /// <summary>
 /// An extra mesh rendered alongside the primary selected material — overlay parts (nails,
-/// accents) sharing the same body model set but painted with their OWN composited texture,
-/// so the viewport shows a companion-baked tattoo continuing onto them instead of the dimmed,
+/// accents) sharing the same body model set, or the OTHER hair materials of the same hair
+/// model (modded styles split their strands across several materials) — each painted with its
+/// OWN composited texture, so the viewport shows the complete subject instead of the dimmed,
 /// wrong-UV "context" look. Additive to the primary render path: never affects it.
 /// </summary>
-public sealed record ViewportOverlay(MaterialMesh Mesh, DecodedTexture? Diffuse, bool ApplySkinTone);
+public sealed record ViewportOverlay(MaterialMesh Mesh, DecodedTexture? Diffuse, bool ApplySkinTone,
+    (Vector3 Main, Vector3 Highlight)? HairColors = null, DecodedTexture? HairMask = null);
 
 /// <summary>
 /// The 3D preview of the selected material: the gear mesh software-rendered in its bind
@@ -144,7 +153,9 @@ public sealed class DecalViewport(ITextureProvider textureProvider) : IDisposabl
         if (ReferenceEquals(_shading?.Diffuse, shading?.Diffuse)
          && ReferenceEquals(_shading?.IdMap, shading?.IdMap)
          && ReferenceEquals(_shading?.RowDiffuse, shading?.RowDiffuse)
-         && Nullable.Equals(_shading?.SkinTone, shading?.SkinTone))
+         && Nullable.Equals(_shading?.SkinTone, shading?.SkinTone)
+         && Nullable.Equals(_shading?.HairColors, shading?.HairColors)
+         && ReferenceEquals(_shading?.HairMask, shading?.HairMask))
             return;
 
         _shading     = shading;
@@ -161,7 +172,8 @@ public sealed class DecalViewport(ITextureProvider textureProvider) : IDisposabl
     {
         if (_overlays.Count == overlays.Count
          && _overlays.Zip(overlays, (a, b)
-                => ReferenceEquals(a.Mesh, b.Mesh) && ReferenceEquals(a.Diffuse, b.Diffuse) && a.ApplySkinTone == b.ApplySkinTone)
+                => ReferenceEquals(a.Mesh, b.Mesh) && ReferenceEquals(a.Diffuse, b.Diffuse) && a.ApplySkinTone == b.ApplySkinTone
+                 && Nullable.Equals(a.HairColors, b.HairColors) && ReferenceEquals(a.HairMask, b.HairMask))
             .All(same => same))
             return;
 
@@ -544,7 +556,8 @@ public sealed class DecalViewport(ITextureProvider textureProvider) : IDisposabl
     /// additionally multiplies the preview skin tone weighted by the diffuse alpha — the
     /// stand-in for the customize skin color the game applies in-shader.
     /// </summary>
-    private static Vector3 SampleAlbedo(DecodedTexture? diffuse, DecodedTexture? idMap, Vector3[]? rows, Vector3? skinTone, Vector2 uv)
+    private static Vector3 SampleAlbedo(DecodedTexture? diffuse, DecodedTexture? idMap, Vector3[]? rows, Vector3? skinTone,
+        (Vector3 Main, Vector3 Highlight)? hairColors, DecodedTexture? hairMask, Vector2 uv)
     {
         var albedo = Vector3.One;
         var shaded = false;
@@ -553,9 +566,24 @@ public sealed class DecalViewport(ITextureProvider textureProvider) : IDisposabl
             var x = Math.Clamp((int)(uv.X * diffuse.Width), 0, diffuse.Width - 1);
             var y = Math.Clamp((int)(uv.Y * diffuse.Height), 0, diffuse.Height - 1);
             var i = (y * diffuse.Width + x) * 4;
-            albedo *= new Vector3(diffuse.Rgba[i] / 255f, diffuse.Rgba[i + 1] / 255f, diffuse.Rgba[i + 2] / 255f);
-            if (skinTone is { } tone)
-                albedo *= Vector3.Lerp(Vector3.One, tone, diffuse.Rgba[i + 3] / 255f);
+            if (hairColors is { } hair)
+            {
+                // Hair: the buffer is the composited NORMAL map. Its blue channel lerps the
+                // customize main color toward the highlight color; the customize colors are
+                // "squared RGB" in the game's constant buffer, so square them here too.
+                albedo = Vector3.Lerp(hair.Main * hair.Main, hair.Highlight * hair.Highlight, diffuse.Rgba[i + 2] / 255f);
+                // The mask's alpha is the strand ambient occlusion — softened so roots never
+                // go pitch black; without this a light hairstyle reads as a flat silhouette.
+                if (hairMask != null)
+                    albedo *= 0.3f + 0.7f * (SampleAlpha(hairMask, uv) / 255f);
+            }
+            else
+            {
+                albedo *= new Vector3(diffuse.Rgba[i] / 255f, diffuse.Rgba[i + 1] / 255f, diffuse.Rgba[i + 2] / 255f);
+                if (skinTone is { } tone)
+                    albedo *= Vector3.Lerp(Vector3.One, tone, diffuse.Rgba[i + 3] / 255f);
+            }
+
             shaded = true;
         }
 
@@ -570,6 +598,13 @@ public sealed class DecalViewport(ITextureProvider textureProvider) : IDisposabl
         }
 
         return shaded ? albedo : new Vector3(190f / 255f);
+    }
+
+    private static byte SampleAlpha(DecodedTexture texture, Vector2 uv)
+    {
+        var x = Math.Clamp((int)(uv.X * texture.Width), 0, texture.Width - 1);
+        var y = Math.Clamp((int)(uv.Y * texture.Height), 0, texture.Height - 1);
+        return texture.Rgba[(y * texture.Width + x) * 4 + 3];
     }
 
     // Fixed-size render targets, reused across frames — a drag re-renders every frame and
@@ -631,8 +666,14 @@ public sealed class DecalViewport(ITextureProvider textureProvider) : IDisposabl
         // overlay entries: their OWN merged mesh includes the whole body as dimmed context
         // (same as the primary), which would duplicate-render it — only their own editable
         // (real) geometry is new here, the body itself already came from the primary pass.
-        void RasterizeMesh(MaterialMesh mesh, DecodedTexture? meshDiffuse, DecodedTexture? meshIdMap, Vector3? meshSkinTone, bool skipContext)
+        void RasterizeMesh(MaterialMesh mesh, DecodedTexture? meshDiffuse, DecodedTexture? meshIdMap, Vector3? meshSkinTone,
+            (Vector3 Main, Vector3 Highlight)? meshHairColors, DecodedTexture? meshHairMask, bool skipContext)
         {
+            // Hair renders as alpha-tested cutout cards: fully transparent texels of the hair
+            // normal's alpha must not write depth or color at all, or the empty regions of a
+            // card would occlude the cards behind it. Only editable geometry can be tested —
+            // dimmed context belongs to a foreign material whose texture was never loaded.
+            var alphaTest = meshHairColors != null && meshDiffuse != null;
             // Curvature-following per-vertex decal-space coordinates — the same computation the
             // bake uses (SurfaceDecalBaker.ComputeSurfaceProjection), so the live preview always
             // matches the built texture, including how it wraps/warps on curved surfaces, and
@@ -732,6 +773,15 @@ public sealed class DecalViewport(ITextureProvider textureProvider) : IDisposabl
                             var z     = depths[0] * w0 + depths[1] * w1 + depths[2] * w2;
                             var index = y * size + x;
 
+                            // Soft card edges render hard and true transparency sorting is out
+                            // of scope — the same trade-off as the game's own cutout pass.
+                            if (alphaTest && !dimmed)
+                            {
+                                var cutoutUv = mesh.Uvs[i0] * w0 + mesh.Uvs[i1] * w1 + mesh.Uvs[i2] * w2;
+                                if (SampleAlpha(meshDiffuse!, cutoutUv) < 96)
+                                    continue;
+                            }
+
                             if (!skipContext && wantDimmed)
                             {
                                 // Dimmed pass: a pixel the editable pass already claimed is
@@ -771,7 +821,7 @@ public sealed class DecalViewport(ITextureProvider textureProvider) : IDisposabl
                             else
                             {
                                 var uv = mesh.Uvs[i0] * w0 + mesh.Uvs[i1] * w1 + mesh.Uvs[i2] * w2;
-                                color = SampleAlbedo(meshDiffuse, meshIdMap, rows, meshSkinTone, uv) * 255f;
+                                color = SampleAlbedo(meshDiffuse, meshIdMap, rows, meshSkinTone, meshHairColors, meshHairMask, uv) * 255f;
                             }
 
                             if (triProjected)
@@ -824,12 +874,24 @@ public sealed class DecalViewport(ITextureProvider textureProvider) : IDisposabl
                                         var alpha = sample.A / 255f * Math.Clamp(layer.Opacity, 0f, 1f);
                                         if (alpha > 0f)
                                         {
-                                            // Baked ink gets tinted by the skin color in-game like the
-                                            // rest of the diffuse — preview it the same way.
-                                            var decalColor = new Vector3(sample.R, sample.G, sample.B);
-                                            if (meshSkinTone is { } tone)
-                                                decalColor *= tone;
-                                            color = realColor ? Vector3.Lerp(color, decalColor, alpha) : new Vector3(255f, 140f, 0f);
+                                            if (layer.HairHighlightMode && meshHairColors is { } hair)
+                                            {
+                                                // The bake writes B = lerp(B, luminance, alpha) and the
+                                                // shader's blend is linear in B, so lerping the blended
+                                                // COLORS by alpha previews the bake exactly.
+                                                var luma = (0.299f * sample.R + 0.587f * sample.G + 0.114f * sample.B) / 255f;
+                                                var decalColor = Vector3.Lerp(hair.Main * hair.Main, hair.Highlight * hair.Highlight, luma) * 255f;
+                                                color = realColor ? Vector3.Lerp(color, decalColor, alpha) : new Vector3(255f, 140f, 0f);
+                                            }
+                                            else
+                                            {
+                                                // Baked ink gets tinted by the skin color in-game like the
+                                                // rest of the diffuse — preview it the same way.
+                                                var decalColor = new Vector3(sample.R, sample.G, sample.B);
+                                                if (meshSkinTone is { } tone)
+                                                    decalColor *= tone;
+                                                color = realColor ? Vector3.Lerp(color, decalColor, alpha) : new Vector3(255f, 140f, 0f);
+                                            }
                                         }
                                     }
                                 }
@@ -845,9 +907,11 @@ public sealed class DecalViewport(ITextureProvider textureProvider) : IDisposabl
             }
         }
 
-        RasterizeMesh(_mesh, _shading?.Diffuse, _shading?.IdMap, _shading?.SkinTone, skipContext: false);
+        RasterizeMesh(_mesh, _shading?.Diffuse, _shading?.IdMap, _shading?.SkinTone, _shading?.HairColors, _shading?.HairMask,
+            skipContext: false);
         foreach (var overlay in _overlays)
-            RasterizeMesh(overlay.Mesh, overlay.Diffuse, null, overlay.ApplySkinTone ? _shading?.SkinTone : null, skipContext: true);
+            RasterizeMesh(overlay.Mesh, overlay.Diffuse, null, overlay.ApplySkinTone ? _shading?.SkinTone : null,
+                overlay.HairColors, overlay.HairMask, skipContext: true);
 
         _wrap?.Dispose();
         _wrap = textureProvider.CreateFromRaw(RawImageSpecification.Rgba32(size, size), rgba, "DTM Viewport");
