@@ -228,7 +228,8 @@ public sealed class CompositePreviewCache : IService, IDisposable
                 effectLayers = target.Layers.Where(l => !ReferenceEquals(l, excludeLayer)).ToList();
             }
 
-            var needsMesh = layers.Any(l => l is DTextures.Data.DecalLayer { Surface: true, Enabled: true })
+            var needsMesh = layers.Any(l => l is DTextures.Data.DecalLayer { Surface: true, Enabled: true }
+                    or DTextures.Data.HairHighlightLayer { Enabled: true })
              || (target?.NeedsMesh ?? false);
             if (needsMesh)
             {

@@ -514,8 +514,23 @@ public sealed class ModelUvReader(IDataManager dataManager, PenumbraService penu
     private byte[]? LoadModelBytes(SourcePath source)
     {
         if (source.MdlActualPath.Length > 0 && Path.IsPathRooted(source.MdlActualPath) && File.Exists(source.MdlActualPath))
+        {
+            DynamicTextureManager.Log.Debug($"Model {source.MdlGamePath}: loading stored file \"{source.MdlActualPath}\".");
             return File.ReadAllBytes(source.MdlActualPath);
+        }
 
+        // The stored snapshot can be absent or stale (resource trees do not always carry a
+        // usable actual path for model nodes — 2026-07-29: a modded hair mdl came through as
+        // its game path, silently rendering the VANILLA mesh under the mod's textures).
+        // Resolve fresh through the collection like the body models do.
+        var resolved = penumbra.ResolvePlayerPath(source.MdlGamePath);
+        if (resolved.Length > 0 && Path.IsPathRooted(resolved) && File.Exists(resolved))
+        {
+            DynamicTextureManager.Log.Debug($"Model {source.MdlGamePath}: loading resolved file \"{resolved}\".");
+            return File.ReadAllBytes(resolved);
+        }
+
+        DynamicTextureManager.Log.Debug($"Model {source.MdlGamePath}: loading vanilla game file.");
         return dataManager.GetFile(source.MdlGamePath)?.Data;
     }
 

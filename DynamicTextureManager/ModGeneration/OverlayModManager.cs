@@ -531,15 +531,17 @@ public sealed class OverlayModManager : IService, IDisposable
             // build-time resolve would return our own generated file and compound the bake.
             var diskPath = GetOrCaptureTextureSource(dTexture, gamePath);
 
-            // Surface-projected layers bake through the material's bind-pose mesh.
+            // Surface-projected layers bake through the material's bind-pose mesh; hair
+            // highlight adjustments need it too for UV-island-aware along-strand coordinates.
             MaterialMesh? mesh = null;
-            if (layers.Any(l => l is DTextures.Data.DecalLayer { Surface: true, Enabled: true }))
+            if (layers.Any(l => l is DTextures.Data.DecalLayer { Surface: true, Enabled: true }
+                    or DTextures.Data.HairHighlightLayer { Enabled: true }))
             {
                 var owner = CompositePlanner.FindTextureOwner(dTexture.Data, gamePath, shaderHandlers, sourceFiles);
                 mesh = owner != null ? uvReader.GetMesh(owner) : null;
                 if (mesh == null)
                     DynamicTextureManager.Log.Warning(
-                        $"No mesh geometry for {gamePath} — surface decals on it will be skipped this build.");
+                        $"No mesh geometry for {gamePath} — surface decals and UV-aware hair zones fall back this build.");
             }
 
             textures.Add(new TextureJob(gamePath, diskPath is { Length: > 0 } ? diskPath : null, layers, mesh));
