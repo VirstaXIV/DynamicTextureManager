@@ -354,7 +354,16 @@ public sealed class OverlayModManager : IService, IDisposable
         public List<DTextures.Data.TextureLayer> EffectLayers { get; init; } = [];
     }
 
-    private sealed record BuildPlan(Dictionary<string, byte[]> MaterialFiles, List<TextureJob> TextureJobs);
+    /// <summary>
+    /// One animated-highlight conversion: after the material's composited hair NORMAL is
+    /// produced (its texture job runs in the same build), the four companion textures of the
+    /// characterscroll replacement material are derived from it and written.
+    /// </summary>
+    private sealed record AnimatedHairJob(string MaterialGamePath, string NormalGamePath,
+        AnimatedHairBuilder.TexturePaths Paths, DTextures.Data.AnimatedHairEdit Edit);
+
+    private sealed record BuildPlan(Dictionary<string, byte[]> MaterialFiles, List<TextureJob> TextureJobs,
+        List<AnimatedHairJob> AnimatedJobs);
 
     /// <summary>
     /// Build the overlay mod for a dTexture and register or reload it in Penumbra.
@@ -394,7 +403,7 @@ public sealed class OverlayModManager : IService, IDisposable
                 : null;
             plan = emptyReason == null
                 ? PrepareBuild(dTexture, modDirectory)
-                : new BuildPlan(new Dictionary<string, byte[]>(StringComparer.OrdinalIgnoreCase), []);
+                : new BuildPlan(new Dictionary<string, byte[]>(StringComparer.OrdinalIgnoreCase), [], []);
             cleaning = plan.MaterialFiles.Count == 0 && plan.TextureJobs.Count == 0;
             if (cleaning && isNew)
             {
@@ -531,11 +540,9 @@ public sealed class OverlayModManager : IService, IDisposable
             // build-time resolve would return our own generated file and compound the bake.
             var diskPath = GetOrCaptureTextureSource(dTexture, gamePath);
 
-            // Surface-projected layers bake through the material's bind-pose mesh; hair
-            // highlight adjustments need it too for UV-island-aware along-strand coordinates.
+            // Surface-projected layers bake through the material's bind-pose mesh.
             MaterialMesh? mesh = null;
-            if (layers.Any(l => l is DTextures.Data.DecalLayer { Surface: true, Enabled: true }
-                    or DTextures.Data.HairHighlightLayer { Enabled: true }))
+            if (layers.Any(l => l is DTextures.Data.DecalLayer { Surface: true, Enabled: true }))
             {
                 var owner = CompositePlanner.FindTextureOwner(dTexture.Data, gamePath, shaderHandlers, sourceFiles);
                 mesh = owner != null ? uvReader.GetMesh(owner) : null;
@@ -550,12 +557,113 @@ public sealed class OverlayModManager : IService, IDisposable
         AddSiblingEffectJobs(dTexture, textures);
         AddOverlayCompanionJobs(dTexture, textures);
 
+        var animated = PrepareAnimatedHair(dTexture, modDirectory, materials, textures);
+
         // One compact line of what actually builds — the first thing to check when a decal
         // ships that the UI no longer shows.
         DynamicTextureManager.Log.Debug(
-            $"Build plan: {materials.Count} material(s); textures [{string.Join(", ", textures.Select(t => $"{t.GamePath} ({t.Layers.Count} layer(s))"))}]");
+            $"Build plan: {materials.Count} material(s); {animated.Count} animated hair conversion(s); "
+          + $"textures [{string.Join(", ", textures.Select(t => $"{t.GamePath} ({t.Layers.Count} layer(s))"))}]");
 
-        return new BuildPlan(materials, textures);
+        return new BuildPlan(materials, textures, animated);
+    }
+
+    /// <summary>
+    /// Stage every enabled animated-highlight conversion: emit the characterscroll
+    /// replacement material now (its structure only depends on the edit) and make sure the
+    /// hair NORMAL has a texture job this build — the companion textures derive from its
+    /// composited result, so all highlight edits still shape where the effect appears.
+    /// </summary>
+    private List<AnimatedHairJob> PrepareAnimatedHair(DTexture dTexture, string modDirectory,
+        Dictionary<string, byte[]> materials, List<TextureJob> textures)
+    {
+        var animated  = new List<AnimatedHairJob>();
+        var converted = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+
+        void EnsureNormalJob(string normalPath)
+        {
+            // The composited normal must exist in this build even when it has no layers.
+            if (textures.Any(t => string.Equals(t.GamePath, normalPath, StringComparison.OrdinalIgnoreCase)))
+                return;
+
+            var layers   = dTexture.Data.Textures.GetValueOrDefault(normalPath) ?? [];
+            var diskPath = GetOrCaptureTextureSource(dTexture, normalPath);
+            MaterialMesh? mesh = null;
+            if (layers.Any(l => l is DTextures.Data.DecalLayer { Surface: true, Enabled: true }))
+            {
+                var owner = CompositePlanner.FindTextureOwner(dTexture.Data, normalPath, shaderHandlers, sourceFiles);
+                mesh = owner != null ? uvReader.GetMesh(owner) : null;
+            }
+
+            textures.Add(new TextureJob(normalPath, diskPath is { Length: > 0 } ? diskPath : null, layers, mesh));
+        }
+
+        bool Convert(string gamePath, Penumbra.GameData.Files.MtrlFile mtrl, DTextures.Data.AnimatedHairEdit edit)
+        {
+            var normalPath = shaderHandlers.For(mtrl).ClassifyTextures(mtrl)
+                .FirstOrDefault(t => t.Slot == Shaders.TextureSlot.Normal).GamePath;
+            if (string.IsNullOrEmpty(normalPath))
+            {
+                DynamicTextureManager.Log.Warning($"Animated hair for {gamePath} skipped — no normal texture on the material.");
+                return false;
+            }
+
+            var paths = AnimatedHairBuilder.PathsFor(gamePath);
+            materials[gamePath] = AnimatedHairBuilder.BuildMaterial(mtrl, edit, paths);
+            EnsureNormalJob(normalPath);
+            animated.Add(new AnimatedHairJob(gamePath, normalPath, paths, edit));
+            converted.Add(gamePath);
+            return true;
+        }
+
+        foreach (var (gamePath, edit) in dTexture.Data.AnimatedHair.Where(kvp => kvp.Value.Enabled))
+        {
+            if (converted.Contains(gamePath))
+                continue;
+
+            var source = dTexture.Data.Source.Materials.FirstOrDefault(m
+                => string.Equals(m.GamePath, gamePath, StringComparison.OrdinalIgnoreCase));
+            if (source == null)
+            {
+                DynamicTextureManager.Log.Warning($"Animated hair for {gamePath} skipped — material is not part of the source.");
+                continue;
+            }
+
+            var mtrl = sourceFiles.GetMaterial(source, modDirectory);
+            if (mtrl == null || !Convert(gamePath, mtrl, edit))
+                continue;
+
+            // Multi-material hairstyles: the MODEL references every material of the style —
+            // convert them all, whether or not each was ever added as a source. A partial
+            // conversion leaves whole meshes on the plain hair shader.
+            foreach (var rawName in uvReader.ModelMaterialNames(source))
+            {
+                var fileName    = Path.GetFileName(rawName);
+                var siblingPath = AnimatedHairBuilder.SiblingMaterialGamePath(gamePath, fileName);
+                if (siblingPath == null || converted.Contains(siblingPath))
+                    continue;
+
+                var siblingMtrl = sourceFiles.GetMaterial(new DTextures.Data.SourcePath { GamePath = siblingPath }, modDirectory);
+                if (siblingMtrl == null)
+                {
+                    DynamicTextureManager.Log.Warning($"Animated hair sibling {siblingPath} could not be loaded, skipped.");
+                    continue;
+                }
+
+                if (shaderHandlers.For(siblingMtrl).Kind(siblingMtrl) is not Shaders.MaterialKind.Hair)
+                {
+                    DynamicTextureManager.Log.Debug(
+                        $"Model material {fileName} is not a hair-shader material — left unconverted.");
+                    continue;
+                }
+
+                if (Convert(siblingPath, siblingMtrl, edit))
+                    DynamicTextureManager.Log.Information(
+                        $"Animated hair: also converting hairstyle sibling {siblingPath} (referenced by {source.MdlGamePath}).");
+            }
+        }
+
+        return animated;
     }
 
     /// <summary>
@@ -764,6 +872,9 @@ public sealed class OverlayModManager : IService, IDisposable
             ++written;
         }
 
+        // Composited normals the animated-hair conversions derive their companions from.
+        var animatedNormals = new Dictionary<string, (byte[] Rgba, int Width)>(StringComparer.OrdinalIgnoreCase);
+
         foreach (var job in plan.TextureJobs)
         {
             var decoded = textureIO.Load(job.GamePath, job.DiskPath, modDirectory);
@@ -773,15 +884,68 @@ public sealed class OverlayModManager : IService, IDisposable
             DynamicTextureManager.Log.Debug($"Building {job.GamePath} at {decoded.Width}x{decoded.Height} (source {(job.DiskPath == null ? "vanilla" : $"\"{job.DiskPath}\"")}).");
             var rgba = compositor.CompositeFull(decoded, job.Layers, job.EffectLayers, job.EffectSlot, job.Mesh);
 
+            if (plan.AnimatedJobs.Any(a => string.Equals(a.NormalGamePath, job.GamePath, StringComparison.OrdinalIgnoreCase)))
+                animatedNormals[job.GamePath] = (rgba, decoded.Width);
+
             var outFile = build.PrepareFile(job.GamePath);
             await penumbra.ConvertTextureData(rgba, decoded.Width, outFile, TextureType.Bc7Tex).ConfigureAwait(false);
             ++written;
+        }
+
+        foreach (var job in plan.AnimatedJobs)
+        {
+            if (!animatedNormals.TryGetValue(job.NormalGamePath, out var normal))
+            {
+                DynamicTextureManager.Log.Warning(
+                    $"Animated hair companions for {job.MaterialGamePath} skipped — its normal {job.NormalGamePath} did not build.");
+                continue;
+            }
+
+            // The id map carries exact colorset routing bytes and the reference keeps these
+            // uncompressed — only the strand-detail normal takes BC7.
+            await penumbra.ConvertTextureData(AnimatedHairBuilder.BuildNormalRgba(normal.Rgba), normal.Width,
+                build.PrepareFile(job.Paths.Normal), TextureType.Bc7Tex).ConfigureAwait(false);
+            await penumbra.ConvertTextureData(AnimatedHairBuilder.BuildIdRgba(normal.Rgba), normal.Width,
+                build.PrepareFile(job.Paths.Id), TextureType.RgbaTex).ConfigureAwait(false);
+            await penumbra.ConvertTextureData(AnimatedHairBuilder.BuildMaskRgba(), AnimatedHairBuilder.MaskSize,
+                build.PrepareFile(job.Paths.Mask), TextureType.RgbaTex).ConfigureAwait(false);
+
+            var (effect, effectWidth) = LoadEffectImage(job.Edit);
+            await penumbra.ConvertTextureData(effect, effectWidth,
+                build.PrepareFile(job.Paths.Effect), TextureType.RgbaTex).ConfigureAwait(false);
+
+            written += 4;
+            DynamicTextureManager.Log.Debug($"Animated hair companions written for {job.MaterialGamePath}.");
         }
 
         if (written > 0 || commitWhenEmpty)
             build.Commit(ModName(dTexture), DynamicTextureManager.Version);
 
         return written;
+    }
+
+    /// <summary>
+    /// The black/white pattern the effect scrolls: the selected built-in pattern, or a legacy
+    /// custom image when a save still carries one (the material references the effect texture
+    /// unconditionally, so something always ships).
+    /// </summary>
+    private static (byte[] Rgba, int Width) LoadEffectImage(DTextures.Data.AnimatedHairEdit edit)
+    {
+        if (edit.EffectImagePath.Length > 0)
+            try
+            {
+                using var image = SixLabors.ImageSharp.Image.Load<SixLabors.ImageSharp.PixelFormats.Rgba32>(edit.EffectImagePath);
+                var pixels = new byte[image.Width * image.Height * 4];
+                image.CopyPixelDataTo(pixels);
+                return (pixels, image.Width);
+            }
+            catch (Exception ex)
+            {
+                DynamicTextureManager.Log.Warning($"Could not load effect image \"{edit.EffectImagePath}\" ({ex.Message}) — using the built-in pattern.");
+            }
+
+        return (AnimatedHairBuilder.GeneratePattern((AnimatedHairBuilder.HairEffectPattern)edit.Pattern),
+            AnimatedHairBuilder.PatternSize);
     }
 
     /// <summary> Delete the generated mod of a dTexture from Penumbra and disk. </summary>

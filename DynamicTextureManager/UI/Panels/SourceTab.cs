@@ -429,12 +429,25 @@ public sealed class SourceTab(
                 continue;
 
             var hairMaterials = group.Materials.Where(IsHairMaterial).ToList();
-            if (hairMaterials.Count > 0)
-                ret.Add(new ResolvedModelGroup(group.Label, hairMaterials));
+            if (hairMaterials.Count == 0)
+                continue;
+
+            // One hairstyle = ONE pickable entry, even when the style splits its strands
+            // across several materials (an implementation detail of the model). Prefer the
+            // material named after the model's own hair id (the scalp material); the sibling
+            // materials are added automatically alongside it.
+            var hairId  = HairIdPattern.Match(group.Materials[0].MdlGamePath).Groups[1].Value;
+            var primary = hairMaterials.FirstOrDefault(m
+                => hairId.Length > 0 && m.GamePath.Contains(hairId, StringComparison.OrdinalIgnoreCase)) ?? hairMaterials[0];
+            ret.Add(new ResolvedModelGroup(group.Label, [primary]));
         }
 
         return ret;
     }
+
+    private static readonly System.Text.RegularExpressions.Regex HairIdPattern =
+        new(@"/hair/(h\d{4})/", System.Text.RegularExpressions.RegexOptions.IgnoreCase | System.Text.RegularExpressions.RegexOptions.Compiled);
+
 
     private static readonly System.Text.RegularExpressions.Regex HairModelPattern =
         new(@"^chara/human/c\d{4}/obj/hair/h\d{4}/model/",
@@ -541,6 +554,11 @@ public sealed class SourceTab(
             MdlActualPath = material.MdlActualPath,
             Overlay       = material.IsOverlayPart,
         });
+
+        // A hairstyle is one unit: its sibling materials come along as hidden companions.
+        if (!material.IsOverlayPart && HairModelPattern.IsMatch(material.MdlGamePath))
+            ModGeneration.HairSources.AddCompanions(dTexture.Data, source.Materials[^1], uvReader, sourceFiles, shaderHandlers, penumbra);
+
         // A freshly added material is almost always what the user wants to edit next.
         if (!material.IsOverlayPart)
             decalsTab.SelectMaterial(material.GamePath);
@@ -549,11 +567,25 @@ public sealed class SourceTab(
 
     private void RemoveMaterial(DTexture dTexture, string gamePath)
     {
-        var source = dTexture.Data.Source;
-        if (source.Materials.RemoveAll(m => string.Equals(m.GamePath, gamePath, StringComparison.OrdinalIgnoreCase)) == 0)
+        var source  = dTexture.Data.Source;
+        var removed = source.Materials.FirstOrDefault(m => string.Equals(m.GamePath, gamePath, StringComparison.OrdinalIgnoreCase));
+        if (removed == null)
             return;
 
-        dTexture.Data.Materials.Remove(gamePath);
+        var toRemove = new List<string> { removed.GamePath };
+        // Removing a hairstyle removes its auto-added companion materials with it.
+        if (!removed.Overlay && HairModelPattern.IsMatch(removed.MdlGamePath))
+            toRemove.AddRange(source.Materials
+                .Where(m => m.Overlay && string.Equals(m.MdlGamePath, removed.MdlGamePath, StringComparison.OrdinalIgnoreCase))
+                .Select(m => m.GamePath));
+
+        foreach (var path in toRemove)
+        {
+            source.Materials.RemoveAll(m => string.Equals(m.GamePath, path, StringComparison.OrdinalIgnoreCase));
+            dTexture.Data.Materials.Remove(path);
+            dTexture.Data.AnimatedHair.Remove(path);
+        }
+
         PruneOrphanedTextures(dTexture);
         Save(dTexture);
     }
