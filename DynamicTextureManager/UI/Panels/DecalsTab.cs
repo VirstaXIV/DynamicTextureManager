@@ -48,6 +48,7 @@ public sealed class DecalsTab(
     CharacterModelState modelState,
     PenumbraService penumbra,
     CompositePreviewCache previewCache,
+    TextureCompositor compositor,
     FilenameService filenames,
     Configuration config,
     DecalLibraryWindow decalLibraryWindow,
@@ -59,6 +60,28 @@ public sealed class DecalsTab(
 
     /// <summary> Darkening applied to a shade-partner row: the benign blend target for a pair's unused half. </summary>
     private const float ShadeFactor = 0.6f;
+
+    /// <summary>
+    /// Colorset colors live in the game's SQUARED domain: the shader's display response is
+    /// ~sqrt of the stored value (the same convention as the customize colors — see the
+    /// PackSqrt pattern). Row edits store the squared value so authored-row roundtrips stay
+    /// byte-exact (extraction); every picker and palette boundary converts through these, so
+    /// the color the user picks is the color the game actually renders. Without this, decal
+    /// colors written as display values rendered washed out in game (sqrt-brightened) while
+    /// the preview showed them as picked.
+    /// </summary>
+    private static float[] DisplayToRowRgb(float r, float g, float b)
+        => [r * r, g * g, b * b];
+
+    private static Vector3 RowToDisplayRgb(IReadOnlyList<float> rgb)
+        => new(MathF.Sqrt(MathF.Max(0f, rgb[0])), MathF.Sqrt(MathF.Max(0f, rgb[1])), MathF.Sqrt(MathF.Max(0f, rgb[2])));
+
+    /// <summary> A row edit's diffuse packed as a display-domain Rgba32 (for presets/swatches). </summary>
+    private static uint PackedDisplayDiffuse(ColorRowEdit row)
+    {
+        var display = RowToDisplayRgb(row.Diffuse);
+        return new Rgba32(display.X, display.Y, display.Z).PackedValue;
+    }
 
     private bool           _slotPreviewDirty;
     private long           _slotPreviewMs;
@@ -265,8 +288,12 @@ public sealed class DecalsTab(
                     break;
                 case MaterialKind.Hair:
                 {
-                    ImUtf8.TextWrapped(
-                        "Hair material — hair has no color texture; the game blends your main hair color toward your highlight color per pixel, using the colors below (read live from your character)."u8);
+                    if (AnimatedFor(dTexture, _selectedMaterial) != null)
+                        ImUtf8.TextWrapped(
+                            "Converted hair (Animated Effect) — the conversion gives the hair a real colorset, so decals render in their own colors through automatically claimed slots, like on gear. Newly added decals stay on the hair mesh they are placed on."u8);
+                    else
+                        ImUtf8.TextWrapped(
+                            "Hair material — hair has no color texture; the game blends your main hair color toward your highlight color per pixel, using the colors below (read live from your character). Decals stamp highlight patterns; enable the Animated Effect below for decals in their own colors."u8);
 
                     var liveHair = LiveHair();
                     DrawColorSwatch("Hair", config.PreviewHairColor, liveHair != null);
@@ -401,6 +428,34 @@ public sealed class DecalsTab(
 
     private TextureOption? OptionFor(string gamePath)
         => _options?.Find(o => string.Equals(o.GamePath, gamePath, StringComparison.OrdinalIgnoreCase));
+
+    /// <summary> The enabled animated-conversion edit of a material, null when not converted. </summary>
+    private static AnimatedHairEdit? AnimatedFor(DTexture dTexture, string materialGamePath)
+        => dTexture.Data.AnimatedHair.GetValueOrDefault(materialGamePath) is { Enabled: true } edit ? edit : null;
+
+    private (string Material, AnimatedHairEdit Edit, ColorTable Table)? _animatedTableCache;
+
+    /// <summary>
+    /// The colorset a material's colorset decals seed from and stamp against: the material's
+    /// own Dawntrail table, or — for hair with an enabled animated conversion — the GENERATED
+    /// characterscroll table (the source hair material has none). Null when neither exists,
+    /// i.e. the material cannot take colorset decals.
+    /// </summary>
+    private ColorTable? EditableTable(DTexture dTexture, TextureOption option)
+    {
+        if (option.Mtrl.Table is ColorTable own)
+            return own;
+
+        if (option.Kind is not MaterialKind.Hair || AnimatedFor(dTexture, option.MaterialGamePath) is not { } edit)
+            return null;
+
+        if (_animatedTableCache is not { } cache
+         || !string.Equals(cache.Material, option.MaterialGamePath, StringComparison.OrdinalIgnoreCase)
+         || !ReferenceEquals(cache.Edit, edit))
+            _animatedTableCache = cache = (option.MaterialGamePath, edit, AnimatedHairBuilder.BuildColorTable(edit));
+
+        return cache.Table;
+    }
 
     /// <summary> The texture a layer lives on, by scanning the layer stacks. </summary>
     private static string? LayerOwnerPath(DTexture dTexture, TextureLayer layer)
@@ -539,18 +594,42 @@ public sealed class DecalsTab(
         // tattoos that cross them. The tight depth window still contains the projection.
         if (target.Kind is MaterialKind.Skin)
             layer.SurfaceLimitToPart = false;
-        // Hair decals stamp the normal map's highlight-blend channel (there is no diffuse),
-        // and card hair is many separate parts sitting flush — the clicked-part limit would
-        // clip the stamp to a single card.
+        // Hair: card hair is many separate parts sitting flush — the clicked-part limit would
+        // clip the stamp to a single card; the placed mdl MESH is the granularity that keeps
+        // the decal off overlapping bangs/back sections instead. CONVERTED (animated) hair has
+        // a generated colorset, so decals render in their own colors through claimed slots of
+        // the generated id map, exactly like gear; plain hair has no colorset — decals stamp
+        // the normal map's highlight-blend channel as patterns.
         if (target.Kind is MaterialKind.Hair)
         {
-            layer.HairHighlightMode  = true;
+            if (AnimatedFor(dTexture, target.MaterialGamePath) != null)
+            {
+                layer.IdRemap      = true;
+                layer.HairColorset = true;
+                // The id G of converted hair carries the highlight distribution, not baked
+                // cloth shading — inheriting it would dim the decal everywhere the hair is
+                // not highlighted. Alpha-driven G renders the full color on opaque pixels
+                // and leans edge anti-aliasing toward the darkened shade partner.
+                layer.WriteBlendFromAlpha = true;
+            }
+            else
+            {
+                layer.HairHighlightMode = true;
+            }
+
             layer.SurfaceLimitToPart = false;
+            layer.SurfaceLimitToMesh = true;
+            // Card hair reuses texture regions across strands (mirrored sides especially) —
+            // without this the decal repeats on every strand sharing its texels.
+            layer.SurfaceUniqueTexels = true;
         }
         if (preset != null)
         {
-            // The preset may opt out of colorset mode, but never forces it onto a diffuse target.
-            layer.IdRemap        &= preset.IdRemap;
+            // The preset may opt out of colorset mode, but never forces it onto a diffuse
+            // target — and never strips it off a hair-colorset layer, whose id-remap route
+            // is the only way it renders at all.
+            if (!layer.HairColorset)
+                layer.IdRemap &= preset.IdRemap;
             layer.MaxColors       = preset.MaxColors;
             layer.ColorMerge      = preset.ColorMerge;
             layer.AlphaThreshold  = preset.AlphaThreshold;
@@ -570,7 +649,7 @@ public sealed class DecalsTab(
         }
 
         layers.Add(layer);
-        if (layer.IdRemap && target.Mtrl.Table is ColorTable table)
+        if (layer.IdRemap && EditableTable(dTexture, target) is { } table)
         {
             ReallocateDecal(dTexture, target, table, layer);
 
@@ -585,12 +664,12 @@ public sealed class DecalsTab(
                 {
                     var color = new Rgba32(preset.PaletteColors[i]);
                     var row   = layer.PaletteRows[i];
-                    GetOrSeedRow(edit, table, row).Diffuse = [color.R / 255f, color.G / 255f, color.B / 255f];
+                    GetOrSeedRow(edit, table, row).Diffuse = DisplayToRowRgb(color.R / 255f, color.G / 255f, color.B / 255f);
                     // Gradient pairs restore each half from its own preset entry; only a solo
                     // slot's B half carries the derived shade.
                     if (!layer.PaletteRows.Contains(row ^ 1))
-                        GetOrSeedRow(edit, table, row + 1).Diffuse =
-                            [color.R / 255f * ShadeFactor, color.G / 255f * ShadeFactor, color.B / 255f * ShadeFactor];
+                        GetOrSeedRow(edit, table, row + 1).Diffuse = DisplayToRowRgb(
+                            color.R / 255f * ShadeFactor, color.G / 255f * ShadeFactor, color.B / 255f * ShadeFactor);
                 }
             }
         }
@@ -661,7 +740,7 @@ public sealed class DecalsTab(
         if (decal.IdRemap && dTexture.Data.Materials.TryGetValue(option.MaterialGamePath, out var edit))
             for (var i = 0; i < decal.PaletteRows.Count; ++i)
                 preset.PaletteColors.Add(edit.Rows.TryGetValue(decal.PaletteRows[i], out var rowEdit)
-                    ? new Rgba32(rowEdit.Diffuse[0], rowEdit.Diffuse[1], rowEdit.Diffuse[2]).PackedValue
+                    ? PackedDisplayDiffuse(rowEdit)
                     : i < decal.PaletteColors.Count
                         ? decal.PaletteColors[i]
                         : uint.MaxValue);
@@ -713,12 +792,16 @@ public sealed class DecalsTab(
             }
 
             ImGui.SameLine();
-            var targetTag = option.Slot switch
-            {
-                TextureSlot.Index   => "  [colorset]",
-                TextureSlot.Diffuse => string.Empty,
-                _                   => $"  [{option.Slot}]",
-            };
+            // Hair-colorset layers live on the normal's stack but render through the
+            // generated id map — tag them like the gear colorset decals they behave as.
+            var targetTag = decal.HairColorset
+                ? "  [colorset]"
+                : option.Slot switch
+                {
+                    TextureSlot.Index   => "  [colorset]",
+                    TextureSlot.Diffuse => string.Empty,
+                    _                   => $"  [{option.Slot}]",
+                };
             var modeTag = decal.Surface
                 ? decal is { AnchorX: 0f, AnchorY: 0f, AnchorZ: 0f } ? "  [3D — not placed!]" : "  [3D]"
                 : string.Empty;
@@ -736,7 +819,7 @@ public sealed class DecalsTab(
                 changed |= DrawTintSettings(decal);
 
             changed |= DrawMaterialEffects(dTexture, option, decal);
-            changed |= DrawPlacementSettings(dTexture, decal);
+            changed |= DrawPlacementSettings(dTexture, option, decal);
 
             if (changed)
                 Save(dTexture);
@@ -790,10 +873,20 @@ public sealed class DecalsTab(
     /// </summary>
     private bool DrawIdRemapSettings(DTexture dTexture, TextureOption option, DecalLayer decal)
     {
-        if (option.Mtrl.Table is not ColorTable table)
+        // A hair-colorset decal only renders through the animated conversion's generated id
+        // map — with the conversion off there is no colorset (and no table to edit against).
+        if (decal.HairColorset && AnimatedFor(dTexture, option.MaterialGamePath) == null)
+        {
+            using var color = ImRaii.PushColor(ImGuiCol.Text, 0xFF00A0FFu);
+            ImUtf8.TextWrapped(
+                "This colored decal renders through the Animated Effect conversion, which is currently disabled — re-enable it under Hair Adjustments, or remove and re-add the decal to stamp it as a highlight pattern instead."u8);
+            return false;
+        }
+
+        if (EditableTable(dTexture, option) is not { } table)
             return false;
 
-        EnsureIdStats(dTexture, option.GamePath);
+        EnsureIdStatsFor(dTexture, option);
         var changed = false;
 
         // Old saves and layers whose allocation was cleared claim their rows on first draw.
@@ -871,7 +964,8 @@ public sealed class DecalsTab(
                 ImUtf8.HoverTooltip("The color extracted from the decal image — image pixels closest to it render through this row."u8);
 
             ImGui.SameLine();
-            var color = new Vector3(rowEdit.Diffuse[0], rowEdit.Diffuse[1], rowEdit.Diffuse[2]);
+            // The picker edits the DISPLAY color; the row stores its square (colorset domain).
+            var color = RowToDisplayRgb(rowEdit.Diffuse);
             ImGui.SetNextItemWidth(250 * ImUtf8.GlobalScale);
             // Gradient pairs render two of the decal's colors on one slot's halves — each is
             // its own editable color, so no shade sync (that would clobber the partner).
@@ -879,20 +973,25 @@ public sealed class DecalsTab(
             var label     = partnered ? $"Slot {row / 2 + 1}{(row % 2 == 0 ? "A" : "B")}" : $"Slot {row / 2 + 1}";
             if (ImUtf8.ColorEdit(label, ref color, ImGuiColorEditFlags.Float))
             {
-                rowEdit.Diffuse = [color.X, color.Y, color.Z];
+                rowEdit.Diffuse = DisplayToRowRgb(color.X, color.Y, color.Z);
                 // Keep a solo slot's B row a darkened copy so the baked shading blend darkens.
                 if (!partnered)
                     GetOrSeedRow(edit, table, row + 1).Diffuse =
-                        [color.X * ShadeFactor, color.Y * ShadeFactor, color.Z * ShadeFactor];
+                        DisplayToRowRgb(color.X * ShadeFactor, color.Y * ShadeFactor, color.Z * ShadeFactor);
                 changed = true;
             }
 
             if (ImGui.IsItemHovered())
                 ImUtf8.HoverTooltip("This part of the decal renders in this color — recolor it without touching the image."u8);
 
-            ImGui.SameLine();
-            DrawRowHighlightEye(option, row,
-                "Highlights the parts of the model this row colors while hovered (redraws your character).\nAfter a build, that includes the decal itself."u8);
+            // The row highlighter edits the SOURCE material's table on the live model — the
+            // hair source has none (the colorset only exists on the generated conversion).
+            if (option.Kind is not MaterialKind.Hair)
+            {
+                ImGui.SameLine();
+                DrawRowHighlightEye(option, row,
+                    "Highlights the parts of the model this row colors while hovered (redraws your character).\nAfter a build, that includes the decal itself."u8);
+            }
         }
 
         if (ImUtf8.SmallButton("Reset Rows"u8))
@@ -916,7 +1015,19 @@ public sealed class DecalsTab(
             ImUtf8.HoverTooltip("Rebuild the claimed rows from the gear's own authored values (keeps your colors).\nUse this after plugin updates or if the decal renders black or washed out from older edits."u8);
 
         // Dye: one switch across all claimed rows with a smart default copied from how the
-        // rest of the gear dyes.
+        // rest of the gear dyes. Hair is never dyed — no stain channel reaches it — so the
+        // whole section stays hidden there.
+        if (option.Kind is MaterialKind.Hair)
+        {
+            ImGui.SetNextItemWidth(220 * ImUtf8.GlobalScale);
+            changed |= ImUtf8.Slider("Shape Threshold"u8, ref decal.AlphaThreshold, "%.2f"u8, 0.05f, 1f);
+            if (ImGui.IsItemDeactivatedAfterEdit())
+                changed |= ReallocateDecal(dTexture, option, table, decal);
+            ImUtf8.HoverTooltip(
+                "Decal pixels whose alpha is at or above this value become part of the stamped shape.\nChanging it re-extracts the colors."u8);
+            return changed;
+        }
+
         var lead    = rows[0];
         var dyeable = lead.DyeMode == ColorRowEdit.RowDyeMode.Custom;
         if (ImUtf8.Checkbox("Dyeable"u8, ref dyeable))
@@ -1136,7 +1247,7 @@ public sealed class DecalsTab(
         if (!File.Exists(path))
             return false;
 
-        EnsureIdStats(dTexture, option.GamePath);
+        EnsureIdStatsFor(dTexture, option);
         var edit   = GetOrAddMaterialEdit(dTexture, option);
         var others = ClaimedRowsForMaterial(dTexture, option.MaterialGamePath, decal);
 
@@ -1184,7 +1295,7 @@ public sealed class DecalsTab(
                     var light = new Rgba32(palette[groups[g].Light]);
                     edit.Rows.Remove(rowA);
                     edit.Rows.Remove(rowA + 1);
-                    GetOrSeedRow(edit, table, rowA).Diffuse = [light.R / 255f, light.G / 255f, light.B / 255f];
+                    GetOrSeedRow(edit, table, rowA).Diffuse = DisplayToRowRgb(light.R / 255f, light.G / 255f, light.B / 255f);
 
                     // A gradient pair's B row carries its own real color; a solo slot's B row
                     // gets a darkened copy — the id map's G channel blends A toward B exactly
@@ -1193,7 +1304,7 @@ public sealed class DecalsTab(
                     var dark = groups[g].Dark >= 0
                         ? new Rgba32(palette[groups[g].Dark])
                         : new Rgba32((byte)(light.R * ShadeFactor), (byte)(light.G * ShadeFactor), (byte)(light.B * ShadeFactor));
-                    GetOrSeedRow(edit, table, rowA + 1).Diffuse = [dark.R / 255f, dark.G / 255f, dark.B / 255f];
+                    GetOrSeedRow(edit, table, rowA + 1).Diffuse = DisplayToRowRgb(dark.R / 255f, dark.G / 255f, dark.B / 255f);
                 }
 
                 decal.PaletteRows = rowByColor.ToList();
@@ -1592,7 +1703,7 @@ public sealed class DecalsTab(
     private string _placementError = string.Empty;
 
     /// <summary> Placement controls of one decal layer: 3D surface projection or flat UV stamping. </summary>
-    private bool DrawPlacementSettings(DTexture dTexture, DecalLayer decal)
+    private bool DrawPlacementSettings(DTexture dTexture, TextureOption option, DecalLayer decal)
     {
         var changed = false;
         var surface = decal.Surface;
@@ -1640,15 +1751,43 @@ public sealed class DecalsTab(
                 changed |= ImUtf8.Slider("Opacity"u8, ref decal.Opacity, "%.2f"u8, 0f, 1f);
             }
 
-            var limitToPart = decal.SurfaceLimitToPart;
-            if (ImUtf8.Checkbox("Limit to Clicked Mesh Part"u8, ref limitToPart))
+            if (option.Kind is MaterialKind.Hair)
             {
-                decal.SurfaceLimitToPart = limitToPart;
-                changed                  = true;
-            }
+                // Hair: the part limit stays off (card hair is many flush parts — it would
+                // clip the stamp to a single card); the meaningful granularity is the mdl
+                // MESH, which is what overlapping bangs/back sections split across.
+                var limitToMesh = decal.SurfaceLimitToMesh;
+                if (ImUtf8.Checkbox("Limit to Placed Mesh"u8, ref limitToMesh))
+                {
+                    decal.SurfaceLimitToMesh = limitToMesh;
+                    changed                  = true;
+                }
 
-            ImUtf8.HoverTooltip(
-                "Keep the projection on the mesh piece you stamped it on.\nWithout this, overlapping pieces (linings, straps, panels behind) within reach catch the decal too."u8);
+                ImUtf8.HoverTooltip(
+                    "Keep the decal on the hair mesh you placed it on.\nWithout this, overlapping hair meshes (bangs, back sections) within reach catch the decal too."u8);
+
+                var uniqueTexels = decal.SurfaceUniqueTexels;
+                if (ImUtf8.Checkbox("Hide Repeats on Shared Strands"u8, ref uniqueTexels))
+                {
+                    decal.SurfaceUniqueTexels = uniqueTexels;
+                    changed                   = true;
+                }
+
+                ImUtf8.HoverTooltip(
+                    "Hair textures are shared between strands — most styles mirror left and right onto the same texture regions, so a decal otherwise repeats at the mirrored spot (and on any duplicated strands).\nThis skips the shared regions: the repeats disappear, at the cost of gaps where a shared strand crosses the decal. The 3D preview shows the result exactly (finish placing first)."u8);
+            }
+            else
+            {
+                var limitToPart = decal.SurfaceLimitToPart;
+                if (ImUtf8.Checkbox("Limit to Clicked Mesh Part"u8, ref limitToPart))
+                {
+                    decal.SurfaceLimitToPart = limitToPart;
+                    changed                  = true;
+                }
+
+                ImUtf8.HoverTooltip(
+                    "Keep the projection on the mesh piece you stamped it on.\nWithout this, overlapping pieces (linings, straps, panels behind) within reach catch the decal too."u8);
+            }
 
             if (ImUtf8.Button(_viewport.IsOpenFor(decal) ? "Stop Placing"u8 : "Place in 3D View"u8))
             {
@@ -1805,8 +1944,9 @@ public sealed class DecalsTab(
         decal.NormalY     = normal.Y;
         decal.NormalZ     = normal.Z;
         decal.SurfacePart = mesh.TriangleParts[bestTri / 3];
+        decal.SurfaceMesh = mesh.TriangleMeshes[bestTri / 3];
         DynamicTextureManager.Log.Information(
-            $"Seeded surface anchor from UV ({decal.PosU:F3}, {decal.PosV:F3}) -> ({anchor.X:F3}, {anchor.Y:F3}, {anchor.Z:F3}), size {decal.WorldWidth * 100:F1}x{decal.WorldHeight * 100:F1} cm, part {decal.SurfacePart}.");
+            $"Seeded surface anchor from UV ({decal.PosU:F3}, {decal.PosV:F3}) -> ({anchor.X:F3}, {anchor.Y:F3}, {anchor.Z:F3}), size {decal.WorldWidth * 100:F1}x{decal.WorldHeight * 100:F1} cm, part {decal.SurfacePart}, mesh {decal.SurfaceMesh}.");
         return true;
     }
 
@@ -1883,6 +2023,64 @@ public sealed class DecalsTab(
         _rowDiffuse         = null;
         _rowDiffuseMaterial = string.Empty;
         _shadingKey         = null;
+        _hairIdRgba         = null;
+        _hairIdKey          = null;
+    }
+
+    // Synthesized id map of converted hair for the viewport: BuildIdRgba over the composited
+    // normal plus the placed colorset decal stamps — the preview-side twin of the id bake in
+    // OverlayModManager.BuildAndWriteAsync. Rebuilt in the background whenever the composited
+    // normal's version or the excluded (dragged) layer changes; edits reach it through the
+    // preview cache invalidation every Save performs.
+    private byte[]? _hairIdRgba;
+    private int     _hairIdWidth;
+    private int     _hairIdHeight;
+    private int     _hairIdVersion;
+    private bool    _hairIdBuilding;
+    private (Guid Owner, string Material, int NormalVersion, DecalLayer? Exclude)? _hairIdKey;
+
+    private DecodedTexture? GetOrBuildHairIdPreview(DTexture dTexture, TextureOption normalOption,
+        CompositePreviewCache.Entry normalEntry, DecalLayer? exclude)
+    {
+        var layers = dTexture.Data.Textures.GetValueOrDefault(normalOption.GamePath)?.OfType<DecalLayer>()
+                .Where(l => l is { Enabled: true, HairColorset: true } && !ReferenceEquals(l, exclude))
+                .Cast<TextureLayer>()
+                .ToList()
+         ?? [];
+        if (layers.Count == 0 || normalEntry.Pristine is not { } pristine)
+            return null;
+
+        var key = (dTexture.Identifier, _selectedMaterial, normalEntry.Version, exclude);
+        if (_hairIdKey != key && !_hairIdBuilding)
+        {
+            _hairIdKey      = key;
+            _hairIdBuilding = true;
+            var normalRgba = normalEntry.Composited ?? pristine.Rgba;
+            var source     = FindMaterialSource(dTexture);
+            var mesh = layers.OfType<DecalLayer>().Any(l => l.Surface) && source != null ? uvReader.GetMesh(source) : null;
+            _ = System.Threading.Tasks.Task.Run(() =>
+            {
+                try
+                {
+                    var id = AnimatedHairBuilder.BuildIdRgba(normalRgba);
+                    id = compositor.CompositeHairColorsetId(id, pristine.Width, pristine.Height, layers, mesh);
+                    _hairIdRgba   = id;
+                    _hairIdWidth  = pristine.Width;
+                    _hairIdHeight = pristine.Height;
+                    ++_hairIdVersion;
+                }
+                catch (Exception ex)
+                {
+                    DynamicTextureManager.Log.Error($"Could not composite the hair id preview:\n{ex}");
+                }
+                finally
+                {
+                    _hairIdBuilding = false;
+                }
+            });
+        }
+
+        return _hairIdRgba == null ? null : new DecodedTexture(_hairIdRgba, _hairIdWidth, _hairIdHeight);
     }
 
     /// <summary> The embedded 3D preview of the selected material, textured and colorset-aware. </summary>
@@ -1927,6 +2125,7 @@ public sealed class DecalsTab(
         // blends the preview hair colors by its blue channel and cuts out by its alpha.
         var diffuseOption = kind is MaterialKind.Hair ? NormalOption() : DiffuseOption();
         var indexOption   = IndexOption();
+        var animatedEdit  = kind is MaterialKind.Hair ? AnimatedFor(dTexture, _selectedMaterial) : null;
 
         if (!string.Equals(_rowDiffuseMaterial, _selectedMaterial, StringComparison.OrdinalIgnoreCase))
         {
@@ -1934,6 +2133,11 @@ public sealed class DecalsTab(
             _rowDiffuse = mtrl == null
                 ? null
                 : MaterialEditApplier.ResolveRowDiffuse(mtrl, dTexture.Data.Materials.GetValueOrDefault(_selectedMaterial));
+            // Converted hair: the colorset only exists on the GENERATED material — resolve
+            // the rows from the generated table so colorset decals preview in real colors.
+            if (_rowDiffuse == null && animatedEdit != null)
+                _rowDiffuse = MaterialEditApplier.ResolveRowDiffuse(AnimatedHairBuilder.BuildColorTable(animatedEdit),
+                    dTexture.Data.Materials.GetValueOrDefault(_selectedMaterial));
             _rowDiffuseMaterial = _selectedMaterial;
             ++_rowDiffuseVersion;
         }
@@ -1949,6 +2153,14 @@ public sealed class DecalsTab(
 
         var diffuseEntry = EntryFor(diffuseOption);
         var indexEntry   = EntryFor(indexOption);
+
+        // Converted hair: synthesize the generated id map (normal-B highlight routing plus
+        // the colorset decal stamps) so PLACED colorset decals show their slot colors in the
+        // viewport — the id map is derived at build time and never exists as a source texture.
+        var hairIdMap = animatedEdit != null && diffuseOption != null && diffuseEntry != null
+            ? GetOrBuildHairIdPreview(dTexture, diffuseOption, diffuseEntry,
+                string.Equals(boundPath, diffuseOption.GamePath, StringComparison.OrdinalIgnoreCase) ? placementLayer : null)
+            : null;
 
         // Skin diffuse textures are pale neutral maps the game tints with the customize skin
         // color — stand in with the character's live tone so the preview resembles skin.
@@ -1969,8 +2181,7 @@ public sealed class DecalsTab(
         // colorset domain — take the root (intensity folded in) so the glow's on-screen
         // brightness matches the in-game emissive.
         ViewportEffect? viewportEffect = null;
-        if (kind is MaterialKind.Hair
-         && dTexture.Data.AnimatedHair.GetValueOrDefault(_selectedMaterial) is { Enabled: true } animatedEdit)
+        if (animatedEdit != null)
             viewportEffect = new ViewportEffect(EffectPatternPixels(animatedEdit.Pattern), AnimatedHairBuilder.PatternSize,
                 new Vector3(
                     MathF.Sqrt(Math.Clamp(animatedEdit.EffectColor[0] * animatedEdit.EffectIntensity, 0f, 1f)),
@@ -1985,7 +2196,10 @@ public sealed class DecalsTab(
         // matches the built result, including mid-drag.
         var overlayEntries = BuildOverlayEntries(dTexture, placementLayer, boundPath, out var overlayVersionHash);
 
-        var key = new ShadingKey(diffuseEntry?.Version ?? -1, indexEntry?.Version ?? -1, _rowDiffuseVersion,
+        // The IndexVersion slot doubles for the synthesized hair id preview — a material
+        // never has both a real id texture and a generated one.
+        var key = new ShadingKey(diffuseEntry?.Version ?? -1,
+            indexEntry?.Version ?? (animatedEdit != null ? _hairIdVersion : -1), _rowDiffuseVersion,
             placementLayer != null, skinTone, hairColor, hairHighlight, maskEntry?.Version ?? -1, overlayVersionHash,
             viewportEffect);
         if (key == _shadingKey)
@@ -2000,8 +2214,8 @@ public sealed class DecalsTab(
             tone = new Vector3(packed.R / 255f, packed.G / 255f, packed.B / 255f);
         }
 
-        _viewport.UpdateShading(new ViewportShading(PreviewBuffer(diffuseEntry), PreviewBuffer(indexEntry), _rowDiffuse, tone,
-            HairPreviewColors(dTexture, kind), PreviewBuffer(maskEntry), viewportEffect));
+        _viewport.UpdateShading(new ViewportShading(PreviewBuffer(diffuseEntry), hairIdMap ?? PreviewBuffer(indexEntry),
+            _rowDiffuse, tone, HairPreviewColors(dTexture, kind), PreviewBuffer(maskEntry), viewportEffect));
         _viewport.SetOverlays(overlayEntries);
     }
 
@@ -3082,6 +3296,35 @@ public sealed class DecalsTab(
     /// and how many texels each pair covers. Row seeding and decal extraction depend on
     /// these, so they are computed on demand.
     /// </summary>
+    /// <summary>
+    /// Id-map usage stats for a decal target. Gear scans its real id texture; converted hair
+    /// has no source id map — its GENERATED one references exactly pair 16 (the effect/base
+    /// rows), so the stats are synthesized: pair 16 blocked for allocation, rows 30/31 as the
+    /// only rendered rows. Row seeding never consults usage for hair anyway — every row of
+    /// the generated table is authored (base row template), so slots seed from themselves.
+    /// </summary>
+    private void EnsureIdStatsFor(DTexture dTexture, TextureOption option)
+    {
+        if (option.Kind is MaterialKind.Hair)
+        {
+            var key = $"animated|{option.MaterialGamePath}";
+            if (_statsTexture == key)
+                return;
+
+            _statsTexture = key;
+            _usedRowPairs.Clear();
+            _rowUsageCounts.Clear();
+            _sortedRowUsage.Clear();
+            _usedRowPairs.Add(16);
+            _rowUsageCounts[30] = 1;
+            _rowUsageCounts[31] = 1;
+            _statsTotalTexels   = 1;
+            return;
+        }
+
+        EnsureIdStats(dTexture, option.GamePath);
+    }
+
     private void EnsureIdStats(DTexture dTexture, string gamePath)
     {
         if (_statsTexture == gamePath)

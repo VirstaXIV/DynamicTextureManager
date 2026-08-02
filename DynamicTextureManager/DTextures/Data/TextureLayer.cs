@@ -136,6 +136,16 @@ public sealed class DecalLayer : TextureLayer
     /// </summary>
     public bool HairHighlightMode;
 
+    /// <summary>
+    /// Colorset-decal mode for CONVERTED (animated) hair: the layer lives on the hair
+    /// NORMAL's stack (hair exposes no id map of its own), but stamps into the id map the
+    /// animated conversion generates — opaque pixels remap texels off the effect pair onto
+    /// automatically claimed colorset rows, exactly like gear. Set together with
+    /// <see cref="IdRemap"/>; the layer never paints its host texture (only its normal-
+    /// smoothing effect does) and renders nothing while the conversion is disabled.
+    /// </summary>
+    public bool HairColorset;
+
     /// <summary> Runtime-only allocation failure shown in the UI; the layer auto-disables when set. </summary>
     public string? RowError;
 
@@ -201,6 +211,26 @@ public sealed class DecalLayer : TextureLayer
 
     /// <summary> Keep the projection on the clicked mesh part instead of everything within reach (linings, straps). </summary>
     public bool SurfaceLimitToPart = true;
+
+    /// <summary> Mdl mesh the anchor was stamped on; the bake stays on it when <see cref="SurfaceLimitToMesh"/> is set. </summary>
+    public int SurfaceMesh = -1;
+
+    /// <summary>
+    /// Keep the projection on the mdl MESH the anchor was placed on. The hair default: card
+    /// hair is many separate flush parts within one mesh (part-limiting would clip to a
+    /// single card), but split hairstyles overlap several meshes — without this the decal
+    /// crosses onto bangs/back sections it was never placed on.
+    /// </summary>
+    public bool SurfaceLimitToMesh;
+
+    /// <summary>
+    /// Skip texels that triangles OUTSIDE the decal's own footprint also sample. Card hair
+    /// reuses texture regions across strands — most styles mirror left/right onto the same
+    /// texels — so a texel-space stamp otherwise repeats on every strand sharing them
+    /// (verified 2026-08-02: a heart on one side showed mirrored on the other). The cost:
+    /// the decal gets gaps wherever a shared strand crosses it.
+    /// </summary>
+    public bool SurfaceUniqueTexels;
 
     /// <summary> Attribute mask of visible submeshes captured at stamp time — hidden variant geometry is not baked. </summary>
     public uint SurfaceAttributes = uint.MaxValue;
@@ -268,6 +298,7 @@ public sealed class DecalLayer : TextureLayer
         json["TintEnabled"]    = TintEnabled;
         json["TintColors"]     = new JArray(TintColors);
         json["HairHighlightMode"] = HairHighlightMode;
+        json["HairColorset"]      = HairColorset;
         json["AlphaThreshold"] = AlphaThreshold;
         json["NormalSmooth"]    = NormalSmooth;
         json["Finish"]          = (int)Finish;
@@ -285,6 +316,9 @@ public sealed class DecalLayer : TextureLayer
         json["WorldHeight"]        = WorldHeight;
         json["SurfacePart"]        = SurfacePart;
         json["SurfaceLimitToPart"] = SurfaceLimitToPart;
+        json["SurfaceMesh"]        = SurfaceMesh;
+        json["SurfaceLimitToMesh"] = SurfaceLimitToMesh;
+        json["SurfaceUniqueTexels"] = SurfaceUniqueTexels;
         json["SurfaceAttributes"]  = SurfaceAttributes;
         json["SurfaceShapes"]      = SurfaceShapes;
         json["Extracted"]          = Extracted;
@@ -319,6 +353,7 @@ public sealed class DecalLayer : TextureLayer
             TintEnabled    = json["TintEnabled"]?.ToObject<bool>() ?? false,
             TintColors     = json["TintColors"]?.ToObject<List<uint>>() ?? [],
             HairHighlightMode = json["HairHighlightMode"]?.ToObject<bool>() ?? false,
+            HairColorset   = json["HairColorset"]?.ToObject<bool>() ?? false,
             AlphaThreshold = json["AlphaThreshold"]?.ToObject<float>() ?? 0.5f,
             NormalSmooth   = json["NormalSmooth"]?.ToObject<float>() ?? 0f,
             // "Finish" replaced the pre-v0.5 "MaskPreset" key; old Matte/Glossy values map 1:1.
@@ -337,6 +372,9 @@ public sealed class DecalLayer : TextureLayer
             WorldHeight    = json["WorldHeight"]?.ToObject<float>() ?? 0.1f,
             SurfacePart        = json["SurfacePart"]?.ToObject<int>() ?? -1,
             SurfaceLimitToPart = json["SurfaceLimitToPart"]?.ToObject<bool>() ?? true,
+            SurfaceMesh        = json["SurfaceMesh"]?.ToObject<int>() ?? -1,
+            SurfaceLimitToMesh = json["SurfaceLimitToMesh"]?.ToObject<bool>() ?? false,
+            SurfaceUniqueTexels = json["SurfaceUniqueTexels"]?.ToObject<bool>() ?? false,
             SurfaceAttributes  = json["SurfaceAttributes"]?.ToObject<uint>() ?? uint.MaxValue,
             SurfaceShapes      = json["SurfaceShapes"]?.ToObject<uint>() ?? 0,
             Extracted          = json["Extracted"]?.ToObject<bool>() ?? false,

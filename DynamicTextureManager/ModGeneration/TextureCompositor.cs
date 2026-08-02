@@ -31,6 +31,14 @@ public sealed class TextureCompositor(DecalLibrary decals) : IService
 
             switch (layer)
             {
+                // Hair-colorset decals live on the hair NORMAL's stack but render through the
+                // animated conversion's generated id map (<see cref="CompositeHairColorsetId"/>)
+                // — stamping their pair bytes here would corrupt the normal. Only their
+                // normal-smoothing effect touches the host texture itself.
+                case DecalLayer { HairColorset: true } decal:
+                    if (decal.NormalSmooth > 0f)
+                        ApplyDecal(image, decal, mesh, effectSlot: TextureSlot.Normal);
+                    break;
                 case DecalLayer decal:
                     ApplyDecal(image, decal, mesh);
                     break;
@@ -82,6 +90,27 @@ public sealed class TextureCompositor(DecalLibrary decals) : IService
         }
 
         var result = new byte[image.Width * image.Height * 4];
+        image.CopyPixelDataTo(result);
+        return result;
+    }
+
+    /// <summary>
+    /// Stamp the enabled hair-colorset decal layers of a converted hair material into its
+    /// GENERATED id map (see <see cref="AnimatedHairBuilder.BuildIdRgba"/>): each opaque decal
+    /// pixel remaps the texel off the effect pair onto the layer's claimed colorset rows —
+    /// the same id-remap bake gear uses, sharing the mesh/UV placement of the layer's host
+    /// (normal) texture, since all textures of the material share one UV set.
+    /// </summary>
+    public byte[] CompositeHairColorsetId(byte[] idRgba, int width, int height, IEnumerable<TextureLayer> layers,
+        MaterialMesh? mesh)
+    {
+        using var image = Image.LoadPixelData<Rgba32>(idRgba, width, height);
+
+        foreach (var layer in layers.OfType<DecalLayer>())
+            if (layer is { Enabled: true, HairColorset: true, IdRemap: true })
+                ApplyDecal(image, layer, mesh);
+
+        var result = new byte[width * height * 4];
         image.CopyPixelDataTo(result);
         return result;
     }
