@@ -957,24 +957,12 @@ public sealed class DecalViewport(ITextureProvider textureProvider) : IDisposabl
                                         var alpha = sample.A / 255f * Math.Clamp(layer.Opacity, 0f, 1f);
                                         if (alpha > 0f)
                                         {
-                                            if (layer.HairHighlightMode && meshHairColors is { } hair)
-                                            {
-                                                // The bake writes B = lerp(B, luminance, alpha) and the
-                                                // shader's blend is linear in B, so lerping the blended
-                                                // COLORS by alpha previews the bake exactly.
-                                                var luma = (0.299f * sample.R + 0.587f * sample.G + 0.114f * sample.B) / 255f;
-                                                var decalColor = Vector3.Lerp(hair.Main * hair.Main, hair.Highlight * hair.Highlight, luma) * 255f;
-                                                color = realColor ? Vector3.Lerp(color, decalColor, alpha) : new Vector3(255f, 140f, 0f);
-                                            }
-                                            else
-                                            {
-                                                // Baked ink gets tinted by the skin color in-game like the
-                                                // rest of the diffuse — preview it the same way.
-                                                var decalColor = new Vector3(sample.R, sample.G, sample.B);
-                                                if (meshSkinTone is { } tone)
-                                                    decalColor *= tone;
-                                                color = realColor ? Vector3.Lerp(color, decalColor, alpha) : new Vector3(255f, 140f, 0f);
-                                            }
+                                            // Baked ink gets tinted by the skin color in-game like the
+                                            // rest of the diffuse — preview it the same way.
+                                            var decalColor = new Vector3(sample.R, sample.G, sample.B);
+                                            if (meshSkinTone is { } tone)
+                                                decalColor *= tone;
+                                            color = realColor ? Vector3.Lerp(color, decalColor, alpha) : new Vector3(255f, 140f, 0f);
                                         }
                                     }
                                 }
