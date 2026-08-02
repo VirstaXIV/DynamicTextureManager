@@ -3,13 +3,15 @@ using System.Numerics;
 using Dalamud.Bindings.ImGui;
 using Dalamud.Interface.Windowing;
 using DynamicTextureManager.Services;
+using OtterGui.Raii;
 using OtterGui.Text;
 
 namespace DynamicTextureManager.UI;
 
 /// <summary>
-/// Standalone window around <see cref="DecalLibraryPanel"/>. Normally opened from the main
-/// window's title bar for managing the library; the Decals tab opens it as a picker, where
+/// Standalone window around <see cref="DecalLibraryPanel"/> — the resource library: decal
+/// images plus imported effect patterns, both stored and managed in one place. Normally
+/// opened from the main window's title bar; the Decals tab opens it as a picker, where
 /// clicking a decal (or importing a new one) hands it back to the tab and closes the window.
 /// </summary>
 public class DecalLibraryWindow : Window
@@ -20,7 +22,7 @@ public class DecalLibraryWindow : Window
     private Action<DecalEntry>? _onPick;
 
     public DecalLibraryWindow(DecalLibraryPanel panel)
-        : base("Decal Library")
+        : base("Resource Library###dtmDecalLibrary")
     {
         _panel = panel;
         SizeConstraints = new WindowSizeConstraints
@@ -38,11 +40,40 @@ public class DecalLibraryWindow : Window
         BringToFront();
     }
 
+    private bool _focusEffects;
+
+    /// <summary> Open the library on the Effect Patterns tab (manage mode). </summary>
+    public void OpenEffects()
+    {
+        _onPick       = null;
+        _focusEffects = true;
+        IsOpen        = true;
+        BringToFront();
+    }
+
     public override void Draw()
     {
         if (_onPick == null)
         {
-            _panel.Draw();
+            var focusEffects = _focusEffects;
+            _focusEffects = false;
+            using var tabs = ImUtf8.TabBar("##resourceTabs"u8);
+            if (tabs)
+            {
+                using (var tab = ImUtf8.TabItem("Decals"u8))
+                {
+                    if (tab)
+                        _panel.Draw();
+                }
+
+                using (var tab = ImUtf8.TabItem("Effect Patterns"u8,
+                           focusEffects ? ImGuiTabItemFlags.SetSelected : ImGuiTabItemFlags.None))
+                {
+                    if (tab)
+                        _panel.DrawEffects();
+                }
+            }
+
             return;
         }
 

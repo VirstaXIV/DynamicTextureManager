@@ -275,27 +275,46 @@ public static class AnimatedHairBuilder
         return result;
     }
 
-    /// <summary> Built-in black/white effect patterns scrolled across the highlights. </summary>
+    /// <summary>
+    /// Built-in black/white effect patterns scrolled across the highlights. The first five
+    /// are procedural noise fields; <see cref="Glint"/> replicates the ORIGINAL reference
+    /// mod's aesthetic (an almost-black canvas with a few tiny specks — occasional single
+    /// sparkles sweep through the hair instead of a broad glow; the reference ships 47 lit
+    /// texels on 1024x512); <see cref="DressGlitter"/> is not generated at all — it loads
+    /// the game's own hand-authored sparkle texture (Neo Queen's Dress catchlight) from the
+    /// player's game files at build time.
+    /// </summary>
     public enum HairEffectPattern
     {
-        Shimmer = 0,
-        Flames  = 1,
-        Streaks = 2,
-        Waves   = 3,
-        Sparks  = 4,
+        Shimmer      = 0,
+        Flames       = 1,
+        Streaks      = 2,
+        Waves        = 3,
+        Sparks       = 4,
+        Glint        = 5,
+        DressGlitter = 6,
     }
 
     public static string PatternLabel(HairEffectPattern pattern)
         => pattern switch
         {
-            HairEffectPattern.Flames  => "Flames",
-            HairEffectPattern.Streaks => "Streaks",
-            HairEffectPattern.Waves   => "Waves",
-            HairEffectPattern.Sparks  => "Sparks",
-            _                         => "Shimmer",
+            HairEffectPattern.Flames       => "Flames",
+            HairEffectPattern.Streaks      => "Streaks",
+            HairEffectPattern.Waves        => "Waves",
+            HairEffectPattern.Sparks       => "Sparks",
+            HairEffectPattern.Glint        => "Glint (single sparkles)",
+            HairEffectPattern.DressGlitter => "Glitter (from the game)",
+            _                              => "Shimmer",
         };
 
     public const int PatternSize = 512;
+
+    /// <summary> The game's own sparkle texture (Neo Queen's Dress catchlight) — loaded from the player's game files, never shipped. </summary>
+    public const string DressGlitterTexPath = "chara/equipment/e6257/texture/v01_c0201e6257_top_catc.tex";
+
+    /// <summary> Native resolution a built-in pattern generates at — sparse point sparkles need the finer grid. </summary>
+    public static int PatternDimension(HairEffectPattern pattern)
+        => pattern is HairEffectPattern.Glint ? 1024 : PatternSize;
 
     /// <summary>
     /// Generate a built-in effect pattern, deterministic and TILEABLE (the shader wraps and
@@ -304,6 +323,9 @@ public static class AnimatedHairBuilder
     /// </summary>
     public static byte[] GeneratePattern(HairEffectPattern pattern, int size = PatternSize)
     {
+        if (pattern is HairEffectPattern.Glint)
+            return GenerateGlint(size);
+
         // Any noise becomes tileable by cross-blending the four period-shifted copies —
         // per-axis periods, since most patterns stretch U and V differently.
         float TileableFbm(int seed, float x, float y, float periodX, float periodY, int octaves)
@@ -347,6 +369,47 @@ public static class AnimatedHairBuilder
                 // Soft drifting glow patches.
                 _ => Smooth(0.38f, 0.72f, TileableFbm(7919, u * 5f, v * 3f, 5f, 3f, 3)),
             };
+
+            var b     = (byte)Math.Clamp((int)(value * 255f), 0, 255);
+            var index = (y * size + x) * 4;
+            rgba[index] = rgba[index + 1] = rgba[index + 2] = b;
+            rgba[index + 3] = 255;
+        }
+
+        return rgba;
+    }
+
+    /// <summary>
+    /// The reference aesthetic: a black canvas with a handful of tiny soft specks placed
+    /// deterministically, wrap-around so the scroll never shows a seam — occasional single
+    /// glints drift through the highlights. Speck radii are relative, so any size works.
+    /// </summary>
+    private static byte[] GenerateGlint(int size)
+    {
+        var rgba = new byte[size * size * 4];
+        var rng  = new Random(20260802);
+        var specks = new (float X, float Y, float Sigma, float Brightness)[14];
+        for (var i = 0; i < specks.Length; ++i)
+            specks[i] = ((float)rng.NextDouble(), (float)rng.NextDouble(),
+                0.0015f + (float)rng.NextDouble() * 0.0025f, 0.55f + (float)rng.NextDouble() * 0.45f);
+
+        for (var y = 0; y < size; ++y)
+        for (var x = 0; x < size; ++x)
+        {
+            var u     = (x + 0.5f) / size;
+            var v     = (y + 0.5f) / size;
+            var value = 0f;
+            foreach (var speck in specks)
+            {
+                var dx = MathF.Abs(u - speck.X);
+                dx = MathF.Min(dx, 1f - dx);
+                var dy = MathF.Abs(v - speck.Y);
+                dy = MathF.Min(dy, 1f - dy);
+                var d2     = dx * dx + dy * dy;
+                var sigma2 = speck.Sigma * speck.Sigma;
+                if (d2 < sigma2 * 25f)
+                    value += speck.Brightness * MathF.Exp(-d2 / (2f * sigma2));
+            }
 
             var b     = (byte)Math.Clamp((int)(value * 255f), 0, 255);
             var index = (y * size + x) * 4;

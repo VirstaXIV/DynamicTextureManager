@@ -38,12 +38,14 @@ public sealed class OverlayModManager : IService, IDisposable
     private readonly Shaders.ShaderHandlerRegistry shaderHandlers;
     private readonly ModelUvReader         uvReader;
     private readonly Interop.HairColorReader hairColors;
+    private readonly DecalLibrary          decals;
 
     public OverlayModManager(PenumbraService penumbra, SourceFileProvider sourceFiles, ModWriter modWriter, SaveService saveService,
         Configuration config, DTextureStorage storage, DTextureChanged dTextureChanged, IFramework framework, TextureIO textureIO,
         TextureCompositor compositor, Shaders.ShaderHandlerRegistry shaderHandlers, ModelUvReader uvReader,
-        Interop.HairColorReader hairColors)
+        Interop.HairColorReader hairColors, DecalLibrary decals)
     {
+        this.decals = decals;
         this.penumbra        = penumbra;
         this.sourceFiles     = sourceFiles;
         this.modWriter       = modWriter;
@@ -985,27 +987,46 @@ public sealed class OverlayModManager : IService, IDisposable
     }
 
     /// <summary>
-    /// The black/white pattern the effect scrolls: the selected built-in pattern, or a legacy
-    /// custom image when a save still carries one (the material references the effect texture
+    /// The black/white pattern the effect scrolls: a user-picked custom image, the game's own
+    /// sparkle texture (loaded from the player's files — never shipped with the plugin), or
+    /// the selected built-in pattern (the material references the effect texture
     /// unconditionally, so something always ships).
     /// </summary>
-    private static (byte[] Rgba, int Width) LoadEffectImage(DTextures.Data.AnimatedHairEdit edit)
+    private (byte[] Rgba, int Width) LoadEffectImage(DTextures.Data.AnimatedHairEdit edit)
     {
-        if (edit.EffectImagePath.Length > 0)
-            try
-            {
-                using var image = SixLabors.ImageSharp.Image.Load<SixLabors.ImageSharp.PixelFormats.Rgba32>(edit.EffectImagePath);
-                var pixels = new byte[image.Width * image.Height * 4];
-                image.CopyPixelDataTo(pixels);
-                return (pixels, image.Width);
-            }
-            catch (Exception ex)
-            {
-                DynamicTextureManager.Log.Warning($"Could not load effect image \"{edit.EffectImagePath}\" ({ex.Message}) — using the built-in pattern.");
-            }
+        if (edit.EffectLibraryId != Guid.Empty)
+        {
+            var file = decals.EffectFilePath(edit.EffectLibraryId);
+            if (File.Exists(file))
+                try
+                {
+                    using var image = SixLabors.ImageSharp.Image.Load<SixLabors.ImageSharp.PixelFormats.Rgba32>(file);
+                    var pixels = new byte[image.Width * image.Height * 4];
+                    image.CopyPixelDataTo(pixels);
+                    return (pixels, image.Width);
+                }
+                catch (Exception ex)
+                {
+                    DynamicTextureManager.Log.Warning($"Could not load library effect pattern {edit.EffectLibraryId} ({ex.Message}) — using the built-in pattern.");
+                }
+            else
+                DynamicTextureManager.Log.Warning($"Effect pattern {edit.EffectLibraryId} is missing from the library — using the built-in pattern.");
+        }
 
-        return (AnimatedHairBuilder.GeneratePattern((AnimatedHairBuilder.HairEffectPattern)edit.Pattern),
-            AnimatedHairBuilder.PatternSize);
+        if ((AnimatedHairBuilder.HairEffectPattern)edit.Pattern is AnimatedHairBuilder.HairEffectPattern.DressGlitter)
+        {
+            var glitter = textureIO.Load(AnimatedHairBuilder.DressGlitterTexPath, null, null);
+            if (glitter != null)
+                return (glitter.Rgba, glitter.Width);
+
+            DynamicTextureManager.Log.Warning("Could not load the game's glitter texture — using the built-in Shimmer pattern.");
+        }
+
+        var pattern = (AnimatedHairBuilder.HairEffectPattern)edit.Pattern;
+        if (pattern is AnimatedHairBuilder.HairEffectPattern.DressGlitter)
+            pattern = AnimatedHairBuilder.HairEffectPattern.Shimmer;
+        var dimension = AnimatedHairBuilder.PatternDimension(pattern);
+        return (AnimatedHairBuilder.GeneratePattern(pattern, dimension), dimension);
     }
 
     /// <summary> Delete the generated mod of a dTexture from Penumbra and disk. </summary>
