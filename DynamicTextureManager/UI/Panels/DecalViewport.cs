@@ -38,7 +38,7 @@ public sealed record ViewportShading(DecodedTexture? Diffuse, DecodedTexture? Id
 /// compares it by reference to decide whether the shading changed.
 /// </summary>
 public sealed record ViewportEffect(byte[] PatternRgba, int PatternSize, Vector3 DisplayColor,
-    float ScrollU, float ScrollV, float TilingU, float TilingV);
+    float ScrollU, float ScrollV, float TilingU, float TilingV, bool FullCoverage = false);
 
 /// <summary>
 /// An extra mesh rendered alongside the primary selected material — overlay parts (nails,
@@ -125,10 +125,14 @@ public sealed class DecalViewport(ITextureProvider textureProvider) : IDisposabl
         {
             // The mesh instance can turn over without a real subject change (the reader's
             // caches re-resolve while rebuilds reload the mod) — keep an active placement
-            // and the camera; the Decals tab already unbinds when the MATERIAL changes.
+            // and the camera then. A different SUBJECT (another model — e.g. switching from
+            // the hair to the tail within one project) must re-frame, or the camera keeps
+            // pointing at the previous piece and the viewport shows empty space.
+            var subjectChanged = firstMesh
+             || !string.Equals(_mesh!.GamePath, mesh.GamePath, StringComparison.OrdinalIgnoreCase);
             _mesh        = mesh;
             _renderDirty = true;
-            if (dTextureChanged || firstMesh)
+            if (dTextureChanged || subjectChanged)
                 FrameCamera();
         }
 
@@ -989,8 +993,10 @@ public sealed class DecalViewport(ITextureProvider textureProvider) : IDisposabl
                             // updates it, so occlusion between meshes stays correct.
                             if (effect != null)
                             {
+                                // Full coverage (tails — no highlight channel): every visible
+                                // texel of the piece carries the effect, matching the id map.
                                 var blend = !dimmed && meshHairColors != null && meshDiffuse != null
-                                    ? SampleBlue(meshDiffuse, uv) / 255f
+                                    ? effect.FullCoverage ? 1f : SampleBlue(meshDiffuse, uv) / 255f
                                     : 0f;
                                 _effectBlend![index] = blend;
                                 if (blend > 0.01f)

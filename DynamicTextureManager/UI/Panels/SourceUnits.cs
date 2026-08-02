@@ -20,6 +20,24 @@ public static class SourceUnits
         new(@"^chara/human/c\d{4}/obj/hair/h\d{4}/model/",
             System.Text.RegularExpressions.RegexOptions.IgnoreCase | System.Text.RegularExpressions.RegexOptions.Compiled);
 
+    /// <summary> Tail models — hair-family on furred races (Miqo'te/Hrothgar tails are hair.shpk, colored by the customize hair colors); Au Ra scale tails are skin.shpk and are filtered out by the material-kind check instead. </summary>
+    public static readonly System.Text.RegularExpressions.Regex TailModelPattern =
+        new(@"^chara/human/c\d{4}/obj/tail/t\d{4}/model/",
+            System.Text.RegularExpressions.RegexOptions.IgnoreCase | System.Text.RegularExpressions.RegexOptions.Compiled);
+
+    /// <summary> Viera ear models (Miqo'te ears live inside the hair models and need no own entry). </summary>
+    public static readonly System.Text.RegularExpressions.Regex EarModelPattern =
+        new(@"^chara/human/c\d{4}/obj/zear/z\d{4}/model/",
+            System.Text.RegularExpressions.RegexOptions.IgnoreCase | System.Text.RegularExpressions.RegexOptions.Compiled);
+
+    /// <summary>
+    /// Whether a model can carry hair-shader materials the hair pipeline (Shine, Animated
+    /// Effect) applies to: the hairstyle itself, tails, and Viera ears. Which of a model's
+    /// materials actually qualify is decided per material by its shader kind.
+    /// </summary>
+    public static bool IsHairFamilyModel(string mdlGamePath)
+        => HairModelPattern.IsMatch(mdlGamePath) || TailModelPattern.IsMatch(mdlGamePath) || EarModelPattern.IsMatch(mdlGamePath);
+
     /// <summary> The selected source materials grouped into model units, in add order. </summary>
     public static List<SourceUnit> Of(SourceRef source)
         => source.Materials
@@ -67,6 +85,8 @@ public static class SourceUnits
             return "Face";
         if (mdlGamePath.Contains("/obj/tail/", StringComparison.OrdinalIgnoreCase))
             return "Tail";
+        if (mdlGamePath.Contains("/obj/zear/", StringComparison.OrdinalIgnoreCase))
+            return "Ears";
         if (mdlGamePath.Contains("/human/", StringComparison.OrdinalIgnoreCase))
             return "Character";
         return GearSlot(mdlGamePath).Label;
