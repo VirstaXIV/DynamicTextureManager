@@ -34,6 +34,9 @@ public sealed class TextureCompositor(DecalLibrary decals) : IService
                 case DecalLayer decal:
                     ApplyDecal(image, decal, mesh);
                     break;
+                case HairShineLayer shine:
+                    HairAdjust.ApplyShine(image, shine);
+                    break;
                 default:
                     DynamicTextureManager.Log.Warning($"Unknown layer type {layer.LayerType}, skipped.");
                     break;
@@ -104,6 +107,24 @@ public sealed class TextureCompositor(DecalLibrary decals) : IService
                 return true;
             default:
                 return false;
+        }
+    }
+
+    /// <summary>
+    /// Hair-highlight decal stamp: the decal's luminance writes the hair normal's blue channel
+    /// (the main-color/highlight blend — bright decal pixels render in the wearer's highlight
+    /// color, dark ones force the main color), gated by the pixel's alpha times layer opacity.
+    /// NormalSmooth flattens the strand bump (RG toward neutral 128) inside the same footprint —
+    /// in place, because for hair the decal's own target IS the normal map.
+    /// </summary>
+    internal static void ApplyHairHighlightPixel(ref Rgba32 pixel, in Rgba32 sample, float alpha, DecalLayer layer)
+    {
+        var luma = (byte)Math.Clamp((int)Math.Round(0.299f * sample.R + 0.587f * sample.G + 0.114f * sample.B), 0, 255);
+        pixel.B = LerpByte(pixel.B, luma, alpha);
+        if (layer.NormalSmooth > 0f)
+        {
+            pixel.R = LerpByte(pixel.R, 128, alpha * layer.NormalSmooth);
+            pixel.G = LerpByte(pixel.G, 128, alpha * layer.NormalSmooth);
         }
     }
 
@@ -215,9 +236,17 @@ public sealed class TextureCompositor(DecalLibrary decals) : IService
                     continue;
 
                 var pixel = target[tx, ty];
-                pixel.R        = LerpByte(pixel.R, sample.R, alpha);
-                pixel.G        = LerpByte(pixel.G, sample.G, alpha);
-                pixel.B        = LerpByte(pixel.B, sample.B, alpha);
+                if (layer.HairHighlightMode)
+                {
+                    ApplyHairHighlightPixel(ref pixel, sample, alpha, layer);
+                }
+                else
+                {
+                    pixel.R = LerpByte(pixel.R, sample.R, alpha);
+                    pixel.G = LerpByte(pixel.G, sample.G, alpha);
+                    pixel.B = LerpByte(pixel.B, sample.B, alpha);
+                }
+
                 target[tx, ty] = pixel;
             }
         }

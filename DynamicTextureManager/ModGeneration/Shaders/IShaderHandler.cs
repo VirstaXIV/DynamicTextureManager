@@ -25,6 +25,7 @@ public enum MaterialKind
     ModernColorset,
     LegacyDiffuse,
     Skin,
+    Hair,
     Unknown,
 }
 

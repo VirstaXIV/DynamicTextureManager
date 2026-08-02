@@ -31,8 +31,10 @@ public sealed class SourceTab(
     ModelUvReader uvReader,
     OverlayModManager overlayMods,
     SkinColorReader skinColorReader,
+    HairColorReader hairColorReader,
     Configuration config,
-    CompositePreviewCache previewCache)
+    CompositePreviewCache previewCache,
+    DecalsTab decalsTab)
     : IService
 {
     private const uint WarningColor = 0xFF00A0FFu;
@@ -70,7 +72,7 @@ public sealed class SourceTab(
         var source = dTexture.Data.Source;
         if (source.IsEmpty)
         {
-            ImUtf8.Text("No materials selected yet. Load your worn gear or skin below and add the materials to edit."u8);
+            ImUtf8.Text("No materials selected yet. Load your worn gear, skin or hair below and add the materials to edit."u8);
             return;
         }
 
@@ -92,7 +94,20 @@ public sealed class SourceTab(
             {
                 using var id = ImUtf8.PushId(idx);
                 ImGui.TableNextColumn();
-                ImUtf8.Text(material.Label);
+                // Clicking a material makes it the active editing subject shown in the preview
+                // column; overlay parts stay plain text (they are painted automatically).
+                if (material.Overlay)
+                {
+                    ImUtf8.Text(material.Label);
+                }
+                else
+                {
+                    if (ImUtf8.Selectable(material.Label))
+                        decalsTab.SelectMaterial(material.GamePath);
+                    if (ImGui.IsItemHovered())
+                        ImUtf8.HoverTooltip("Click to edit this material — its textures and model show in the preview column."u8);
+                }
+
                 DrawConflictMarker(material.GamePath, conflicts);
                 ImGui.TableNextColumn();
                 DrawModCell(material.ModDirectory, material.ModName, material.ActualPath);
@@ -152,13 +167,19 @@ public sealed class SourceTab(
         }
 
         if (ImUtf8.Button("Load Worn Gear"u8))
-            LoadPlayer(skin: false);
+            LoadPlayer(PickerMode.Gear);
         ImUtf8.HoverTooltip("Read the worn equipment models and materials of your character through Penumbra."u8);
 
         ImGui.SameLine();
         if (ImUtf8.Button("Load Skin"u8))
-            LoadPlayer(skin: true);
+            LoadPlayer(PickerMode.Skin);
         ImUtf8.HoverTooltip("Read your character's skin materials (body, legs, face).\nDecals on skin bake into the skin texture like tattoos and conform to the body."u8);
+
+        ImGui.SameLine();
+        if (ImUtf8.Button("Load Hair"u8))
+            LoadPlayer(PickerMode.Hair);
+        ImUtf8.HoverTooltip(
+            "Read your character's current hairstyle materials.\nHair has no color texture — the game blends your hair and highlight colors by the normal map,\nso edits adjust where highlights appear and how the hair shines."u8);
 
         if (_error.Length > 0)
             ImUtf8.TextWrapped(_error);
@@ -218,7 +239,18 @@ public sealed class SourceTab(
         }
 
         ImGui.TableNextColumn();
-        ImUtf8.Text(material.Label);
+        if (added is { Overlay: false })
+        {
+            if (ImUtf8.Selectable(material.Label))
+                decalsTab.SelectMaterial(material.GamePath);
+            if (ImGui.IsItemHovered())
+                ImUtf8.HoverTooltip("Click to edit this material — its textures and model show in the preview column."u8);
+        }
+        else
+        {
+            ImUtf8.Text(material.Label);
+        }
+
         if (added != null)
         {
             ImGui.SameLine();
@@ -248,25 +280,51 @@ public sealed class SourceTab(
         }
     }
 
-    private void LoadPlayer(bool skin)
+    private enum PickerMode
+    {
+        Gear,
+        Skin,
+        Hair,
+    }
+
+    private void LoadPlayer(PickerMode mode)
     {
         try
         {
             var groups = resolver.ResolvePlayer();
-            _groups = skin ? FilterSkinGroups(groups) : FilterGearGroups(groups);
+            _groups = mode switch
+            {
+                PickerMode.Skin => FilterSkinGroups(groups),
+                PickerMode.Hair => FilterHairGroups(groups),
+                _               => FilterGearGroups(groups),
+            };
             _error = _groups.Count == 0
-                ? skin
-                    ? "No skin materials found — is your character loaded?"
-                    : "No materials found — is your character loaded?"
+                ? mode switch
+                {
+                    PickerMode.Skin => "No skin materials found — is your character loaded?",
+                    PickerMode.Hair => "No hair materials found — is your character loaded?",
+                    _               => "No materials found — is your character loaded?",
+                }
                 : string.Empty;
 
             // Load Skin implies the user wants a preview of THEIR body — match the preview
             // tone to the real character automatically, unless they already picked one
             // deliberately (manual ColorEdit or the "Use my character's skin color" button).
-            if (skin && _groups.Count > 0 && !config.PreviewSkinToneUserSet
+            if (mode == PickerMode.Skin && _groups.Count > 0 && !config.PreviewSkinToneUserSet
              && skinColorReader.TryGetLocalPlayerSkin(out var liveTone))
             {
                 config.PreviewSkinTone = new SixLabors.ImageSharp.PixelFormats.Rgba32(liveTone.X, liveTone.Y, liveTone.Z).PackedValue;
+                config.Save();
+            }
+
+            // Same idea for hair: preview with the character's real hair and highlight colors
+            // unless the user already picked their own.
+            if (mode == PickerMode.Hair && _groups.Count > 0 && !config.PreviewHairColorsUserSet
+             && hairColorReader.TryGetLocalPlayerHair(out var liveHair))
+            {
+                config.PreviewHairColor = new SixLabors.ImageSharp.PixelFormats.Rgba32(liveHair.Main.X, liveHair.Main.Y, liveHair.Main.Z).PackedValue;
+                config.PreviewHairHighlight =
+                    new SixLabors.ImageSharp.PixelFormats.Rgba32(liveHair.Highlight.X, liveHair.Highlight.Y, liveHair.Highlight.Z).PackedValue;
                 config.Save();
             }
         }
@@ -356,6 +414,59 @@ public sealed class SourceTab(
         return ret;
     }
 
+    /// <summary>
+    /// The worn hairstyle's hair-shader materials. Hair models live under chara/human like the
+    /// face, but only materials the hair handler actually supports are offered — face-variant
+    /// hair.shpk materials (brows/lashes) reinterpret the highlight channel as the race-feature
+    /// color and stay gated off.
+    /// </summary>
+    private IReadOnlyList<ResolvedModelGroup> FilterHairGroups(IReadOnlyList<ResolvedModelGroup> groups)
+    {
+        var ret = new List<ResolvedModelGroup>();
+        foreach (var group in groups)
+        {
+            if (group.Materials.Count == 0 || !HairModelPattern.IsMatch(group.Materials[0].MdlGamePath))
+                continue;
+
+            var hairMaterials = group.Materials.Where(IsHairMaterial).ToList();
+            if (hairMaterials.Count == 0)
+                continue;
+
+            // One hairstyle = ONE pickable entry, even when the style splits its strands
+            // across several materials (an implementation detail of the model). Prefer the
+            // material named after the model's own hair id (the scalp material); the sibling
+            // materials are added automatically alongside it.
+            var hairId  = HairIdPattern.Match(group.Materials[0].MdlGamePath).Groups[1].Value;
+            var primary = hairMaterials.FirstOrDefault(m
+                => hairId.Length > 0 && m.GamePath.Contains(hairId, StringComparison.OrdinalIgnoreCase)) ?? hairMaterials[0];
+            ret.Add(new ResolvedModelGroup(group.Label, [primary]));
+        }
+
+        return ret;
+    }
+
+    private static readonly System.Text.RegularExpressions.Regex HairIdPattern =
+        new(@"/hair/(h\d{4})/", System.Text.RegularExpressions.RegexOptions.IgnoreCase | System.Text.RegularExpressions.RegexOptions.Compiled);
+
+
+    private static readonly System.Text.RegularExpressions.Regex HairModelPattern =
+        new(@"^chara/human/c\d{4}/obj/hair/h\d{4}/model/",
+            System.Text.RegularExpressions.RegexOptions.IgnoreCase | System.Text.RegularExpressions.RegexOptions.Compiled);
+
+    private bool IsHairMaterial(ResolvedMaterial material)
+    {
+        var mtrl = sourceFiles.GetMaterial(new SourcePath { GamePath = material.GamePath, ActualPath = material.ActualPath }, null);
+        if (mtrl == null)
+            return false;
+
+        var kind = shaderHandlers.For(mtrl).Kind(mtrl);
+        // Verification aid for the GetSubColor face-variant gate (the CRC pair is derived, not
+        // observed): one line per hair-model material on each Load Hair, with its raw keys.
+        DynamicTextureManager.Log.Debug(
+            $"Hair candidate {material.GamePath}: shader {mtrl.ShaderPackage.Name}, kind {kind}, keys [{string.Join(", ", mtrl.ShaderPackage.ShaderKeys.Select(k => $"0x{k.Key:X8}=0x{k.Value:X8}"))}]");
+        return kind is MaterialKind.Hair;
+    }
+
     /// <summary> Turn a discovered overlay-part material into a pickable entry, resolving its actual file and owning mod. </summary>
     private ResolvedMaterial ResolveOverlayMaterial(ModelUvReader.BodyOverlayMaterial overlay, string topModel)
     {
@@ -443,16 +554,38 @@ public sealed class SourceTab(
             MdlActualPath = material.MdlActualPath,
             Overlay       = material.IsOverlayPart,
         });
+
+        // A hairstyle is one unit: its sibling materials come along as hidden companions.
+        if (!material.IsOverlayPart && HairModelPattern.IsMatch(material.MdlGamePath))
+            ModGeneration.HairSources.AddCompanions(dTexture.Data, source.Materials[^1], uvReader, sourceFiles, shaderHandlers, penumbra);
+
+        // A freshly added material is almost always what the user wants to edit next.
+        if (!material.IsOverlayPart)
+            decalsTab.SelectMaterial(material.GamePath);
         Save(dTexture);
     }
 
     private void RemoveMaterial(DTexture dTexture, string gamePath)
     {
-        var source = dTexture.Data.Source;
-        if (source.Materials.RemoveAll(m => string.Equals(m.GamePath, gamePath, StringComparison.OrdinalIgnoreCase)) == 0)
+        var source  = dTexture.Data.Source;
+        var removed = source.Materials.FirstOrDefault(m => string.Equals(m.GamePath, gamePath, StringComparison.OrdinalIgnoreCase));
+        if (removed == null)
             return;
 
-        dTexture.Data.Materials.Remove(gamePath);
+        var toRemove = new List<string> { removed.GamePath };
+        // Removing a hairstyle removes its auto-added companion materials with it.
+        if (!removed.Overlay && HairModelPattern.IsMatch(removed.MdlGamePath))
+            toRemove.AddRange(source.Materials
+                .Where(m => m.Overlay && string.Equals(m.MdlGamePath, removed.MdlGamePath, StringComparison.OrdinalIgnoreCase))
+                .Select(m => m.GamePath));
+
+        foreach (var path in toRemove)
+        {
+            source.Materials.RemoveAll(m => string.Equals(m.GamePath, path, StringComparison.OrdinalIgnoreCase));
+            dTexture.Data.Materials.Remove(path);
+            dTexture.Data.AnimatedHair.Remove(path);
+        }
+
         PruneOrphanedTextures(dTexture);
         Save(dTexture);
     }
