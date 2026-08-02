@@ -1976,8 +1976,8 @@ public sealed class DecalsTab(
                     MathF.Sqrt(Math.Clamp(animatedEdit.EffectColor[0] * animatedEdit.EffectIntensity, 0f, 1f)),
                     MathF.Sqrt(Math.Clamp(animatedEdit.EffectColor[1] * animatedEdit.EffectIntensity, 0f, 1f)),
                     MathF.Sqrt(Math.Clamp(animatedEdit.EffectColor[2] * animatedEdit.EffectIntensity, 0f, 1f))),
-                animatedEdit.SpeedU, animatedEdit.SpeedV,
-                animatedEdit.StretchU, animatedEdit.StretchV);
+                animatedEdit.ScrollU, animatedEdit.ScrollV,
+                animatedEdit.TilingU, animatedEdit.TilingV);
 
         // Extra meshes rendered alongside the primary — body overlay parts (nails, accents)
         // or the other hair materials of the same hair model — each with its own composited
@@ -2486,42 +2486,42 @@ public sealed class DecalsTab(
         ImUtf8.HoverTooltip("Brightness of the glow — above 1 overdrives the effect color."u8);
 
         ImGui.SetNextItemWidth(150 * ImUtf8.GlobalScale);
-        var speedU = staged.SpeedU;
-        if (ImUtf8.Slider("##speedU"u8, ref speedU, "%.2f"u8, -5f, 5f))
+        var scrollU = staged.ScrollU;
+        if (ImUtf8.Slider("##scrollU"u8, ref scrollU, "%.2f"u8, -1f, 1f))
         {
-            staged.SpeedU = speedU;
-            changed       = true;
+            staged.ScrollU = scrollU;
+            changed        = true;
         }
 
         ImGui.SameLine();
         ImGui.SetNextItemWidth(150 * ImUtf8.GlobalScale);
-        var speedV = staged.SpeedV;
-        if (ImUtf8.Slider("Scroll Speed U/V"u8, ref speedV, "%.2f"u8, -5f, 5f))
+        var scrollV = staged.ScrollV;
+        if (ImUtf8.Slider("Scroll Speed U/V"u8, ref scrollV, "%.2f"u8, -1f, 1f))
         {
-            staged.SpeedV = speedV;
-            changed       = true;
+            staged.ScrollV = scrollV;
+            changed        = true;
         }
 
-        ImUtf8.HoverTooltip("How fast the effect pattern moves across the hair in each texture direction. Negative reverses the direction; 0/0 freezes it."u8);
+        ImUtf8.HoverTooltip("How fast the effect pattern drifts across the hair, in pattern-repeats per second for each texture direction. Negative reverses the direction; 0/0 freezes it."u8);
 
         ImGui.SetNextItemWidth(150 * ImUtf8.GlobalScale);
-        var stretchU = staged.StretchU;
-        if (ImUtf8.Slider("##stretchU"u8, ref stretchU, "%.2f"u8, 0.05f, 8f))
+        var tilingU = staged.TilingU;
+        if (ImUtf8.Slider("##tilingU"u8, ref tilingU, "%.2f"u8, 0.05f, 8f))
         {
-            staged.StretchU = Math.Clamp(stretchU, 0.01f, 16f);
-            changed         = true;
+            staged.TilingU = Math.Clamp(tilingU, 0.01f, 16f);
+            changed        = true;
         }
 
         ImGui.SameLine();
         ImGui.SetNextItemWidth(150 * ImUtf8.GlobalScale);
-        var stretchV = staged.StretchV;
-        if (ImUtf8.Slider("Pattern Stretch U/V"u8, ref stretchV, "%.2f"u8, 0.05f, 8f))
+        var tilingV = staged.TilingV;
+        if (ImUtf8.Slider("Pattern Tiling U/V"u8, ref tilingV, "%.2f"u8, 0.05f, 8f))
         {
-            staged.StretchV = Math.Clamp(stretchV, 0.01f, 16f);
-            changed         = true;
+            staged.TilingV = Math.Clamp(tilingV, 0.01f, 16f);
+            changed        = true;
         }
 
-        ImUtf8.HoverTooltip("Scale of the effect pattern along each texture direction — low = broad waves, high = fine ripples."u8);
+        ImUtf8.HoverTooltip("How often the effect pattern repeats across the hair in each texture direction — low = broad shapes, high = fine ripples."u8);
 
         var pattern = (AnimatedHairBuilder.HairEffectPattern)staged.Pattern;
         ImGui.SetNextItemWidth(220 * ImUtf8.GlobalScale);

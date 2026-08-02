@@ -30,16 +30,15 @@ public sealed record ViewportShading(DecodedTexture? Diffuse, DecodedTexture? Id
     (Vector3 Main, Vector3 Highlight)? HairColors = null, DecodedTexture? HairMask = null, ViewportEffect? Effect = null);
 
 /// <summary>
-/// A live stand-in for the animated-effect conversion: the effect pattern scrolled over the
-/// highlight areas (normal B) of every hair mesh as unlit emissive, animated in real time so
-/// pattern/speed/stretch/color edits can be judged without a build. DisplayColor is in the
-/// DISPLAY domain (root of the stored squared colorset color times intensity — the same
-/// conversion the hair colors get), so the glow's brightness matches the in-game emissive.
-/// PatternRgba must be a CACHED array — the record compares it by reference to decide
-/// whether the shading changed.
+/// A live stand-in for the animated-effect conversion, following the shader-verified math:
+/// uv = texcoord × tiling + time(seconds) × scroll, pattern sample squared (gamma) times
+/// the emissive color — in the display domain that reduces to DisplayColor × sample.
+/// DisplayColor is the root of the stored squared colorset color times intensity (the same
+/// conversion the hair colors get). PatternRgba must be a CACHED array — the record
+/// compares it by reference to decide whether the shading changed.
 /// </summary>
 public sealed record ViewportEffect(byte[] PatternRgba, int PatternSize, Vector3 DisplayColor,
-    float SpeedU, float SpeedV, float StretchU, float StretchV);
+    float ScrollU, float ScrollV, float TilingU, float TilingV);
 
 /// <summary>
 /// An extra mesh rendered alongside the primary selected material — overlay parts (nails,
@@ -650,16 +649,30 @@ public sealed class DecalViewport(ITextureProvider textureProvider) : IDisposabl
         return texture.Rgba[(y * texture.Width + x) * 4 + 2];
     }
 
-    /// <summary> The effect pattern's brightness at a scrolled, stretched, wrapping UV. </summary>
+    /// <summary>
+    /// The effect pattern's brightness at a scrolled, stretched, wrapping UV — bilinear like
+    /// the game's sampler, so the preview glow is as soft as the in-game one.
+    /// </summary>
     private static float SampleEffect(ViewportEffect effect, Vector2 uv, Vector2 offset)
     {
-        var u = uv.X * effect.StretchU + offset.X;
-        var v = uv.Y * effect.StretchV + offset.Y;
-        u -= MathF.Floor(u);
-        v -= MathF.Floor(v);
-        var x = Math.Clamp((int)(u * effect.PatternSize), 0, effect.PatternSize - 1);
-        var y = Math.Clamp((int)(v * effect.PatternSize), 0, effect.PatternSize - 1);
-        return effect.PatternRgba[(y * effect.PatternSize + x) * 4] / 255f;
+        var size = effect.PatternSize;
+        var u = (uv.X * effect.TilingU + offset.X) * size - 0.5f;
+        var v = (uv.Y * effect.TilingV + offset.Y) * size - 0.5f;
+        var x0 = (int)MathF.Floor(u);
+        var y0 = (int)MathF.Floor(v);
+        var fx = u - x0;
+        var fy = v - y0;
+
+        float At(int x, int y)
+        {
+            x = ((x % size) + size) % size;
+            y = ((y % size) + size) % size;
+            return effect.PatternRgba[(y * size + x) * 4];
+        }
+
+        var top    = At(x0, y0) * (1f - fx) + At(x0 + 1, y0) * fx;
+        var bottom = At(x0, y0 + 1) * (1f - fx) + At(x0 + 1, y0 + 1) * fx;
+        return (top * (1f - fy) + bottom * fy) / 255f;
     }
 
     // Fixed-size render targets, reused across frames — a drag re-renders every frame and
@@ -1058,8 +1071,11 @@ public sealed class DecalViewport(ITextureProvider textureProvider) : IDisposabl
         if (effect != null && _effectPixelCount > 0)
         {
             Array.Copy(_renderRgba, _animRgba, _renderedSize * _renderedSize * 4);
+            // Shader-verified: scroll = time in SECONDS × the scroll constants, no hidden
+            // factor. The squared pattern sample times the linear emissive color reduces to
+            // a LINEAR sample response in the display domain.
             var t      = (float)ImGui.GetTime();
-            var offset = new Vector2(t * effect.SpeedU * 0.25f, t * effect.SpeedV * 0.25f);
+            var offset = new Vector2(t * effect.ScrollU, t * effect.ScrollV);
             for (var n = 0; n < _effectPixelCount; ++n)
             {
                 var index  = _effectPixels[n];
