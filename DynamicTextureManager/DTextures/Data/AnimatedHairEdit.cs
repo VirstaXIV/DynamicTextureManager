@@ -22,15 +22,18 @@ public sealed class AnimatedHairEdit
     /// <summary> Absolute path of a custom pattern image — legacy/hidden; built-in patterns are the supported path. </summary>
     public string EffectImagePath = string.Empty;
 
-    /// <summary> Scroll speed of the effect texture along U/V (reference default 1.5). </summary>
-    public float SpeedU = 1.5f;
+    /// <summary>
+    /// Scroll speed of the effect texture along U/V in UV units per second (shader-verified:
+    /// uv = texcoord × tiling + time × scroll). Reference: 0 / 0.15 — a slow vertical drift.
+    /// </summary>
+    public float ScrollU;
 
-    public float SpeedV = 1.5f;
+    public float ScrollV = 0.15f;
 
-    /// <summary> Stretch of the effect texture along U/V (reference default 1). </summary>
-    public float StretchU = 1f;
+    /// <summary> Pattern tiling along U/V — how often the effect texture repeats. Reference: 1 / 3. </summary>
+    public float TilingU = 1f;
 
-    public float StretchV = 1f;
+    public float TilingV = 3f;
 
     /// <summary> Emissive color of the moving effect (colorset row 16A), linear RGB. Always user-authored. </summary>
     public float[] EffectColor = [0.391f, 0.089f, 0.002f];
@@ -53,10 +56,10 @@ public sealed class AnimatedHairEdit
             ["Enabled"]          = Enabled,
             ["Pattern"]          = Pattern,
             ["EffectImagePath"]  = EffectImagePath,
-            ["SpeedU"]           = SpeedU,
-            ["SpeedV"]           = SpeedV,
-            ["StretchU"]         = StretchU,
-            ["StretchV"]         = StretchV,
+            ["ScrollU"]          = ScrollU,
+            ["ScrollV"]          = ScrollV,
+            ["TilingU"]          = TilingU,
+            ["TilingV"]          = TilingV,
             ["EffectColor"]        = new JArray(EffectColor),
             ["EffectIntensity"]    = EffectIntensity,
             ["BaseColor"]          = new JArray(BaseColor),
@@ -70,10 +73,13 @@ public sealed class AnimatedHairEdit
             Enabled          = json["Enabled"]?.ToObject<bool>() ?? false,
             Pattern          = json["Pattern"]?.ToObject<int>() ?? 0,
             EffectImagePath  = json["EffectImagePath"]?.ToObject<string>() ?? string.Empty,
-            SpeedU           = json["SpeedU"]?.ToObject<float>() ?? 1.5f,
-            SpeedV           = json["SpeedV"]?.ToObject<float>() ?? 1.5f,
-            StretchU         = json["StretchU"]?.ToObject<float>() ?? 1f,
-            StretchV         = json["StretchV"]?.ToObject<float>() ?? 1f,
+            // Older saves stored Speed/Stretch — those constants went into a parameter set
+            // the shader never read (the rows select the other set), so the stored values
+            // had NO in-game meaning. Reset such saves to the reference defaults.
+            ScrollU          = json["ScrollU"]?.ToObject<float>() ?? 0f,
+            ScrollV          = json["ScrollV"]?.ToObject<float>() ?? 0.15f,
+            TilingU          = json["TilingU"]?.ToObject<float>() ?? 1f,
+            TilingV          = json["TilingV"]?.ToObject<float>() ?? 3f,
             EffectColor      = LoadColor(json["EffectColor"], [0.391f, 0.089f, 0.002f]),
             EffectIntensity  = json["EffectIntensity"]?.ToObject<float>() ?? 1f,
             BaseColor        = LoadColor(json["BaseColor"], [0.1f, 0.1f, 0.1f]),
