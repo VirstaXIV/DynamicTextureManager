@@ -77,12 +77,30 @@ public static class AnimatedHairBuilder
     ];
 
     /// <summary>
+    /// Whether a hair-family normal carries NO highlight-blend information in its blue
+    /// channel. Hairstyles author their highlight streaks there (typical mean ~35); TAIL
+    /// normals are flat zero (verified on the vanilla Miqo'te tail textures) — there is no
+    /// area for the animated effect to follow, so the conversion switches to full-piece
+    /// coverage instead (see <see cref="BuildIdRgba"/>).
+    /// </summary>
+    public static bool IsFlatHighlightChannel(byte[] normalRgba)
+    {
+        long sum = 0;
+        for (var i = 2; i < normalRgba.Length; i += 4)
+            sum += normalRgba[i];
+        return sum < 2.0 * (normalRgba.Length / 4.0);
+    }
+
+    /// <summary>
     /// Transform a hair material into the animated characterscroll variant. The source can be
     /// the vanilla or a modded hair.shpk mtrl — everything shader-related is replaced
     /// wholesale, so only the file header/version carries over. The source instance is never
-    /// mutated.
+    /// mutated. With <paramref name="fullCoverage"/> (tails — no authored highlight areas)
+    /// the effect row keeps the BASE color as its diffuse: every texel renders through it,
+    /// so the piece must not flip to the highlight color — the glow rides on the unchanged
+    /// look and the scrolling pattern alone provides the variation.
     /// </summary>
-    public static byte[] BuildMaterial(MtrlFile sourceMtrl, AnimatedHairEdit edit, TexturePaths paths)
+    public static byte[] BuildMaterial(MtrlFile sourceMtrl, AnimatedHairEdit edit, TexturePaths paths, bool fullCoverage = false)
     {
         var mtrl = sourceMtrl.Clone();
 
@@ -145,7 +163,7 @@ public static class AnimatedHairBuilder
         }
 
         WriteRow(table, 30, EffectRowTemplate);
-        PatchColor(table, 30, 0, edit.HighlightColor, 1f);                        // highlight-area hair diffuse
+        PatchColor(table, 30, 0, fullCoverage ? edit.BaseColor : edit.HighlightColor, 1f); // effect-area diffuse
         PatchColor(table, 30, 8, edit.EffectColor, edit.EffectIntensity);        // emissive
         PatchColor(table, 30, 4, edit.EffectColor, edit.EffectIntensity * 0.27f); // spec tint
         mtrl.Table    = table;
@@ -192,15 +210,17 @@ public static class AnimatedHairBuilder
     /// The id map routing the highlight distribution into colorset pair 16: R=255 selects the
     /// pair, G = the hair normal's blue channel (0 = base row B, 255 = effect row A) — so the
     /// authored highlights AND every highlight edit baked into the composited normal decide
-    /// where the effect appears.
+    /// where the effect appears. With <paramref name="fullCoverage"/> (tails — the normal's
+    /// B is flat zero, see <see cref="IsFlatHighlightChannel"/>) every texel routes to the
+    /// effect row instead, whose diffuse then carries the BASE color.
     /// </summary>
-    public static byte[] BuildIdRgba(byte[] compositedNormal)
+    public static byte[] BuildIdRgba(byte[] compositedNormal, bool fullCoverage = false)
     {
         var result = new byte[compositedNormal.Length];
         for (var i = 0; i + 3 < result.Length; i += 4)
         {
             result[i]     = 255;
-            result[i + 1] = compositedNormal[i + 2]; // G := highlight blend (normal B)
+            result[i + 1] = fullCoverage ? (byte)255 : compositedNormal[i + 2]; // G := highlight blend (normal B)
             result[i + 2] = 255;
             result[i + 3] = 255;
         }
@@ -255,27 +275,46 @@ public static class AnimatedHairBuilder
         return result;
     }
 
-    /// <summary> Built-in black/white effect patterns scrolled across the highlights. </summary>
+    /// <summary>
+    /// Built-in black/white effect patterns scrolled across the highlights. The first five
+    /// are procedural noise fields; <see cref="Glint"/> replicates the ORIGINAL reference
+    /// mod's aesthetic (an almost-black canvas with a few tiny specks — occasional single
+    /// sparkles sweep through the hair instead of a broad glow; the reference ships 47 lit
+    /// texels on 1024x512); <see cref="DressGlitter"/> is not generated at all — it loads
+    /// the game's own hand-authored sparkle texture (Neo Queen's Dress catchlight) from the
+    /// player's game files at build time.
+    /// </summary>
     public enum HairEffectPattern
     {
-        Shimmer = 0,
-        Flames  = 1,
-        Streaks = 2,
-        Waves   = 3,
-        Sparks  = 4,
+        Shimmer      = 0,
+        Flames       = 1,
+        Streaks      = 2,
+        Waves        = 3,
+        Sparks       = 4,
+        Glint        = 5,
+        DressGlitter = 6,
     }
 
     public static string PatternLabel(HairEffectPattern pattern)
         => pattern switch
         {
-            HairEffectPattern.Flames  => "Flames",
-            HairEffectPattern.Streaks => "Streaks",
-            HairEffectPattern.Waves   => "Waves",
-            HairEffectPattern.Sparks  => "Sparks",
-            _                         => "Shimmer",
+            HairEffectPattern.Flames       => "Flames",
+            HairEffectPattern.Streaks      => "Streaks",
+            HairEffectPattern.Waves        => "Waves",
+            HairEffectPattern.Sparks       => "Sparks",
+            HairEffectPattern.Glint        => "Glint (single sparkles)",
+            HairEffectPattern.DressGlitter => "Glitter (from the game)",
+            _                              => "Shimmer",
         };
 
     public const int PatternSize = 512;
+
+    /// <summary> The game's own sparkle texture (Neo Queen's Dress catchlight) — loaded from the player's game files, never shipped. </summary>
+    public const string DressGlitterTexPath = "chara/equipment/e6257/texture/v01_c0201e6257_top_catc.tex";
+
+    /// <summary> Native resolution a built-in pattern generates at — sparse point sparkles need the finer grid. </summary>
+    public static int PatternDimension(HairEffectPattern pattern)
+        => pattern is HairEffectPattern.Glint ? 1024 : PatternSize;
 
     /// <summary>
     /// Generate a built-in effect pattern, deterministic and TILEABLE (the shader wraps and
@@ -284,6 +323,9 @@ public static class AnimatedHairBuilder
     /// </summary>
     public static byte[] GeneratePattern(HairEffectPattern pattern, int size = PatternSize)
     {
+        if (pattern is HairEffectPattern.Glint)
+            return GenerateGlint(size);
+
         // Any noise becomes tileable by cross-blending the four period-shifted copies —
         // per-axis periods, since most patterns stretch U and V differently.
         float TileableFbm(int seed, float x, float y, float periodX, float periodY, int octaves)
@@ -327,6 +369,47 @@ public static class AnimatedHairBuilder
                 // Soft drifting glow patches.
                 _ => Smooth(0.38f, 0.72f, TileableFbm(7919, u * 5f, v * 3f, 5f, 3f, 3)),
             };
+
+            var b     = (byte)Math.Clamp((int)(value * 255f), 0, 255);
+            var index = (y * size + x) * 4;
+            rgba[index] = rgba[index + 1] = rgba[index + 2] = b;
+            rgba[index + 3] = 255;
+        }
+
+        return rgba;
+    }
+
+    /// <summary>
+    /// The reference aesthetic: a black canvas with a handful of tiny soft specks placed
+    /// deterministically, wrap-around so the scroll never shows a seam — occasional single
+    /// glints drift through the highlights. Speck radii are relative, so any size works.
+    /// </summary>
+    private static byte[] GenerateGlint(int size)
+    {
+        var rgba = new byte[size * size * 4];
+        var rng  = new Random(20260802);
+        var specks = new (float X, float Y, float Sigma, float Brightness)[14];
+        for (var i = 0; i < specks.Length; ++i)
+            specks[i] = ((float)rng.NextDouble(), (float)rng.NextDouble(),
+                0.0015f + (float)rng.NextDouble() * 0.0025f, 0.55f + (float)rng.NextDouble() * 0.45f);
+
+        for (var y = 0; y < size; ++y)
+        for (var x = 0; x < size; ++x)
+        {
+            var u     = (x + 0.5f) / size;
+            var v     = (y + 0.5f) / size;
+            var value = 0f;
+            foreach (var speck in specks)
+            {
+                var dx = MathF.Abs(u - speck.X);
+                dx = MathF.Min(dx, 1f - dx);
+                var dy = MathF.Abs(v - speck.Y);
+                dy = MathF.Min(dy, 1f - dy);
+                var d2     = dx * dx + dy * dy;
+                var sigma2 = speck.Sigma * speck.Sigma;
+                if (d2 < sigma2 * 25f)
+                    value += speck.Brightness * MathF.Exp(-d2 / (2f * sigma2));
+            }
 
             var b     = (byte)Math.Clamp((int)(value * 255f), 0, 255);
             var index = (y * size + x) * 4;

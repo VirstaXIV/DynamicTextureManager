@@ -6,6 +6,7 @@ using Dalamud.Bindings.ImGui;
 using Dalamud.Interface.ImGuiFileDialog;
 using Dalamud.Plugin.Services;
 using DynamicTextureManager.DTextures.Data;
+using DynamicTextureManager.ModGeneration;
 using DynamicTextureManager.Services;
 using OtterGui.Raii;
 using OtterGui.Text;
@@ -17,7 +18,8 @@ namespace DynamicTextureManager.UI;
 /// edit the selected entry's name/tags/preset. Used by the standalone library window in
 /// manage mode and, with a pick callback, as the picker dialog the Decals tab opens.
 /// </summary>
-public sealed class DecalLibraryPanel(DecalLibrary decals, ITextureProvider textureProvider) : OtterGui.Services.IService
+public sealed class DecalLibraryPanel(DecalLibrary decals, ITextureProvider textureProvider, TextureIO textureIO)
+    : OtterGui.Services.IService, IDisposable
 {
     private enum SortMode
     {
@@ -283,4 +285,155 @@ public sealed class DecalLibraryPanel(DecalLibrary decals, ITextureProvider text
             SortMode.NameDesc => "Name Z-A",
             _                 => "Newest First",
         };
+
+    #region Effect patterns
+
+    private Guid   _selectedEffect = Guid.Empty;
+    private string _effectRename   = string.Empty;
+
+    private readonly Dictionary<int, Dalamud.Interface.Textures.TextureWraps.IDalamudTextureWrap> _builtinWraps = [];
+    private Dalamud.Interface.Textures.TextureWraps.IDalamudTextureWrap? _gameGlitterWrap;
+    private bool _gameGlitterTried;
+
+    public void Dispose()
+    {
+        foreach (var wrap in _builtinWraps.Values)
+            wrap.Dispose();
+        _builtinWraps.Clear();
+        _gameGlitterWrap?.Dispose();
+    }
+
+    /// <summary>
+    /// The effect-pattern side of the resource library: the patterns shipped with the plugin
+    /// (procedurally generated), the ones read from the game's own files, and imported
+    /// images — stored with the decals and deletable here.
+    /// </summary>
+    public void DrawEffects()
+    {
+        _fileDialog.Draw();
+
+        if (ImUtf8.Button("Import Effect Pattern..."u8))
+            _fileDialog.OpenFileDialog("Import Effect Pattern", "Images{.png,.jpg,.jpeg,.dds,.bmp,.tga}", (success, path) =>
+            {
+                if (!success)
+                    return;
+
+                var imported = decals.ImportEffect(path);
+                if (imported != null)
+                    _selectedEffect = imported.Id;
+            });
+        ImUtf8.HoverTooltip(
+            "Import an image as a scrolling effect pattern for the Animated Effect. It is converted to PNG and stored with the decals.\nBrightness becomes the glow; the image should tile cleanly in both directions."u8);
+
+        ImGui.Separator();
+        ImUtf8.Text("Built into the plugin:"u8);
+        var cell = 72f * ImUtf8.GlobalScale;
+        foreach (var pattern in Enum.GetValues<ModGeneration.AnimatedHairBuilder.HairEffectPattern>())
+        {
+            if (pattern is ModGeneration.AnimatedHairBuilder.HairEffectPattern.DressGlitter)
+                continue;
+
+            using var id    = ImUtf8.PushId((int)pattern);
+            using var group = ImUtf8.Group();
+            if (!_builtinWraps.TryGetValue((int)pattern, out var wrap))
+            {
+                var size = ModGeneration.AnimatedHairBuilder.PatternDimension(pattern);
+                _builtinWraps[(int)pattern] = wrap = textureProvider.CreateFromRaw(
+                    Dalamud.Interface.Textures.RawImageSpecification.Rgba32(size, size),
+                    ModGeneration.AnimatedHairBuilder.GeneratePattern(pattern, size), $"DTM Pattern {pattern}");
+            }
+
+            ImGui.Image(wrap.Handle, new Vector2(cell));
+            ImUtf8.Text(ModGeneration.AnimatedHairBuilder.PatternLabel(pattern));
+            group.Dispose();
+            if (ImGui.IsItemHovered())
+                ImUtf8.HoverTooltip("Part of the plugin — always available."u8);
+            ImGui.SameLine();
+        }
+
+        ImGui.NewLine();
+        ImGui.Separator();
+        ImUtf8.Text("From the game:"u8);
+        if (!_gameGlitterTried)
+        {
+            _gameGlitterTried = true;
+            var glitter = textureIO.Load(ModGeneration.AnimatedHairBuilder.DressGlitterTexPath, null, null);
+            if (glitter != null)
+                _gameGlitterWrap = textureProvider.CreateFromRaw(
+                    Dalamud.Interface.Textures.RawImageSpecification.Rgba32(glitter.Width, glitter.Height), glitter.Rgba,
+                    "DTM Pattern Glitter");
+        }
+
+        if (_gameGlitterWrap is { } game)
+        {
+            using var group = ImUtf8.Group();
+            var aspect = game.Width / (float)game.Height;
+            ImGui.Image(game.Handle, new Vector2(cell * aspect, cell));
+            ImUtf8.Text("Glitter"u8);
+            group.Dispose();
+            if (ImGui.IsItemHovered())
+                ImUtf8.HoverTooltip("From the Neo Queen's Dress."u8);
+        }
+        else
+        {
+            ImUtf8.Text("(could not read the game texture)"u8);
+        }
+
+        ImGui.Separator();
+        ImUtf8.Text("Imported:"u8);
+        if (decals.Effects.Count == 0)
+        {
+            ImUtf8.Text("No effect patterns imported yet."u8);
+            return;
+        }
+
+        foreach (var (effect, idx) in decals.Effects.Select((e, i) => (e, i)))
+        {
+            using var id    = ImUtf8.PushId(idx);
+            using var group = ImUtf8.Group();
+            var wrap     = textureProvider.GetFromFile(decals.EffectFilePath(effect.Id)).GetWrapOrDefault();
+            var selected = effect.Id == _selectedEffect;
+            using (ImRaii.PushColor(ImGuiCol.Button, 0xFF885522u, selected))
+            {
+                var clicked = wrap != null
+                    ? ImGui.ImageButton(wrap.Handle, new Vector2(cell))
+                    : ImUtf8.Button("?"u8, new Vector2(cell));
+                if (clicked)
+                {
+                    _selectedEffect = effect.Id;
+                    _effectRename   = effect.Name;
+                }
+            }
+
+            var label = effect.Name.Length > 12 ? effect.Name[..11] + "…" : effect.Name;
+            ImUtf8.Text(label);
+            group.Dispose();
+            if (ImGui.IsItemHovered())
+                ImUtf8.HoverTooltip($"{effect.Name}\nImported {effect.CreatedDate.ToLocalTime():yyyy-MM-dd} from {effect.OriginalFile}\nClick to select.");
+            ImGui.SameLine();
+        }
+
+        ImGui.NewLine();
+        if (_selectedEffect == Guid.Empty || decals.GetEffect(_selectedEffect) is not { } selectedEntry)
+            return;
+
+        ImGui.Separator();
+        ImGui.SetNextItemWidth(250 * ImUtf8.GlobalScale);
+        ImUtf8.InputText("##effectRename"u8, ref _effectRename);
+        ImGui.SameLine();
+        if (ImUtf8.SmallButton("Rename"u8) && _effectRename.Trim().Length > 0)
+            decals.RenameEffect(selectedEntry.Id, _effectRename.Trim());
+
+        ImGui.SameLine();
+        if (ImUtf8.SmallButton("Delete"u8) && ImGui.GetIO().KeyCtrl)
+        {
+            decals.DeleteEffect(selectedEntry.Id);
+            _selectedEffect = Guid.Empty;
+        }
+
+        ImUtf8.HoverTooltip(
+            "Hold Control and click to delete this pattern from the library.\nBuilt mods keep working — they bake the pattern in — but animated effects referencing it fall back to their built-in pattern on the next build."u8);
+    }
+
+    #endregion
 }

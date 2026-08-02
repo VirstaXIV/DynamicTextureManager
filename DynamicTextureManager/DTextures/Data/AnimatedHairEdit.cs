@@ -1,3 +1,4 @@
+using System;
 using Newtonsoft.Json.Linq;
 
 namespace DynamicTextureManager.DTextures.Data;
@@ -19,8 +20,13 @@ public sealed class AnimatedHairEdit
     /// <summary> Built-in effect pattern index (AnimatedHairBuilder.HairEffectPattern). </summary>
     public int Pattern;
 
-    /// <summary> Absolute path of a custom pattern image — legacy/hidden; built-in patterns are the supported path. </summary>
-    public string EffectImagePath = string.Empty;
+    /// <summary>
+    /// Id of an imported effect pattern in the resource library (managed alongside decals);
+    /// overrides <see cref="Pattern"/> while set. Arbitrary file paths are deliberately NOT
+    /// supported — patterns are always library-managed so their storage and deletion have
+    /// one answer. A missing library entry falls back to the built-in pattern.
+    /// </summary>
+    public Guid EffectLibraryId;
 
     /// <summary>
     /// Scroll speed of the effect texture along U/V in UV units per second (shader-verified:
@@ -55,7 +61,7 @@ public sealed class AnimatedHairEdit
         {
             ["Enabled"]          = Enabled,
             ["Pattern"]          = Pattern,
-            ["EffectImagePath"]  = EffectImagePath,
+            ["EffectLibraryId"]  = EffectLibraryId,
             ["ScrollU"]          = ScrollU,
             ["ScrollV"]          = ScrollV,
             ["TilingU"]          = TilingU,
@@ -72,7 +78,9 @@ public sealed class AnimatedHairEdit
         {
             Enabled          = json["Enabled"]?.ToObject<bool>() ?? false,
             Pattern          = json["Pattern"]?.ToObject<int>() ?? 0,
-            EffectImagePath  = json["EffectImagePath"]?.ToObject<string>() ?? string.Empty,
+            // Old saves' raw EffectImagePath is deliberately dropped (unmanaged user files);
+            // such edits fall back to their built-in pattern.
+            EffectLibraryId  = json["EffectLibraryId"]?.ToObject<Guid>() ?? Guid.Empty,
             // Older saves stored Speed/Stretch — those constants went into a parameter set
             // the shader never read (the rows select the other set), so the stored values
             // had NO in-game meaning. Reset such saves to the reference defaults.
