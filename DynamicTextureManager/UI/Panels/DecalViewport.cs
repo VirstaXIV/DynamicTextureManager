@@ -37,8 +37,13 @@ public sealed record ViewportShading(DecodedTexture? Diffuse, DecodedTexture? Id
 /// conversion the hair colors get). PatternRgba must be a CACHED array — the record
 /// compares it by reference to decide whether the shading changed.
 /// </summary>
+/// <param name="EffectRows">
+/// Gear conversions: the colorset rows that glow — the effect covers every pixel whose id
+/// texel routes to one of them (hair instead follows the highlight blend, or the whole
+/// piece with <paramref name="FullCoverage"/>). Must be a CACHED array — compared by reference.
+/// </param>
 public sealed record ViewportEffect(byte[] PatternRgba, int PatternSize, Vector3 DisplayColor,
-    float ScrollU, float ScrollV, float TilingU, float TilingV);
+    float ScrollU, float ScrollV, float TilingU, float TilingV, bool FullCoverage = false, int[]? EffectRows = null);
 
 /// <summary>
 /// An extra mesh rendered alongside the primary selected material — overlay parts (nails,
@@ -125,10 +130,14 @@ public sealed class DecalViewport(ITextureProvider textureProvider) : IDisposabl
         {
             // The mesh instance can turn over without a real subject change (the reader's
             // caches re-resolve while rebuilds reload the mod) — keep an active placement
-            // and the camera; the Decals tab already unbinds when the MATERIAL changes.
+            // and the camera then. A different SUBJECT (another model — e.g. switching from
+            // the hair to the tail within one project) must re-frame, or the camera keeps
+            // pointing at the previous piece and the viewport shows empty space.
+            var subjectChanged = firstMesh
+             || !string.Equals(_mesh!.GamePath, mesh.GamePath, StringComparison.OrdinalIgnoreCase);
             _mesh        = mesh;
             _renderDirty = true;
-            if (dTextureChanged || firstMesh)
+            if (dTextureChanged || subjectChanged)
                 FrameCamera();
         }
 
@@ -649,6 +658,15 @@ public sealed class DecalViewport(ITextureProvider textureProvider) : IDisposabl
         return texture.Rgba[(y * texture.Width + x) * 4 + 2];
     }
 
+    /// <summary> Nearest id-map texel: bilinear on the pair byte would blend unrelated pairs. </summary>
+    private static (byte R, byte G) SampleIdTexel(DecodedTexture idMap, Vector2 uv)
+    {
+        var x = Math.Clamp((int)(uv.X * idMap.Width), 0, idMap.Width - 1);
+        var y = Math.Clamp((int)(uv.Y * idMap.Height), 0, idMap.Height - 1);
+        var i = (y * idMap.Width + x) * 4;
+        return (idMap.Rgba[i], idMap.Rgba[i + 1]);
+    }
+
     /// <summary>
     /// The effect pattern's brightness at a scrolled, stretched, wrapping UV — bilinear like
     /// the game's sampler, so the preview glow is as soft as the in-game one.
@@ -989,9 +1007,27 @@ public sealed class DecalViewport(ITextureProvider textureProvider) : IDisposabl
                             // updates it, so occlusion between meshes stays correct.
                             if (effect != null)
                             {
-                                var blend = !dimmed && meshHairColors != null && meshDiffuse != null
-                                    ? SampleBlue(meshDiffuse, uv) / 255f
-                                    : 0f;
+                                var blend = 0f;
+                                if (!dimmed)
+                                {
+                                    if (effect.EffectRows is { Length: > 0 } effectRows)
+                                    {
+                                        // Gear: glow where the id map routes to a selected row.
+                                        if (meshIdMap != null)
+                                        {
+                                            var (idR, idG) = SampleIdTexel(meshIdMap, uv);
+                                            if (Array.IndexOf(effectRows, IdMapTexel.Row(idR, idG)) >= 0)
+                                                blend = 1f;
+                                        }
+                                    }
+                                    else if (meshHairColors != null && meshDiffuse != null)
+                                    {
+                                        // Hair: the highlight blend; full coverage (tails — no
+                                        // highlight channel) lights every visible texel instead.
+                                        blend = effect.FullCoverage ? 1f : SampleBlue(meshDiffuse, uv) / 255f;
+                                    }
+                                }
+
                                 _effectBlend![index] = blend;
                                 if (blend > 0.01f)
                                     _effectUv![index] = uv;

@@ -203,14 +203,14 @@ public sealed class SourceTab(
         ImUtf8.HoverTooltip("Add your character's bare body (or face).\nDecals on skin bake into the skin texture like tattoos and conform to the body."u8);
 
         ImGui.SameLine();
-        if (ImUtf8.Button("Add Hair..."u8))
+        if (ImUtf8.Button("Add Hair / Tail..."u8))
         {
             LoadPlayer(PickerMode.Hair);
             ImGui.OpenPopup("##sourcePicker"u8);
         }
 
         ImUtf8.HoverTooltip(
-            "Add your character's current hairstyle.\nHair has no color texture — the game blends your hair and highlight colors by the normal map,\nso edits adjust how the hair shines or animate its highlights."u8);
+            "Add your character's current hairstyle, tail or ears — the pieces the game colors with your hair and highlight colors.\nThey have no color texture — the game blends your colors by the normal map, so edits adjust shine or animate highlights.\nFurred tails (Miqo'te, Hrothgar) qualify; scale tails (Au Ra) are skin-shaded and cannot be edited here. Miqo'te ears are part of the hairstyle and come with it."u8);
 
         DrawPickerPopup(dTexture, conflicts);
     }
@@ -307,8 +307,9 @@ public sealed class SourceTab(
                 ? mode switch
                 {
                     PickerMode.Skin => "No skin materials found — is your character loaded?",
-                    PickerMode.Hair => "No hair materials found — is your character loaded?",
-                    _               => "No materials found — is your character loaded?",
+                    PickerMode.Hair =>
+                        "No hair, tail or ear materials found — is your character loaded? (Skin-shaded tails — e.g. Au Ra scales — cannot be edited here.)",
+                    _ => "No materials found — is your character loaded?",
                 }
                 : string.Empty;
         }
@@ -405,31 +406,36 @@ public sealed class SourceTab(
     }
 
     /// <summary>
-    /// The worn hairstyle's hair-shader materials. Hair models live under chara/human like the
-    /// face, but only materials the hair handler actually supports are offered — face-variant
-    /// hair.shpk materials (brows/lashes) reinterpret the highlight channel as the race-feature
-    /// color and stay gated off.
+    /// The worn hair-family pieces: the hairstyle plus the tail and (Viera) ears — everything
+    /// the game colors with the customize hair colors, so the whole hair pipeline (Shine,
+    /// Animated Effect) applies. Only materials the hair handler actually supports are
+    /// offered: face-variant hair.shpk materials (brows/lashes) reinterpret the highlight
+    /// channel as the race-feature color, and skin-shaded tails (Au Ra scales) are a
+    /// different pipeline entirely — both stay gated off by the material-kind check.
     /// </summary>
     private IReadOnlyList<ResolvedModelGroup> FilterHairGroups(IReadOnlyList<ResolvedModelGroup> groups)
     {
         var ret = new List<ResolvedModelGroup>();
         foreach (var group in groups)
         {
-            if (group.Materials.Count == 0 || !SourceUnits.HairModelPattern.IsMatch(group.Materials[0].MdlGamePath))
+            if (group.Materials.Count == 0 || !SourceUnits.IsHairFamilyModel(group.Materials[0].MdlGamePath))
                 continue;
 
             var hairMaterials = group.Materials.Where(IsHairMaterial).ToList();
             if (hairMaterials.Count == 0)
                 continue;
 
-            // One hairstyle = ONE pickable entry, even when the style splits its strands
+            // One piece = ONE pickable entry, even when a hairstyle splits its strands
             // across several materials (an implementation detail of the model). Prefer the
             // material named after the model's own hair id (the scalp material); the sibling
-            // materials are added automatically alongside it.
+            // materials are added automatically alongside it. Tails/ears carry a single
+            // hair material, so the preference is a no-op there.
             var hairId  = HairIdPattern.Match(group.Materials[0].MdlGamePath).Groups[1].Value;
             var primary = hairMaterials.FirstOrDefault(m
                 => hairId.Length > 0 && m.GamePath.Contains(hairId, StringComparison.OrdinalIgnoreCase)) ?? hairMaterials[0];
-            ret.Add(new ResolvedModelGroup(group.Label, [primary]));
+            // The picker now mixes piece types — prefix each row with what it is.
+            var label = $"{SourceUnits.UnitLabel(group.Materials[0].MdlGamePath, primary.GamePath)}: {group.Label}";
+            ret.Add(new ResolvedModelGroup(label, [primary]));
         }
 
         return ret;
@@ -592,6 +598,7 @@ public sealed class SourceTab(
             source.Materials.RemoveAll(m => string.Equals(m.GamePath, path, StringComparison.OrdinalIgnoreCase));
             dTexture.Data.Materials.Remove(path);
             dTexture.Data.AnimatedHair.Remove(path);
+            dTexture.Data.AnimatedGear.Remove(path);
         }
 
         PruneOrphanedTextures(dTexture);

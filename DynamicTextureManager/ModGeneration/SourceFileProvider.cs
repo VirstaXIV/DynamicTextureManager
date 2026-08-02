@@ -76,8 +76,8 @@ public sealed class SourceFileProvider(IDataManager dataManager, PenumbraService
         }
     }
 
-    /// <summary> A path is usable as source when it is a real file outside our own generated mod directory. </summary>
-    private static bool IsUsable(string path, string? excludeDirectory)
+    /// <summary> A path is usable as source when it is a real file outside ANY generated overlay mod. </summary>
+    private bool IsUsable(string path, string? excludeDirectory)
     {
         if (path.Length == 0 || !Path.IsPathRooted(path))
             return false;
@@ -85,7 +85,38 @@ public sealed class SourceFileProvider(IDataManager dataManager, PenumbraService
         if (excludeDirectory != null && PathUtil.IsInside(path, excludeDirectory))
             return false;
 
+        // Generated overlays are NEVER sources, no matter who asks — not just the explicitly
+        // excluded one. A vanilla-based source (e.g. the tail) records no actual file, so
+        // after a build the live resolve returns our own CONVERTED material; classifying
+        // from it flips the whole UI into the wrong mode (observed 2026-08-02: the converted
+        // tail listed as colorset gear with id-map controls and a gray untextured viewport).
+        if (IsGeneratedModFile(path))
+            return false;
+
         return File.Exists(path);
+    }
+
+    /// <summary>
+    /// Whether a path points into a DTM-generated overlay mod, by the "DTM_" directory
+    /// prefix under the Penumbra mod root (the same fallback heuristic
+    /// OverlayModManager.IsGeneratedModFile uses; a mod RENAMED away from the prefix is
+    /// handled there for texture captures — material classification accepts the narrow gap).
+    /// </summary>
+    private bool IsGeneratedModFile(string path)
+    {
+        try
+        {
+            var modRoot = penumbra.Available ? penumbra.GetModDirectory() : string.Empty;
+            if (modRoot.Length == 0 || !PathUtil.IsInside(path, modRoot))
+                return false;
+
+            var firstSegment = Path.GetRelativePath(modRoot, path).Split('/', '\\')[0];
+            return firstSegment.StartsWith("DTM_", StringComparison.OrdinalIgnoreCase);
+        }
+        catch
+        {
+            return false;
+        }
     }
 
     private static byte[]? TryRead(string path)

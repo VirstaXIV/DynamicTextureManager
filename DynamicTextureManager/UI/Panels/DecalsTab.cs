@@ -269,7 +269,7 @@ public sealed class DecalsTab(
         if (SelectedKind() is MaterialKind.Hair)
         {
             ImUtf8.TextWrapped(
-                "Hair material — the game blends your main hair color toward your highlight color per pixel, using the colors below (read live from your character)."u8);
+                "Hair-shaded piece (hair, furred tail, ears) — the game blends your main hair color toward your highlight color per pixel, using the colors below (read live from your character)."u8);
 
             var liveHair = LiveHair();
             DrawColorSwatch("Hair", config.PreviewHairColor, liveHair != null);
@@ -315,9 +315,189 @@ public sealed class DecalsTab(
         }
 
         DrawHairSection(dTexture);
+        DrawGearAnimatedSection(dTexture);
         DrawExtractionSection(dTexture);
         DrawStrayRows(dTexture);
         UpdateSlotPreview(dTexture);
+    }
+
+    /// <summary>
+    /// Gear animated-effect: converts a modern colorset material to the game's scrolling-
+    /// effect shader (vanilla gear ships with it — e6257) so the SELECTED colorset rows glow
+    /// with a moving pattern. Everything else stays the gear's own authored data; only the
+    /// glow color on the picked rows stops reacting to dyes.
+    /// </summary>
+    private void DrawGearAnimatedSection(DTexture dTexture)
+    {
+        if (SelectedKind() is not MaterialKind.ModernColorset || IndexOption() is not { } option)
+            return;
+
+        ImGui.Separator();
+        // The header must NOT share its ImGui id with the "Animated Effect" checkbox inside
+        // it — identical labels at the same id-stack level collide, and the checkbox's
+        // clicks land on the header instead (observed: the checkbox never checked).
+        if (!ImUtf8.CollapsingHeader("Animated Effect###gearAnimatedSection"u8))
+            return;
+
+        using var indent = ImRaii.PushIndent();
+
+        var edit    = dTexture.Data.AnimatedGear.GetValueOrDefault(_selectedMaterial);
+        var staged  = edit ?? new AnimatedGearEdit();
+        var changed = false;
+
+        var enabled = staged.Enabled;
+        if (ImUtf8.Checkbox("Animated Effect"u8, ref enabled))
+        {
+            staged.Enabled = enabled;
+            changed        = true;
+        }
+
+        ImUtf8.HoverTooltip(
+            "Converts this material to the game's scrolling-effect shader — the same one real gear with moving glows uses. The colorset rows picked below gain a glowing effect that drifts across them; pick rows with the eye to see what each one colors.\nTextures, colors and dyes stay the gear's own — only the glow color on the picked rows ignores dyes. The preview animates a stand-in; judge the exact look in game after a Build."u8);
+
+        if (!staged.Enabled)
+        {
+            if (changed)
+                CommitGearAnimated(dTexture, staged);
+
+            return;
+        }
+
+        // Slot picks: the game blends every texel between a pair's two halves (id G), so the
+        // glow always covers a WHOLE pair — the picker works in slots, heaviest coverage first.
+        EnsureIdStats(dTexture, option.GamePath);
+        ImUtf8.Text("Glowing Slots"u8);
+        ImUtf8.HoverTooltip(
+            "Which colorset slots carry the glow. A slot is a pair of rows the gear blends between per texel, so the glow lights the pair as a whole.\nHover an eye to highlight what that slot's halves color on your character (redraws)."u8);
+        var pairUsage = new int[ColorRowAllocator.PairCount];
+        foreach (var (row, count) in _sortedRowUsage)
+            if (row is >= 0 and < 32)
+                pairUsage[row / 2] += count;
+
+        var anySlot = false;
+        foreach (var pair in Enumerable.Range(0, ColorRowAllocator.PairCount)
+                     .OrderByDescending(p => pairUsage[p]))
+        {
+            var rowA     = pair * 2;
+            var selected = staged.Rows.Contains(rowA) || staged.Rows.Contains(rowA + 1);
+            if (pairUsage[pair] == 0 && !selected)
+                continue;
+
+            anySlot = true;
+            using var id = ImUtf8.PushId(pair);
+            if (ImUtf8.Checkbox($"Slot {pair + 1}", ref selected))
+            {
+                staged.Rows.Remove(rowA);
+                staged.Rows.Remove(rowA + 1);
+                if (selected)
+                {
+                    staged.Rows.Add(rowA);
+                    staged.Rows.Add(rowA + 1);
+                }
+
+                changed = true;
+            }
+
+            ImGui.SameLine();
+            ImUtf8.Text($"{100.0 * pairUsage[pair] / _statsTotalTexels:F1}%");
+            ImUtf8.HoverTooltip("How much of the id map renders through this slot — a rough size of the area that would glow."u8);
+            ImGui.SameLine();
+            using (ImUtf8.PushId(0))
+                DrawRowHighlightEye(option, rowA,
+                    "Highlights what this slot's A half colors while hovered (redraws your character)."u8);
+            ImGui.SameLine();
+            using (ImUtf8.PushId(1))
+                DrawRowHighlightEye(option, rowA + 1,
+                    "Highlights what this slot's B half colors while hovered (redraws your character)."u8);
+        }
+
+        if (!anySlot)
+            ImUtf8.Text("No rendered slots found on this material's id map."u8);
+
+        var effectColor = new Vector3(staged.EffectColor[0], staged.EffectColor[1], staged.EffectColor[2]);
+        if (ImUtf8.ColorEdit("Effect Color"u8, ref effectColor))
+        {
+            staged.EffectColor = [effectColor.X, effectColor.Y, effectColor.Z];
+            changed            = true;
+        }
+
+        ImUtf8.HoverTooltip("Emissive color of the moving glow on the picked rows."u8);
+
+        ImGui.SetNextItemWidth(220 * ImUtf8.GlobalScale);
+        var intensity = staged.EffectIntensity;
+        if (ImUtf8.Slider("Effect Intensity"u8, ref intensity, "%.2f"u8, 0f, 16f))
+        {
+            staged.EffectIntensity = Math.Clamp(intensity, 0f, 16f);
+            changed                = true;
+        }
+
+        ImUtf8.HoverTooltip(
+            "Brightness of the glow. Gear needs FAR more than hair: the game's own glowing gear (Neo Queen's Dress) uses over-bright emissive around 4-5× the picked color — around 4 with the default color matches it; low values are invisible on lit gear."u8);
+
+        ImGui.SetNextItemWidth(150 * ImUtf8.GlobalScale);
+        var scrollU = staged.ScrollU;
+        if (ImUtf8.Slider("##gearScrollU"u8, ref scrollU, "%.2f"u8, -1f, 1f))
+        {
+            staged.ScrollU = scrollU;
+            changed        = true;
+        }
+
+        ImGui.SameLine();
+        ImGui.SetNextItemWidth(150 * ImUtf8.GlobalScale);
+        var scrollV = staged.ScrollV;
+        if (ImUtf8.Slider("Scroll Speed U/V"u8, ref scrollV, "%.2f"u8, -1f, 1f))
+        {
+            staged.ScrollV = scrollV;
+            changed        = true;
+        }
+
+        ImUtf8.HoverTooltip("How fast the effect pattern drifts, in pattern-repeats per second for each texture direction. Negative reverses; 0/0 freezes."u8);
+
+        ImGui.SetNextItemWidth(150 * ImUtf8.GlobalScale);
+        var tilingU = staged.TilingU;
+        if (ImUtf8.Slider("##gearTilingU"u8, ref tilingU, "%.2f"u8, 0.05f, 8f))
+        {
+            staged.TilingU = Math.Clamp(tilingU, 0.01f, 16f);
+            changed        = true;
+        }
+
+        ImGui.SameLine();
+        ImGui.SetNextItemWidth(150 * ImUtf8.GlobalScale);
+        var tilingV = staged.TilingV;
+        if (ImUtf8.Slider("Pattern Tiling U/V"u8, ref tilingV, "%.2f"u8, 0.05f, 8f))
+        {
+            staged.TilingV = Math.Clamp(tilingV, 0.01f, 16f);
+            changed        = true;
+        }
+
+        ImUtf8.HoverTooltip("How often the effect pattern repeats across the texture in each direction."u8);
+
+        var pattern = (AnimatedHairBuilder.HairEffectPattern)staged.Pattern;
+        ImGui.SetNextItemWidth(220 * ImUtf8.GlobalScale);
+        using (var combo = ImUtf8.Combo("Effect Pattern"u8, AnimatedHairBuilder.PatternLabel(pattern)))
+        {
+            if (combo)
+                foreach (var candidate in Enum.GetValues<AnimatedHairBuilder.HairEffectPattern>())
+                {
+                    if (!ImUtf8.Selectable(AnimatedHairBuilder.PatternLabel(candidate), candidate == pattern)
+                     || candidate == pattern)
+                        continue;
+
+                    staged.Pattern = (int)candidate;
+                    changed        = true;
+                }
+        }
+
+        DrawPatternThumbnail(staged.Pattern);
+
+        if (changed)
+            CommitGearAnimated(dTexture, staged);
+    }
+
+    private void CommitGearAnimated(DTexture dTexture, AnimatedGearEdit staged)
+    {
+        dTexture.Data.AnimatedGear[_selectedMaterial] = staged;
+        Save(dTexture);
     }
 
     private List<TextureOption>? _materialOptionsCache;
@@ -1987,9 +2167,11 @@ public sealed class DecalsTab(
             : null;
 
         // Converted hair: the scrolling effect renders live in the viewport, over the
-        // highlight areas of every hair mesh. The stored effect color lives in the squared
-        // colorset domain — take the root (intensity folded in) so the glow's on-screen
-        // brightness matches the in-game emissive.
+        // highlight areas of every hair mesh — or over the WHOLE piece when its normal has
+        // no highlight channel (tails; same detection the build uses on the same composited
+        // buffer). The stored effect color lives in the squared colorset domain — take the
+        // root (intensity folded in) so the glow's on-screen brightness matches the in-game
+        // emissive.
         ViewportEffect? viewportEffect = null;
         if (kind is MaterialKind.Hair
          && dTexture.Data.AnimatedHair.GetValueOrDefault(_selectedMaterial) is { Enabled: true } animatedEdit)
@@ -1999,7 +2181,18 @@ public sealed class DecalsTab(
                     MathF.Sqrt(Math.Clamp(animatedEdit.EffectColor[1] * animatedEdit.EffectIntensity, 0f, 1f)),
                     MathF.Sqrt(Math.Clamp(animatedEdit.EffectColor[2] * animatedEdit.EffectIntensity, 0f, 1f))),
                 animatedEdit.ScrollU, animatedEdit.ScrollV,
-                animatedEdit.TilingU, animatedEdit.TilingV);
+                animatedEdit.TilingU, animatedEdit.TilingV,
+                EffectFullCoverage(diffuseEntry));
+        else if (kind is MaterialKind.ModernColorset
+         && dTexture.Data.AnimatedGear.GetValueOrDefault(_selectedMaterial) is { Enabled: true, Rows.Count: > 0 } gearEdit)
+            viewportEffect = new ViewportEffect(EffectPatternPixels(gearEdit.Pattern), AnimatedHairBuilder.PatternSize,
+                new Vector3(
+                    MathF.Sqrt(Math.Clamp(gearEdit.EffectColor[0] * gearEdit.EffectIntensity, 0f, 1f)),
+                    MathF.Sqrt(Math.Clamp(gearEdit.EffectColor[1] * gearEdit.EffectIntensity, 0f, 1f)),
+                    MathF.Sqrt(Math.Clamp(gearEdit.EffectColor[2] * gearEdit.EffectIntensity, 0f, 1f))),
+                gearEdit.ScrollU, gearEdit.ScrollV,
+                gearEdit.TilingU, gearEdit.TilingV,
+                EffectRows: GearEffectRows(gearEdit));
 
         // Extra meshes rendered alongside the primary — body overlay parts (nails, accents)
         // or the other hair materials of the same hair model — each with its own composited
@@ -2025,6 +2218,41 @@ public sealed class DecalsTab(
         _viewport.UpdateShading(new ViewportShading(PreviewBuffer(diffuseEntry), PreviewBuffer(indexEntry), _rowDiffuse, tone,
             HairPreviewColors(dTexture, kind), PreviewBuffer(maskEntry), viewportEffect));
         _viewport.SetOverlays(overlayEntries);
+    }
+
+    // The glowing-rows array handed to the viewport, cached so the ViewportEffect record's
+    // reference comparison stays stable across frames (a fresh array every frame would
+    // re-render continuously).
+    private (string Material, string Key, int[] Rows) _gearEffectRowsCache = (string.Empty, string.Empty, []);
+
+    private int[] GearEffectRows(AnimatedGearEdit edit)
+    {
+        var key = string.Join(',', edit.Rows);
+        if (!string.Equals(_gearEffectRowsCache.Material, _selectedMaterial, StringComparison.OrdinalIgnoreCase)
+         || _gearEffectRowsCache.Key != key)
+            // The glow covers whole pairs (see AnimatedGearBuilder) — light both halves.
+            _gearEffectRowsCache = (_selectedMaterial, key,
+                edit.Rows.SelectMany(r => new[] { r / 2 * 2, r / 2 * 2 + 1 }).Distinct().ToArray());
+
+        return _gearEffectRowsCache.Rows;
+    }
+
+    // Flat-highlight-channel detection over the composited normal, cached per entry version —
+    // the viewport's twin of the build-side coverage decision (AnimatedHairBuilder.
+    // IsFlatHighlightChannel), so the preview glows exactly where the built id map routes.
+    private (string Material, int Version, bool Flat) _effectCoverageCache = (string.Empty, -1, false);
+
+    private bool EffectFullCoverage(CompositePreviewCache.Entry? normalEntry)
+    {
+        var buffer = normalEntry?.Composited ?? normalEntry?.Pristine?.Rgba;
+        if (normalEntry == null || buffer == null)
+            return false;
+
+        if (!string.Equals(_effectCoverageCache.Material, _selectedMaterial, StringComparison.OrdinalIgnoreCase)
+         || _effectCoverageCache.Version != normalEntry.Version)
+            _effectCoverageCache = (_selectedMaterial, normalEntry.Version, AnimatedHairBuilder.IsFlatHighlightChannel(buffer));
+
+        return _effectCoverageCache.Flat;
     }
 
     private static DecodedTexture? PreviewBuffer(CompositePreviewCache.Entry? entry)
