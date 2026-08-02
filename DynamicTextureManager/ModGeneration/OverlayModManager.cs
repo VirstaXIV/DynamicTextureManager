@@ -364,8 +364,12 @@ public sealed class OverlayModManager : IService, IDisposable
     /// written. MaskGamePath is empty when the source material has no mask — the flat
     /// reference tile ships instead.
     /// </summary>
+    /// <param name="FullCoverage">
+    /// The source normal carries no highlight-blend channel (tails) — the effect covers the
+    /// whole piece instead of following highlight areas; see AnimatedHairBuilder.
+    /// </param>
     private sealed record AnimatedHairJob(string MaterialGamePath, string NormalGamePath, string MaskGamePath,
-        AnimatedHairBuilder.TexturePaths Paths, DTextures.Data.AnimatedHairEdit Edit);
+        AnimatedHairBuilder.TexturePaths Paths, DTextures.Data.AnimatedHairEdit Edit, bool FullCoverage);
 
     private sealed record BuildPlan(Dictionary<string, byte[]> MaterialFiles, List<TextureJob> TextureJobs,
         List<AnimatedHairJob> AnimatedJobs);
@@ -617,13 +621,25 @@ public sealed class OverlayModManager : IService, IDisposable
             // survives the conversion (shine edits included — they layer onto this texture).
             var maskPath = classified.FirstOrDefault(t => t.Slot == Shaders.TextureSlot.Mask).GamePath ?? string.Empty;
 
+            // Tails carry no highlight-blend channel (normal B flat zero — verified on the
+            // vanilla Miqo'te tails), so there is no area for the effect to follow: switch
+            // to full-piece coverage with the base color kept as the effect row's diffuse.
+            // Decided from the SOURCE normal — nothing edits B anymore, so the composited
+            // normal the id derives from agrees by construction.
+            var normalSource = GetOrCaptureTextureSource(dTexture, normalPath);
+            var decodedNormal = textureIO.Load(normalPath, normalSource is { Length: > 0 } ? normalSource : null, modDirectory);
+            var fullCoverage  = decodedNormal != null && AnimatedHairBuilder.IsFlatHighlightChannel(decodedNormal.Rgba);
+            if (fullCoverage)
+                DynamicTextureManager.Log.Information(
+                    $"Animated effect for {gamePath}: no highlight channel in the normal — using full-piece coverage.");
+
             var paths = AnimatedHairBuilder.PathsFor(gamePath);
-            materials[gamePath] = AnimatedHairBuilder.BuildMaterial(mtrl, edit, paths);
+            materials[gamePath] = AnimatedHairBuilder.BuildMaterial(mtrl, edit, paths, fullCoverage);
             EnsureTextureJob(normalPath);
             if (maskPath.Length > 0)
                 EnsureTextureJob(maskPath);
 
-            animated.Add(new AnimatedHairJob(gamePath, normalPath, maskPath, paths, edit));
+            animated.Add(new AnimatedHairJob(gamePath, normalPath, maskPath, paths, edit, fullCoverage));
             converted.Add(gamePath);
             return true;
         }
@@ -942,7 +958,7 @@ public sealed class OverlayModManager : IService, IDisposable
             // uncompressed — only the strand-detail normal and mask take BC7.
             await penumbra.ConvertTextureData(AnimatedHairBuilder.BuildNormalRgba(normal.Rgba), normal.Width,
                 build.PrepareFile(job.Paths.Normal), TextureType.Bc7Tex).ConfigureAwait(false);
-            await penumbra.ConvertTextureData(AnimatedHairBuilder.BuildIdRgba(normal.Rgba), normal.Width,
+            await penumbra.ConvertTextureData(AnimatedHairBuilder.BuildIdRgba(normal.Rgba, job.FullCoverage), normal.Width,
                 build.PrepareFile(job.Paths.Id), TextureType.RgbaTex).ConfigureAwait(false);
 
             // Real per-strand shading: mask derived from the composited hair mask; the flat

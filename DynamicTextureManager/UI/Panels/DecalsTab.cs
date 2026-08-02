@@ -269,7 +269,7 @@ public sealed class DecalsTab(
         if (SelectedKind() is MaterialKind.Hair)
         {
             ImUtf8.TextWrapped(
-                "Hair material — the game blends your main hair color toward your highlight color per pixel, using the colors below (read live from your character)."u8);
+                "Hair-shaded piece (hair, furred tail, ears) — the game blends your main hair color toward your highlight color per pixel, using the colors below (read live from your character)."u8);
 
             var liveHair = LiveHair();
             DrawColorSwatch("Hair", config.PreviewHairColor, liveHair != null);
@@ -319,6 +319,7 @@ public sealed class DecalsTab(
         DrawStrayRows(dTexture);
         UpdateSlotPreview(dTexture);
     }
+
 
     private List<TextureOption>? _materialOptionsCache;
     private (List<TextureOption>? Options, string Material) _materialOptionsKey;
@@ -1987,9 +1988,11 @@ public sealed class DecalsTab(
             : null;
 
         // Converted hair: the scrolling effect renders live in the viewport, over the
-        // highlight areas of every hair mesh. The stored effect color lives in the squared
-        // colorset domain — take the root (intensity folded in) so the glow's on-screen
-        // brightness matches the in-game emissive.
+        // highlight areas of every hair mesh — or over the WHOLE piece when its normal has
+        // no highlight channel (tails; same detection the build uses on the same composited
+        // buffer). The stored effect color lives in the squared colorset domain — take the
+        // root (intensity folded in) so the glow's on-screen brightness matches the in-game
+        // emissive.
         ViewportEffect? viewportEffect = null;
         if (kind is MaterialKind.Hair
          && dTexture.Data.AnimatedHair.GetValueOrDefault(_selectedMaterial) is { Enabled: true } animatedEdit)
@@ -1999,7 +2002,8 @@ public sealed class DecalsTab(
                     MathF.Sqrt(Math.Clamp(animatedEdit.EffectColor[1] * animatedEdit.EffectIntensity, 0f, 1f)),
                     MathF.Sqrt(Math.Clamp(animatedEdit.EffectColor[2] * animatedEdit.EffectIntensity, 0f, 1f))),
                 animatedEdit.ScrollU, animatedEdit.ScrollV,
-                animatedEdit.TilingU, animatedEdit.TilingV);
+                animatedEdit.TilingU, animatedEdit.TilingV,
+                EffectFullCoverage(diffuseEntry));
 
         // Extra meshes rendered alongside the primary — body overlay parts (nails, accents)
         // or the other hair materials of the same hair model — each with its own composited
@@ -2025,6 +2029,24 @@ public sealed class DecalsTab(
         _viewport.UpdateShading(new ViewportShading(PreviewBuffer(diffuseEntry), PreviewBuffer(indexEntry), _rowDiffuse, tone,
             HairPreviewColors(dTexture, kind), PreviewBuffer(maskEntry), viewportEffect));
         _viewport.SetOverlays(overlayEntries);
+    }
+
+    // Flat-highlight-channel detection over the composited normal, cached per entry version —
+    // the viewport's twin of the build-side coverage decision (AnimatedHairBuilder.
+    // IsFlatHighlightChannel), so the preview glows exactly where the built id map routes.
+    private (string Material, int Version, bool Flat) _effectCoverageCache = (string.Empty, -1, false);
+
+    private bool EffectFullCoverage(CompositePreviewCache.Entry? normalEntry)
+    {
+        var buffer = normalEntry?.Composited ?? normalEntry?.Pristine?.Rgba;
+        if (normalEntry == null || buffer == null)
+            return false;
+
+        if (!string.Equals(_effectCoverageCache.Material, _selectedMaterial, StringComparison.OrdinalIgnoreCase)
+         || _effectCoverageCache.Version != normalEntry.Version)
+            _effectCoverageCache = (_selectedMaterial, normalEntry.Version, AnimatedHairBuilder.IsFlatHighlightChannel(buffer));
+
+        return _effectCoverageCache.Flat;
     }
 
     private static DecodedTexture? PreviewBuffer(CompositePreviewCache.Entry? entry)
