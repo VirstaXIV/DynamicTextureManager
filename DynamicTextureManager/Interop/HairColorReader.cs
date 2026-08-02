@@ -13,10 +13,11 @@ namespace DynamicTextureManager.Interop;
 public readonly record struct HairColors(Vector3 Main, Vector3 Highlight, bool HighlightsEnabled);
 
 /// <summary>
-/// Reads the local player's actual configured hair and highlight colors (customize data + the
-/// game's human.cmp color table), so the 3D preview can blend the character's real colors by
-/// the hair normal map's blue channel instead of manual guesses. Non-human / not loaded /
-/// unreadable cmp all degrade to <c>false</c>; callers keep whatever colors they already have.
+/// Reads the local player's actual hair and highlight colors — primarily from the draw
+/// object's customize-parameter constant buffer (what the shader consumes, so Glamourer's
+/// advanced RGB dyes are included), falling back to customize data + the game's human.cmp
+/// color table. Non-human / not loaded / unreadable all degrade to <c>false</c>; callers
+/// keep whatever colors they already have.
 /// </summary>
 /// <remarks>
 /// Follows <see cref="SkinColorReader"/>'s hard rule: never reinterpret <see cref="CmpData"/>
@@ -50,6 +51,39 @@ public sealed unsafe class HairColorReader(IObjectTable objects, CmpFileCache cm
             var hairIndex      = customize.Get(CustomizeIndex.HairColor).Value;
             var highlightIndex = customize.Get(CustomizeIndex.HighlightsColor).Value;
             var highlightsOn   = customize.Get(CustomizeIndex.Highlights).Value != 0;
+
+            // Preferred source: the draw object's customize-parameter constant buffer — the
+            // exact colors the shader consumes, INCLUDING Glamourer's advanced (RGB) dyes,
+            // which never touch the customize bytes and are invisible to the palette lookup
+            // below. Buffer values live in the squared domain; take the root back to the
+            // palette domain this type promises. NOT trusted blindly: an all-zero read means
+            // the buffer wasn't usable on this setup (real palette colors are never exact
+            // zero) — fall through to the palette instead of reporting black hair.
+            var cbuffer = model.AsHuman->CustomizeParameterCBuffer;
+            if (cbuffer != null)
+            {
+                var parameters = cbuffer->TryGetBuffer<FFXIVClientStructs.FFXIV.Shader.CustomizeParameter>();
+                if (parameters.Length > 0)
+                {
+                    var bufMain = parameters[0].MainColor;
+                    var bufMesh = parameters[0].MeshColor;
+                    DynamicTextureManager.Log.Verbose(
+                        $"Hair cbuffer read: main=({bufMain.X:F3},{bufMain.Y:F3},{bufMain.Z:F3}) mesh=({bufMesh.X:F3},{bufMesh.Y:F3},{bufMesh.Z:F3})");
+                    if (bufMain.X + bufMain.Y + bufMain.Z + bufMesh.X + bufMesh.Y + bufMesh.Z > 0.001f)
+                    {
+                        result = new HairColors(SqrtColor(bufMain), SqrtColor(bufMesh), highlightsOn);
+                        return true;
+                    }
+                }
+                else
+                {
+                    DynamicTextureManager.Log.Verbose("Hair cbuffer read: empty buffer — using the palette.");
+                }
+            }
+            else
+            {
+                DynamicTextureManager.Log.Verbose("Hair cbuffer read: no buffer — using the palette.");
+            }
 
             // Same validation as SkinColorReader — guard live customize data before any value
             // becomes a file offset.
@@ -86,4 +120,8 @@ public sealed unsafe class HairColorReader(IObjectTable objects, CmpFileCache cm
             return false;
         }
     }
+
+    private static Vector3 SqrtColor(FFXIVClientStructs.FFXIV.Common.Math.Vector3 squared)
+        => new(MathF.Sqrt(Math.Clamp(squared.X, 0f, 1f)), MathF.Sqrt(Math.Clamp(squared.Y, 0f, 1f)),
+            MathF.Sqrt(Math.Clamp(squared.Z, 0f, 1f)));
 }
