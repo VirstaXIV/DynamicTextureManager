@@ -38,12 +38,14 @@ public sealed class OverlayModManager : IService, IDisposable
     private readonly Shaders.ShaderHandlerRegistry shaderHandlers;
     private readonly ModelUvReader         uvReader;
     private readonly Interop.HairColorReader hairColors;
+    private readonly DecalLibrary          decals;
 
     public OverlayModManager(PenumbraService penumbra, SourceFileProvider sourceFiles, ModWriter modWriter, SaveService saveService,
         Configuration config, DTextureStorage storage, DTextureChanged dTextureChanged, IFramework framework, TextureIO textureIO,
         TextureCompositor compositor, Shaders.ShaderHandlerRegistry shaderHandlers, ModelUvReader uvReader,
-        Interop.HairColorReader hairColors)
+        Interop.HairColorReader hairColors, DecalLibrary decals)
     {
+        this.decals = decals;
         this.penumbra        = penumbra;
         this.sourceFiles     = sourceFiles;
         this.modWriter       = modWriter;
@@ -364,8 +366,12 @@ public sealed class OverlayModManager : IService, IDisposable
     /// written. MaskGamePath is empty when the source material has no mask — the flat
     /// reference tile ships instead.
     /// </summary>
+    /// <param name="FullCoverage">
+    /// The source normal carries no highlight-blend channel (tails) — the effect covers the
+    /// whole piece instead of following highlight areas; see AnimatedHairBuilder.
+    /// </param>
     private sealed record AnimatedHairJob(string MaterialGamePath, string NormalGamePath, string MaskGamePath,
-        AnimatedHairBuilder.TexturePaths Paths, DTextures.Data.AnimatedHairEdit Edit);
+        AnimatedHairBuilder.TexturePaths Paths, DTextures.Data.AnimatedHairEdit Edit, bool FullCoverage);
 
     private sealed record BuildPlan(Dictionary<string, byte[]> MaterialFiles, List<TextureJob> TextureJobs,
         List<AnimatedHairJob> AnimatedJobs);
@@ -617,13 +623,25 @@ public sealed class OverlayModManager : IService, IDisposable
             // survives the conversion (shine edits included — they layer onto this texture).
             var maskPath = classified.FirstOrDefault(t => t.Slot == Shaders.TextureSlot.Mask).GamePath ?? string.Empty;
 
+            // Tails carry no highlight-blend channel (normal B flat zero — verified on the
+            // vanilla Miqo'te tails), so there is no area for the effect to follow: switch
+            // to full-piece coverage with the base color kept as the effect row's diffuse.
+            // Decided from the SOURCE normal — nothing edits B anymore, so the composited
+            // normal the id derives from agrees by construction.
+            var normalSource = GetOrCaptureTextureSource(dTexture, normalPath);
+            var decodedNormal = textureIO.Load(normalPath, normalSource is { Length: > 0 } ? normalSource : null, modDirectory);
+            var fullCoverage  = decodedNormal != null && AnimatedHairBuilder.IsFlatHighlightChannel(decodedNormal.Rgba);
+            if (fullCoverage)
+                DynamicTextureManager.Log.Information(
+                    $"Animated effect for {gamePath}: no highlight channel in the normal — using full-piece coverage.");
+
             var paths = AnimatedHairBuilder.PathsFor(gamePath);
-            materials[gamePath] = AnimatedHairBuilder.BuildMaterial(mtrl, edit, paths);
+            materials[gamePath] = AnimatedHairBuilder.BuildMaterial(mtrl, edit, paths, fullCoverage);
             EnsureTextureJob(normalPath);
             if (maskPath.Length > 0)
                 EnsureTextureJob(maskPath);
 
-            animated.Add(new AnimatedHairJob(gamePath, normalPath, maskPath, paths, edit));
+            animated.Add(new AnimatedHairJob(gamePath, normalPath, maskPath, paths, edit, fullCoverage));
             converted.Add(gamePath);
             return true;
         }
@@ -942,7 +960,7 @@ public sealed class OverlayModManager : IService, IDisposable
             // uncompressed — only the strand-detail normal and mask take BC7.
             await penumbra.ConvertTextureData(AnimatedHairBuilder.BuildNormalRgba(normal.Rgba), normal.Width,
                 build.PrepareFile(job.Paths.Normal), TextureType.Bc7Tex).ConfigureAwait(false);
-            await penumbra.ConvertTextureData(AnimatedHairBuilder.BuildIdRgba(normal.Rgba), normal.Width,
+            await penumbra.ConvertTextureData(AnimatedHairBuilder.BuildIdRgba(normal.Rgba, job.FullCoverage), normal.Width,
                 build.PrepareFile(job.Paths.Id), TextureType.RgbaTex).ConfigureAwait(false);
 
             // Real per-strand shading: mask derived from the composited hair mask; the flat
@@ -969,27 +987,46 @@ public sealed class OverlayModManager : IService, IDisposable
     }
 
     /// <summary>
-    /// The black/white pattern the effect scrolls: the selected built-in pattern, or a legacy
-    /// custom image when a save still carries one (the material references the effect texture
+    /// The black/white pattern the effect scrolls: a user-picked custom image, the game's own
+    /// sparkle texture (loaded from the player's files — never shipped with the plugin), or
+    /// the selected built-in pattern (the material references the effect texture
     /// unconditionally, so something always ships).
     /// </summary>
-    private static (byte[] Rgba, int Width) LoadEffectImage(DTextures.Data.AnimatedHairEdit edit)
+    private (byte[] Rgba, int Width) LoadEffectImage(DTextures.Data.AnimatedHairEdit edit)
     {
-        if (edit.EffectImagePath.Length > 0)
-            try
-            {
-                using var image = SixLabors.ImageSharp.Image.Load<SixLabors.ImageSharp.PixelFormats.Rgba32>(edit.EffectImagePath);
-                var pixels = new byte[image.Width * image.Height * 4];
-                image.CopyPixelDataTo(pixels);
-                return (pixels, image.Width);
-            }
-            catch (Exception ex)
-            {
-                DynamicTextureManager.Log.Warning($"Could not load effect image \"{edit.EffectImagePath}\" ({ex.Message}) — using the built-in pattern.");
-            }
+        if (edit.EffectLibraryId != Guid.Empty)
+        {
+            var file = decals.EffectFilePath(edit.EffectLibraryId);
+            if (File.Exists(file))
+                try
+                {
+                    using var image = SixLabors.ImageSharp.Image.Load<SixLabors.ImageSharp.PixelFormats.Rgba32>(file);
+                    var pixels = new byte[image.Width * image.Height * 4];
+                    image.CopyPixelDataTo(pixels);
+                    return (pixels, image.Width);
+                }
+                catch (Exception ex)
+                {
+                    DynamicTextureManager.Log.Warning($"Could not load library effect pattern {edit.EffectLibraryId} ({ex.Message}) — using the built-in pattern.");
+                }
+            else
+                DynamicTextureManager.Log.Warning($"Effect pattern {edit.EffectLibraryId} is missing from the library — using the built-in pattern.");
+        }
 
-        return (AnimatedHairBuilder.GeneratePattern((AnimatedHairBuilder.HairEffectPattern)edit.Pattern),
-            AnimatedHairBuilder.PatternSize);
+        if ((AnimatedHairBuilder.HairEffectPattern)edit.Pattern is AnimatedHairBuilder.HairEffectPattern.DressGlitter)
+        {
+            var glitter = textureIO.Load(AnimatedHairBuilder.DressGlitterTexPath, null, null);
+            if (glitter != null)
+                return (glitter.Rgba, glitter.Width);
+
+            DynamicTextureManager.Log.Warning("Could not load the game's glitter texture — using the built-in Shimmer pattern.");
+        }
+
+        var pattern = (AnimatedHairBuilder.HairEffectPattern)edit.Pattern;
+        if (pattern is AnimatedHairBuilder.HairEffectPattern.DressGlitter)
+            pattern = AnimatedHairBuilder.HairEffectPattern.Shimmer;
+        var dimension = AnimatedHairBuilder.PatternDimension(pattern);
+        return (AnimatedHairBuilder.GeneratePattern(pattern, dimension), dimension);
     }
 
     /// <summary> Delete the generated mod of a dTexture from Penumbra and disk. </summary>

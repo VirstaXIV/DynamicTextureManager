@@ -176,6 +176,7 @@ public sealed class DecalsTab(
         _viewport.Dispose();
         _texturePreviewWrap?.Dispose();
         _patternThumbnail.Wrap?.Dispose();
+        DisposeGeneratedWraps();
     }
 
     /// <summary> The editing controls (left column): material selection, decal library, layers, per-kind sections. </summary>
@@ -269,7 +270,7 @@ public sealed class DecalsTab(
         if (SelectedKind() is MaterialKind.Hair)
         {
             ImUtf8.TextWrapped(
-                "Hair material — the game blends your main hair color toward your highlight color per pixel, using the colors below (read live from your character)."u8);
+                "Hair-shaded piece (hair, furred tail, ears) — the game blends your main hair color toward your highlight color per pixel, using the colors below (read live from your character)."u8);
 
             var liveHair = LiveHair();
             DrawColorSwatch("Hair", config.PreviewHairColor, liveHair != null);
@@ -319,6 +320,7 @@ public sealed class DecalsTab(
         DrawStrayRows(dTexture);
         UpdateSlotPreview(dTexture);
     }
+
 
     private List<TextureOption>? _materialOptionsCache;
     private (List<TextureOption>? Options, string Material) _materialOptionsKey;
@@ -1882,17 +1884,83 @@ public sealed class DecalsTab(
     private readonly record struct ShadingKey(int DiffuseVersion, int IndexVersion, int RowVersion, bool Placement, uint SkinTone,
         uint HairColor, uint HairHighlight, int HairMaskVersion, int OverlayVersionHash, ViewportEffect? Effect);
 
-    // Effect pattern pixel buffers for the live viewport effect, cached per built-in pattern —
-    // ViewportEffect compares the array by reference, so the same pattern must return the
-    // same instance.
-    private readonly Dictionary<int, byte[]> _effectPatterns = [];
+    // Effect pattern pixels for the live viewport effect and thumbnails, cached per
+    // (pattern, library entry) — ViewportEffect compares the array by reference, so the same
+    // selection must return the same instance. The viewport's effect sampler expects a
+    // SQUARE pattern, so image-based sources (library import, the game's glitter texture)
+    // are resampled to a square here; the UV mapping is identical either way (the shader
+    // tiles 0..1 regardless of texel dimensions), the build ships the original data.
+    private (int Pattern, Guid LibraryId, byte[] Pixels, int Size) _effectPatternCache = (-1, Guid.Empty, [], 0);
 
-    private byte[] EffectPatternPixels(int pattern)
+    private (byte[] Pixels, int Size) EffectPatternPixels(AnimatedHairEdit edit)
     {
-        if (!_effectPatterns.TryGetValue(pattern, out var pixels))
-            _effectPatterns[pattern] = pixels =
-                AnimatedHairBuilder.GeneratePattern((AnimatedHairBuilder.HairEffectPattern)pattern);
-        return pixels;
+        if (_effectPatternCache.Pattern == edit.Pattern
+         && _effectPatternCache.LibraryId == edit.EffectLibraryId
+         && _effectPatternCache.Pixels.Length > 0)
+            return (_effectPatternCache.Pixels, _effectPatternCache.Size);
+
+        byte[]? source = null;
+        var sourceW = 0;
+        var sourceH = 0;
+        if (edit.EffectLibraryId != Guid.Empty)
+            try
+            {
+                var file = decals.EffectFilePath(edit.EffectLibraryId);
+                if (File.Exists(file))
+                {
+                    using var image = Image.Load<Rgba32>(file);
+                    source  = new byte[image.Width * image.Height * 4];
+                    sourceW = image.Width;
+                    sourceH = image.Height;
+                    image.CopyPixelDataTo(source);
+                }
+            }
+            catch (Exception ex)
+            {
+                DynamicTextureManager.Log.Warning($"Could not load library effect pattern {edit.EffectLibraryId}: {ex.Message}");
+            }
+        else if ((AnimatedHairBuilder.HairEffectPattern)edit.Pattern is AnimatedHairBuilder.HairEffectPattern.DressGlitter
+         && textureIO.Load(AnimatedHairBuilder.DressGlitterTexPath, null, null) is { } glitter)
+        {
+            source  = glitter.Rgba;
+            sourceW = glitter.Width;
+            sourceH = glitter.Height;
+        }
+
+        byte[] pixels;
+        int    size;
+        if (source != null)
+        {
+            size   = AnimatedHairBuilder.PatternSize;
+            pixels = ResampleSquare(source, sourceW, sourceH, size);
+        }
+        else
+        {
+            var pattern = (AnimatedHairBuilder.HairEffectPattern)edit.Pattern;
+            if (pattern is AnimatedHairBuilder.HairEffectPattern.DressGlitter)
+                pattern = AnimatedHairBuilder.HairEffectPattern.Shimmer;
+            size   = AnimatedHairBuilder.PatternDimension(pattern);
+            pixels = AnimatedHairBuilder.GeneratePattern(pattern, size);
+        }
+
+        _effectPatternCache = (edit.Pattern, edit.EffectLibraryId, pixels, size);
+        return (pixels, size);
+    }
+
+    private static byte[] ResampleSquare(byte[] rgba, int width, int height, int size)
+    {
+        var result = new byte[size * size * 4];
+        for (var y = 0; y < size; ++y)
+        {
+            var sy = Math.Min(height - 1, y * height / size);
+            for (var x = 0; x < size; ++x)
+            {
+                var sx = Math.Min(width - 1, x * width / size);
+                Array.Copy(rgba, (sy * width + sx) * 4, result, (y * size + x) * 4, 4);
+            }
+        }
+
+        return result;
     }
 
     private Vector3[]?  _rowDiffuse;
@@ -1987,19 +2055,25 @@ public sealed class DecalsTab(
             : null;
 
         // Converted hair: the scrolling effect renders live in the viewport, over the
-        // highlight areas of every hair mesh. The stored effect color lives in the squared
-        // colorset domain — take the root (intensity folded in) so the glow's on-screen
-        // brightness matches the in-game emissive.
+        // highlight areas of every hair mesh — or over the WHOLE piece when its normal has
+        // no highlight channel (tails; same detection the build uses on the same composited
+        // buffer). The stored effect color lives in the squared colorset domain — take the
+        // root (intensity folded in) so the glow's on-screen brightness matches the in-game
+        // emissive.
         ViewportEffect? viewportEffect = null;
         if (kind is MaterialKind.Hair
          && dTexture.Data.AnimatedHair.GetValueOrDefault(_selectedMaterial) is { Enabled: true } animatedEdit)
-            viewportEffect = new ViewportEffect(EffectPatternPixels(animatedEdit.Pattern), AnimatedHairBuilder.PatternSize,
+        {
+            var (patternPixels, patternSize) = EffectPatternPixels(animatedEdit);
+            viewportEffect = new ViewportEffect(patternPixels, patternSize,
                 new Vector3(
                     MathF.Sqrt(Math.Clamp(animatedEdit.EffectColor[0] * animatedEdit.EffectIntensity, 0f, 1f)),
                     MathF.Sqrt(Math.Clamp(animatedEdit.EffectColor[1] * animatedEdit.EffectIntensity, 0f, 1f)),
                     MathF.Sqrt(Math.Clamp(animatedEdit.EffectColor[2] * animatedEdit.EffectIntensity, 0f, 1f))),
                 animatedEdit.ScrollU, animatedEdit.ScrollV,
-                animatedEdit.TilingU, animatedEdit.TilingV);
+                animatedEdit.TilingU, animatedEdit.TilingV,
+                EffectFullCoverage(diffuseEntry));
+        }
 
         // Extra meshes rendered alongside the primary — body overlay parts (nails, accents)
         // or the other hair materials of the same hair model — each with its own composited
@@ -2025,6 +2099,24 @@ public sealed class DecalsTab(
         _viewport.UpdateShading(new ViewportShading(PreviewBuffer(diffuseEntry), PreviewBuffer(indexEntry), _rowDiffuse, tone,
             HairPreviewColors(dTexture, kind), PreviewBuffer(maskEntry), viewportEffect));
         _viewport.SetOverlays(overlayEntries);
+    }
+
+    // Flat-highlight-channel detection over the composited normal, cached per entry version —
+    // the viewport's twin of the build-side coverage decision (AnimatedHairBuilder.
+    // IsFlatHighlightChannel), so the preview glows exactly where the built id map routes.
+    private (string Material, int Version, bool Flat) _effectCoverageCache = (string.Empty, -1, false);
+
+    private bool EffectFullCoverage(CompositePreviewCache.Entry? normalEntry)
+    {
+        var buffer = normalEntry?.Composited ?? normalEntry?.Pristine?.Rgba;
+        if (normalEntry == null || buffer == null)
+            return false;
+
+        if (!string.Equals(_effectCoverageCache.Material, _selectedMaterial, StringComparison.OrdinalIgnoreCase)
+         || _effectCoverageCache.Version != normalEntry.Version)
+            _effectCoverageCache = (_selectedMaterial, normalEntry.Version, AnimatedHairBuilder.IsFlatHighlightChannel(buffer));
+
+        return _effectCoverageCache.Flat;
     }
 
     private static DecodedTexture? PreviewBuffer(CompositePreviewCache.Entry? entry)
@@ -2168,17 +2260,39 @@ public sealed class DecalsTab(
 
     #region Texture preview
 
-    private string               _previewTexturePath = string.Empty;
-    private bool                 _previewShowSource;
+    private string               _previewTexturePath = string.Empty; // a texture game path, or a "gen:" pseudo-path
     private bool                 _previewRawView;
+    private float                _previewZoom   = 1f;
+    private Vector2              _previewCenter = new(0.5f, 0.5f);
     private IDalamudTextureWrap? _texturePreviewWrap;
     private (string Path, int Version, bool Source, bool Colors, uint HairMain, uint HairHighlight) _texturePreviewKey =
         (string.Empty, -1, false, false, 0u, 0u);
 
+    // Generated companion previews of the animated conversion — what the build ACTUALLY
+    // ships for converted hair, derived from the same composited buffers the build uses.
+    private static readonly string[] GeneratedIds    = ["gen:norm", "gen:id", "gen:mask", "gen:fx"];
+    private static readonly string[] GeneratedLabels = ["Converted Normal", "Generated ID Map", "Converted Mask", "Effect Pattern"];
+
+    private (string Material, int NormalVersion, int MaskVersion, int Pattern, bool FullCoverage) _generatedKey =
+        (string.Empty, -1, -1, -1, false);
+    private readonly IDalamudTextureWrap?[] _generatedWraps = new IDalamudTextureWrap?[4];
+    private readonly (int W, int H)[]       _generatedSizes = new (int, int)[4];
+
+    private void DisposeGeneratedWraps()
+    {
+        for (var i = 0; i < _generatedWraps.Length; ++i)
+        {
+            _generatedWraps[i]?.Dispose();
+            _generatedWraps[i] = null;
+        }
+    }
+
     /// <summary>
-    /// The active material's textures rendered flat above the 3D preview, always from the same
-    /// composited preview-cache entries the viewport and the build use — so every slider change
-    /// is visible directly on the texture, not only on the model.
+    /// The active material's textures as a clickable thumbnail strip plus one zoomable main
+    /// view, always fed from the same composited preview-cache entries the viewport and the
+    /// build use. With an enabled animated conversion the strip gains the GENERATED
+    /// companions (converted normal, id map, mask, effect pattern) — the files the build
+    /// actually ships, which look nothing like the source hair textures.
     /// </summary>
     private void DrawTexturePreview(DTexture dTexture)
     {
@@ -2186,31 +2300,99 @@ public sealed class DecalsTab(
         if (options.Count == 0)
             return;
 
-        var current = options.Find(o => string.Equals(o.GamePath, _previewTexturePath, StringComparison.OrdinalIgnoreCase))
-         ?? DefaultTargetOption() ?? options[0];
+        var animatedEdit = SelectedKind() is MaterialKind.Hair
+         && dTexture.Data.AnimatedHair.GetValueOrDefault(_selectedMaterial) is { Enabled: true } a
+            ? a
+            : null;
 
-        foreach (var (option, idx) in options.WithIndex())
+        var generatedIndex = animatedEdit != null ? Array.IndexOf(GeneratedIds, _previewTexturePath) : -1;
+        var current = generatedIndex >= 0
+            ? null
+            : options.Find(o => string.Equals(o.GamePath, _previewTexturePath, StringComparison.OrdinalIgnoreCase))
+             ?? DefaultTargetOption() ?? options[0];
+
+        // --- thumbnail strip: the material's textures, then the generated companions.
+        void SelectPreview(string id)
         {
-            if (idx > 0)
-                ImGui.SameLine();
-            using var id     = ImUtf8.PushId(idx);
-            var       active = ReferenceEquals(option, current);
-            using (ImRaii.PushColor(ImGuiCol.Button, ImGui.GetColorU32(ImGuiCol.ButtonActive), active))
-            {
-                if (ImUtf8.SmallButton(SlotButtonLabel(option)))
-                    _previewTexturePath = option.GamePath;
-            }
-
-            ImUtf8.HoverTooltip($"Show this texture.\n{option.GamePath}");
+            _previewTexturePath = id;
+            _previewZoom        = 1f;
+            _previewCenter      = new Vector2(0.5f, 0.5f);
         }
 
-        ImGui.SameLine();
-        if (ImUtf8.SmallButton(_previewShowSource ? "Showing: Source"u8 : "Showing: Edited"u8))
-            _previewShowSource = !_previewShowSource;
-        ImUtf8.HoverTooltip("Toggle between the untouched source texture and the texture with your edits applied."u8);
+        void Thumbnail(string id, string label, IDalamudTextureWrap? wrap, int width, int height, bool selected)
+        {
+            var thumbH = 44f * ImUtf8.GlobalScale;
+            var thumbW = Math.Clamp(height > 0 ? thumbH * width / height : thumbH, thumbH, thumbH * 2.2f);
+            using var pushed = ImUtf8.PushId(id);
+            var pos  = ImGui.GetCursorScreenPos();
+            var size = new Vector2(thumbW, thumbH);
+            if (ImUtf8.InvisibleButton("##thumb"u8, size))
+                SelectPreview(id);
 
-        // Hair normals are unreadable as raw data — default to rendering them as the two hair
-        // colors blended by the highlight channel, exactly like the 3D preview does.
+            var draw = ImGui.GetWindowDrawList();
+            draw.AddRectFilled(pos, pos + size, 0xFF181818);
+            if (wrap != null)
+                draw.AddImage(wrap.Handle, pos, pos + size);
+            draw.AddRect(pos, pos + size, selected ? 0xFF53D7FF : 0x40FFFFFF, 0f, ImDrawFlags.None, selected ? 2f : 1f);
+            if (ImGui.IsItemHovered())
+                ImUtf8.HoverTooltip($"{label}{(wrap == null ? " (loading...)" : $"  {width}x{height}")}");
+            ImGui.SameLine(0f, 4f * ImUtf8.GlobalScale);
+        }
+
+        foreach (var option in options)
+        {
+            var entry = previewCache.Get(dTexture, option.GamePath, null);
+            Thumbnail(option.GamePath, $"{SlotButtonLabel(option)}\n{option.GamePath}",
+                entry.CompositedWrap ?? entry.PristineWrap, entry.Pristine?.Width ?? 0, entry.Pristine?.Height ?? 0,
+                current != null && ReferenceEquals(option, current));
+        }
+
+        if (animatedEdit != null)
+        {
+            EnsureGeneratedPreviews(dTexture, animatedEdit);
+            ImUtf8.Text("|"u8);
+            ImUtf8.HoverTooltip("Right of the bar: the GENERATED files the animated conversion ships — these replace the source textures in game."u8);
+            ImGui.SameLine(0f, 4f * ImUtf8.GlobalScale);
+            for (var i = 0; i < GeneratedIds.Length; ++i)
+            {
+                if (_generatedWraps[i] == null)
+                    continue;
+
+                Thumbnail(GeneratedIds[i], $"{GeneratedLabels[i]} (generated by the Animated Effect build)",
+                    _generatedWraps[i], _generatedSizes[i].W, _generatedSizes[i].H, generatedIndex == i);
+            }
+        }
+
+        ImGui.NewLine();
+
+        // --- header row of the main view: label, compare, hair-color view, zoom state.
+        if (generatedIndex >= 0)
+        {
+            DrawGeneratedMainView(generatedIndex);
+            return;
+        }
+
+        var entryMain = previewCache.Get(dTexture, current!.GamePath, null);
+        var pristine  = entryMain.Pristine;
+        if (pristine == null)
+        {
+            ImUtf8.Text("(loading texture...)"u8);
+            return;
+        }
+
+        ImUtf8.Text($"{SlotButtonLabel(current)}  {pristine.Width}x{pristine.Height}");
+
+        var showSource = false;
+        if (entryMain.Composited != null)
+        {
+            ImGui.SameLine();
+            ImUtf8.Button("Hold: Source"u8);
+            showSource = ImGui.IsItemActive();
+            ImUtf8.HoverTooltip("Hold to see the untouched source texture — release to return to your edited version. Flipping back and forth makes the changes pop."u8);
+        }
+
+        // Hair normals are unreadable as raw data — default to rendering them as the two
+        // hair colors blended by the highlight channel, exactly like the 3D preview does.
         var colorView = current is { Kind: MaterialKind.Hair, Slot: TextureSlot.Normal } && !_previewRawView;
         if (current is { Kind: MaterialKind.Hair, Slot: TextureSlot.Normal })
         {
@@ -2221,38 +2403,11 @@ public sealed class DecalsTab(
                 "Hair Colors renders the highlight channel as your preview hair/highlight colors — what the hair will actually look like.\nRaw Texture shows the normal map data itself."u8);
         }
 
-        // The escape hatch formerly on the Textures tab: drop a stuck source capture and
-        // re-resolve from the currently active mods. Extracted decals rebase through the
-        // Manage Colorset section instead.
-        var hasExtractions = dTexture.Data.Textures.GetValueOrDefault(current.GamePath)?
-                .OfType<DecalLayer>().Any(l => l is { Extracted: true, PreExtractionSource: not null })
-         ?? false;
-        if (!hasExtractions)
-        {
-            ImGui.SameLine();
-            if (ImUtf8.SmallButton("Reload Source"u8))
-            {
-                dTexture.Data.TextureSourcePaths.Remove(current.GamePath);
-                previewCache.Invalidate(dTexture.Identifier, current.GamePath);
-                overlayMods.GetOrCaptureTextureSource(dTexture, current.GamePath);
-                saveService.QueueSave(dTexture);
-            }
+        DrawZoomIndicator();
 
-            ImUtf8.HoverTooltip(
-                "Drop the stored source capture and resolve this texture again from the currently active mods.\nUse this when the shown texture is not the one your mods actually provide."u8);
-        }
-
-        var entry    = previewCache.Get(dTexture, current.GamePath, null);
-        var pristine = entry.Pristine;
-        if (pristine == null)
-        {
-            ImUtf8.Text("(loading texture...)"u8);
-            return;
-        }
-
-        var rgba = !_previewShowSource && entry.Composited != null ? entry.Composited : pristine.Rgba;
+        var rgba = !showSource && entryMain.Composited != null ? entryMain.Composited : pristine.Rgba;
         var (hairMain, hairHighlight) = colorView ? HairPreviewColorsPacked(dTexture, MaterialKind.Hair) : (0u, 0u);
-        var key = (current.GamePath, entry.Version, _previewShowSource, colorView, hairMain, hairHighlight);
+        var key = (current.GamePath, entryMain.Version, showSource, colorView, hairMain, hairHighlight);
         if (_texturePreviewWrap == null || key != _texturePreviewKey)
         {
             if (colorView)
@@ -2283,16 +2438,136 @@ public sealed class DecalsTab(
             _texturePreviewKey = key;
         }
 
-        var avail  = ImGui.GetContentRegionAvail();
-        var maxH   = MathF.Max(160f * ImUtf8.GlobalScale, avail.Y * 0.4f);
-        var scale  = MathF.Min(MathF.Max(avail.X, 1f) / pristine.Width, maxH / pristine.Height);
-        var size   = new Vector2(pristine.Width * scale, pristine.Height * scale);
-        ImGui.Image(_texturePreviewWrap.Handle, size);
-        if (ImGui.IsItemHovered())
-            ImUtf8.HoverTooltip($"{current.GamePath}\n{pristine.Width}x{pristine.Height}");
+        DrawZoomableImage(_texturePreviewWrap, pristine.Width, pristine.Height, current.GamePath);
     }
 
-    /// <summary> Short slot label for the texture-picker buttons; hair renames the channels to what they do. </summary>
+    private void DrawGeneratedMainView(int index)
+    {
+        var wrap = _generatedWraps[index];
+        if (wrap == null)
+        {
+            ImUtf8.Text("(generating...)"u8);
+            return;
+        }
+
+        ImUtf8.Text($"{GeneratedLabels[index]}  {_generatedSizes[index].W}x{_generatedSizes[index].H}  (as built)");
+        DrawZoomIndicator();
+        DrawZoomableImage(wrap, _generatedSizes[index].W, _generatedSizes[index].H,
+            "Generated by the Animated Effect conversion — this file ships in the built mod.");
+    }
+
+    private void DrawZoomIndicator()
+    {
+        if (_previewZoom <= 1.01f)
+            return;
+
+        ImGui.SameLine();
+        ImUtf8.Text($"{_previewZoom:F1}x");
+        ImGui.SameLine();
+        if (ImUtf8.SmallButton("Reset Zoom"u8))
+        {
+            _previewZoom   = 1f;
+            _previewCenter = new Vector2(0.5f, 0.5f);
+        }
+    }
+
+    /// <summary>
+    /// The main texture view: wheel zooms at the cursor, left-drag pans while zoomed,
+    /// double-click resets — the zoom window is carried in UV space so any wrap works.
+    /// </summary>
+    private void DrawZoomableImage(IDalamudTextureWrap wrap, int texWidth, int texHeight, string tooltip)
+    {
+        var avail = ImGui.GetContentRegionAvail();
+        var maxH  = MathF.Max(180f * ImUtf8.GlobalScale, avail.Y * 0.45f);
+        var scale = MathF.Min(MathF.Max(avail.X, 1f) / texWidth, maxH / texHeight);
+        var size  = new Vector2(texWidth * scale, texHeight * scale);
+
+        var span = 1f / _previewZoom;
+        _previewCenter = new Vector2(
+            Math.Clamp(_previewCenter.X, span / 2f, 1f - span / 2f),
+            Math.Clamp(_previewCenter.Y, span / 2f, 1f - span / 2f));
+        var uv0 = _previewCenter - new Vector2(span / 2f);
+        var uv1 = _previewCenter + new Vector2(span / 2f);
+
+        var pos = ImGui.GetCursorScreenPos();
+        ImUtf8.InvisibleButton("##texZoom"u8, size);
+        ImGui.GetWindowDrawList().AddImage(wrap.Handle, pos, pos + size, uv0, uv1);
+
+        var io = ImGui.GetIO();
+        if (ImGui.IsItemHovered())
+        {
+            if (io.MouseWheel != 0f)
+            {
+                var mouseFrac    = (ImGui.GetMousePos() - pos) / size;
+                var uvUnderMouse = uv0 + mouseFrac * (uv1 - uv0);
+                _previewZoom = Math.Clamp(_previewZoom * (1f + io.MouseWheel * 0.2f), 1f, 16f);
+                var newSpan = 1f / _previewZoom;
+                _previewCenter = uvUnderMouse - (mouseFrac - new Vector2(0.5f, 0.5f)) * newSpan;
+            }
+
+            if (ImGui.IsMouseDoubleClicked(ImGuiMouseButton.Left))
+            {
+                _previewZoom   = 1f;
+                _previewCenter = new Vector2(0.5f, 0.5f);
+            }
+
+            ImUtf8.HoverTooltip($"{tooltip}\nWheel: zoom at the cursor.  Drag: pan while zoomed.  Double-click: reset.");
+        }
+
+        if (ImGui.IsItemActive() && _previewZoom > 1f && io.MouseDelta != Vector2.Zero)
+            _previewCenter -= io.MouseDelta / size * (uv1 - uv0);
+    }
+
+    /// <summary>
+    /// (Re)build the generated-companion preview wraps when their inputs changed: the
+    /// converted normal (cutout moved into B), the id map (highlight routing, or full
+    /// coverage for tails), the character-family mask and the effect pattern — each the
+    /// exact transform the build applies to the same composited buffers.
+    /// </summary>
+    private void EnsureGeneratedPreviews(DTexture dTexture, AnimatedHairEdit animated)
+    {
+        var normalOption = NormalOption();
+        var maskOption   = MaterialOptions().Find(o => o.Slot is TextureSlot.Mask);
+        var normalEntry  = normalOption == null ? null : previewCache.Get(dTexture, normalOption.GamePath, null);
+        var maskEntry    = maskOption == null ? null : previewCache.Get(dTexture, maskOption.GamePath, null);
+        if (normalEntry?.Pristine == null)
+            return;
+
+        var fullCoverage = EffectFullCoverage(normalEntry);
+        var key = (_selectedMaterial, normalEntry.Version, maskEntry?.Version ?? -1,
+            HashCode.Combine(animated.Pattern, animated.EffectLibraryId), fullCoverage);
+        if (key == _generatedKey)
+            return;
+
+        _generatedKey = key;
+        DisposeGeneratedWraps();
+
+        var normalRgba = normalEntry.Composited ?? normalEntry.Pristine.Rgba;
+        var nw = normalEntry.Pristine.Width;
+        var nh = normalEntry.Pristine.Height;
+        _generatedSizes[0] = (nw, nh);
+        _generatedWraps[0] = textureProvider.CreateFromRaw(RawImageSpecification.Rgba32(nw, nh),
+            AnimatedHairBuilder.BuildNormalRgba(normalRgba), "DTM Gen Normal");
+        _generatedSizes[1] = (nw, nh);
+        _generatedWraps[1] = textureProvider.CreateFromRaw(RawImageSpecification.Rgba32(nw, nh),
+            AnimatedHairBuilder.BuildIdRgba(normalRgba, fullCoverage), "DTM Gen Id");
+
+        if (maskEntry?.Pristine != null)
+        {
+            var maskRgba = maskEntry.Composited ?? maskEntry.Pristine.Rgba;
+            _generatedSizes[2] = (maskEntry.Pristine.Width, maskEntry.Pristine.Height);
+            _generatedWraps[2] = textureProvider.CreateFromRaw(
+                RawImageSpecification.Rgba32(maskEntry.Pristine.Width, maskEntry.Pristine.Height),
+                AnimatedHairBuilder.BuildCharMaskRgba(maskRgba), "DTM Gen Mask");
+        }
+
+        var (patternPixels, patternSize) = EffectPatternPixels(animated);
+        _generatedSizes[3] = (patternSize, patternSize);
+        _generatedWraps[3] = textureProvider.CreateFromRaw(
+            RawImageSpecification.Rgba32(patternSize, patternSize), patternPixels, "DTM Gen Pattern");
+    }
+
+    /// <summary> Short slot label for the texture thumbnails; hair renames the channels to what they do. </summary>
     private static string SlotButtonLabel(TextureOption option)
         => option.Slot switch
         {
@@ -2545,25 +2820,55 @@ public sealed class DecalsTab(
 
         ImUtf8.HoverTooltip("How often the effect pattern repeats across the hair in each texture direction — low = broad shapes, high = fine ripples."u8);
 
-        var pattern = (AnimatedHairBuilder.HairEffectPattern)staged.Pattern;
+        var pattern    = (AnimatedHairBuilder.HairEffectPattern)staged.Pattern;
+        var libraryEntry = staged.EffectLibraryId != Guid.Empty ? decals.GetEffect(staged.EffectLibraryId) : null;
+        var comboLabel = staged.EffectLibraryId != Guid.Empty
+            ? libraryEntry?.Name ?? "(missing library pattern)"
+            : AnimatedHairBuilder.PatternLabel(pattern);
         ImGui.SetNextItemWidth(220 * ImUtf8.GlobalScale);
-        using (var combo = ImUtf8.Combo("Effect Pattern"u8, AnimatedHairBuilder.PatternLabel(pattern)))
+        using (var combo = ImUtf8.Combo("Effect Pattern"u8, comboLabel))
         {
             if (combo)
+            {
                 foreach (var candidate in Enum.GetValues<AnimatedHairBuilder.HairEffectPattern>())
                 {
-                    if (!ImUtf8.Selectable(AnimatedHairBuilder.PatternLabel(candidate), candidate == pattern) || candidate == pattern)
+                    var active = staged.EffectLibraryId == Guid.Empty && candidate == pattern;
+                    if (!ImUtf8.Selectable(AnimatedHairBuilder.PatternLabel(candidate), active) || active)
                         continue;
 
                     staged.Pattern         = (int)candidate;
-                    staged.EffectImagePath = string.Empty;
+                    staged.EffectLibraryId = Guid.Empty;
                     changed                = true;
                 }
+
+                if (decals.Effects.Count > 0)
+                {
+                    ImGui.Separator();
+                    foreach (var (effect, idx) in decals.Effects.WithIndex())
+                    {
+                        using var id     = ImUtf8.PushId(idx);
+                        var       active = staged.EffectLibraryId == effect.Id;
+                        if (!ImUtf8.Selectable($"Library: {effect.Name}", active) || active)
+                            continue;
+
+                        staged.EffectLibraryId = effect.Id;
+                        changed                = true;
+                    }
+                }
+            }
         }
 
-        ImUtf8.HoverTooltip("The black/white pattern scrolled across the hair — bright areas show the effect color. Shown below as it tiles."u8);
+        ImUtf8.HoverTooltip(
+            "The black/white pattern scrolled across the hair — bright areas show the effect color. Shown below as it tiles.\nGlint mimics the original reference (occasional single sparkles); Glitter loads the game's own hand-authored sparkle texture from your game files.\nLibrary entries are imported images, managed alongside the decals in the library window."u8);
 
-        DrawPatternThumbnail(staged.Pattern);
+        ImGui.SameLine();
+        if (ImUtf8.SmallButton("Manage Patterns..."u8))
+            decalLibraryWindow.OpenEffects();
+
+        ImUtf8.HoverTooltip(
+            "Open the Resource Library's Effect Patterns tab — import, rename or delete patterns there.\nImported patterns appear in this dropdown as \"Library:\" entries."u8);
+
+        DrawPatternThumbnail(staged);
 
         if (!changed)
             return;
@@ -2571,21 +2876,22 @@ public sealed class DecalsTab(
         CommitAnimated(dTexture, staged);
     }
 
-    private (int Pattern, IDalamudTextureWrap? Wrap) _patternThumbnail = (-1, null);
+    private (int Pattern, Guid LibraryId, IDalamudTextureWrap? Wrap) _patternThumbnail = (-1, Guid.Empty, null);
 
-    /// <summary> A small preview of the selected built-in effect pattern, rendered once per selection. </summary>
-    private void DrawPatternThumbnail(int pattern)
+    /// <summary> A square preview of the active effect pattern (built-in, game texture or library import), rendered once per selection. </summary>
+    private void DrawPatternThumbnail(AnimatedHairEdit edit)
     {
-        if (_patternThumbnail.Pattern != pattern)
+        if (_patternThumbnail.Pattern != edit.Pattern || _patternThumbnail.LibraryId != edit.EffectLibraryId)
         {
             _patternThumbnail.Wrap?.Dispose();
-            const int size = 256;
-            var pixels = AnimatedHairBuilder.GeneratePattern((AnimatedHairBuilder.HairEffectPattern)pattern, size);
-            _patternThumbnail = (pattern, textureProvider.CreateFromRaw(RawImageSpecification.Rgba32(size, size), pixels));
+            var (pixels, size) = EffectPatternPixels(edit);
+            _patternThumbnail = (edit.Pattern, edit.EffectLibraryId,
+                textureProvider.CreateFromRaw(RawImageSpecification.Rgba32(size, size), pixels));
         }
 
+        // The pattern is always square — draw it square, or it reads stretched.
         if (_patternThumbnail.Wrap is { } wrap)
-            ImGui.Image(wrap.Handle, new Vector2(192, 96) * ImUtf8.GlobalScale);
+            ImGui.Image(wrap.Handle, new Vector2(128, 128) * ImUtf8.GlobalScale);
     }
 
     /// <summary> Find the singleton hair layer of a texture's stack, or stage a fresh neutral one. </summary>

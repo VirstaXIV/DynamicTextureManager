@@ -38,7 +38,7 @@ public sealed record ViewportShading(DecodedTexture? Diffuse, DecodedTexture? Id
 /// compares it by reference to decide whether the shading changed.
 /// </summary>
 public sealed record ViewportEffect(byte[] PatternRgba, int PatternSize, Vector3 DisplayColor,
-    float ScrollU, float ScrollV, float TilingU, float TilingV);
+    float ScrollU, float ScrollV, float TilingU, float TilingV, bool FullCoverage = false);
 
 /// <summary>
 /// An extra mesh rendered alongside the primary selected material — overlay parts (nails,
@@ -125,10 +125,14 @@ public sealed class DecalViewport(ITextureProvider textureProvider) : IDisposabl
         {
             // The mesh instance can turn over without a real subject change (the reader's
             // caches re-resolve while rebuilds reload the mod) — keep an active placement
-            // and the camera; the Decals tab already unbinds when the MATERIAL changes.
+            // and the camera then. A different SUBJECT (another model — e.g. switching from
+            // the hair to the tail within one project) must re-frame, or the camera keeps
+            // pointing at the previous piece and the viewport shows empty space.
+            var subjectChanged = firstMesh
+             || !string.Equals(_mesh!.GamePath, mesh.GamePath, StringComparison.OrdinalIgnoreCase);
             _mesh        = mesh;
             _renderDirty = true;
-            if (dTextureChanged || firstMesh)
+            if (dTextureChanged || subjectChanged)
                 FrameCamera();
         }
 
@@ -285,12 +289,23 @@ public sealed class DecalViewport(ITextureProvider textureProvider) : IDisposabl
         if (ImUtf8.SmallButton(_poppedOut ? "Embed"u8 : "Pop Out"u8))
             _poppedOut = !_poppedOut;
         ImUtf8.HoverTooltip("Move the 3D preview between the Decals tab and its own resizable window."u8);
+
         ImGui.SameLine();
+        if (ImUtf8.SmallButton("Reset View"u8))
+        {
+            FrameCamera();
+            _renderDirty = true;
+        }
+
+        ImUtf8.HoverTooltip("Re-frame the camera on the whole piece."u8);
+
+        ImGui.SameLine();
+        ImUtf8.Text("(?)"u8);
+        ImUtf8.HoverTooltip(
+            "Right-drag: orbit.  Middle-drag: pan.  Wheel: zoom.\nWhile placing a decal: left-drag places/moves it, Ctrl+wheel resizes it, Shift+wheel rotates it.\nThe colored corner cross shows the world axes (X red, Y green, Z blue); the live hints inside the canvas light up when a modifier is active."u8);
 
         if (_layer != null)
             DrawPlacementControls(_layer);
-        else
-            ImUtf8.TextWrapped("Right-drag: orbit.  Middle-drag: pan.  Wheel: zoom.  Add or place a decal to stamp on the mesh."u8);
 
         var avail = ImGui.GetContentRegionAvail();
         var size  = MathF.Max(200f, MathF.Min(avail.X, avail.Y));
@@ -326,13 +341,69 @@ public sealed class DecalViewport(ITextureProvider textureProvider) : IDisposabl
         if (_wrap != null)
             ImGui.GetWindowDrawList().AddImage(_wrap.Handle, start, start + new Vector2(size));
 
+        DrawCanvasOverlays(start, size);
         HandleInput(start, size);
+    }
+
+    /// <summary>
+    /// In-canvas overlays: live control hints that light up with the active modifier, and an
+    /// orientation gizmo (world axes projected through the current camera) in the corner.
+    /// </summary>
+    private void DrawCanvasOverlays(Vector2 start, float size)
+    {
+        var draw = ImGui.GetWindowDrawList();
+        var io   = ImGui.GetIO();
+
+        // Control hints, top-left. The active modifier's line lights up so the current
+        // wheel mode is always visible at a glance.
+        const uint dimColor = 0xAAB4B4B4;
+        const uint hotColor = 0xFF53D7FF;
+        var lines = _layer != null
+            ? new (string Text, uint Color)[]
+            {
+                ("LMB place · RMB orbit · MMB pan · Wheel zoom", dimColor),
+                (io.KeyCtrl ? "Ctrl+Wheel: resizing decal" : "Ctrl+Wheel: resize decal", io.KeyCtrl ? hotColor : dimColor),
+                (io.KeyShift ? "Shift+Wheel: rotating decal" : "Shift+Wheel: rotate decal", io.KeyShift ? hotColor : dimColor),
+            }
+            : [("RMB orbit · MMB pan · Wheel zoom", dimColor)];
+
+        var pad       = 6f * ImUtf8.GlobalScale;
+        var lineStep  = ImGui.GetTextLineHeight() + 2f;
+        var maxWidth  = 0f;
+        foreach (var (text, _) in lines)
+            maxWidth = MathF.Max(maxWidth, ImGui.CalcTextSize(text).X);
+        var boxMin = start + new Vector2(pad, pad);
+        draw.AddRectFilled(boxMin - new Vector2(4f), boxMin + new Vector2(maxWidth + 4f, lines.Length * lineStep + 2f), 0x90101010, 4f);
+        for (var i = 0; i < lines.Length; ++i)
+            draw.AddText(boxMin + new Vector2(0f, i * lineStep), lines[i].Color, lines[i].Text);
+
+        // Orientation gizmo, bottom-left: world axes through the camera's rotation. An axis
+        // pointing away from the camera renders dimmed.
+        var gizmoRadius = 20f * ImUtf8.GlobalScale;
+        var center      = start + new Vector2(gizmoRadius + 10f, size - gizmoRadius - 10f);
+        var offset      = CameraOffset();
+        var forward     = Vector3.Normalize(-offset);
+        var right       = Vector3.Normalize(Vector3.Cross(forward, Vector3.UnitY));
+        var up          = Vector3.Cross(right, forward);
+        draw.AddCircleFilled(center, gizmoRadius + 8f, 0x60101010);
+
+        void Axis(Vector3 dir, uint color, string label)
+        {
+            var screen = new Vector2(Vector3.Dot(dir, right), -Vector3.Dot(dir, up));
+            var away   = Vector3.Dot(dir, forward) > 0f;
+            var col    = away ? (color & 0x00FFFFFFu) | 0x50000000u : color;
+            var tip    = center + screen * gizmoRadius;
+            draw.AddLine(center, tip, col, 2f);
+            draw.AddText(tip + screen * 3f - new Vector2(3.5f, 7f), col, label);
+        }
+
+        Axis(Vector3.UnitX, 0xFF4040E0, "X");
+        Axis(Vector3.UnitY, 0xFF40C040, "Y");
+        Axis(Vector3.UnitZ, 0xFFE07050, "Z");
     }
 
     private void DrawPlacementControls(DecalLayer layer)
     {
-        ImUtf8.TextWrapped("Left-drag: place/move decal.  Right-drag: orbit.  Middle-drag: pan.  Wheel: zoom, Ctrl+wheel: decal size, Shift+wheel: decal rotation."u8);
-
         var widthCm = layer.WorldWidth * 100f;
         ImGui.SetNextItemWidth(130 * ImUtf8.GlobalScale);
         if (ImUtf8.Slider("Width (cm)"u8, ref widthCm, "%.1f"u8, 1f, 100f))
@@ -989,8 +1060,10 @@ public sealed class DecalViewport(ITextureProvider textureProvider) : IDisposabl
                             // updates it, so occlusion between meshes stays correct.
                             if (effect != null)
                             {
+                                // Full coverage (tails — no highlight channel): every visible
+                                // texel of the piece carries the effect, matching the id map.
                                 var blend = !dimmed && meshHairColors != null && meshDiffuse != null
-                                    ? SampleBlue(meshDiffuse, uv) / 255f
+                                    ? effect.FullCoverage ? 1f : SampleBlue(meshDiffuse, uv) / 255f
                                     : 0f;
                                 _effectBlend![index] = blend;
                                 if (blend > 0.01f)
