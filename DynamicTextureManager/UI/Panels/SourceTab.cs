@@ -30,9 +30,6 @@ public sealed class SourceTab(
     ShaderHandlerRegistry shaderHandlers,
     ModelUvReader uvReader,
     OverlayModManager overlayMods,
-    SkinColorReader skinColorReader,
-    HairColorReader hairColorReader,
-    Configuration config,
     CompositePreviewCache previewCache,
     DecalsTab decalsTab)
     : IService
@@ -113,7 +110,7 @@ public sealed class SourceTab(
                 var       primary = unit.FirstOrDefault(m => !m.Overlay) ?? unit.First();
 
                 ImGui.TableNextColumn();
-                var label = $"{UnitLabel(primary.MdlGamePath, primary.GamePath)}: {primary.Label}";
+                var label = $"{SourceUnits.UnitLabel(primary.MdlGamePath, primary.GamePath)}: {primary.Label}";
                 if (primary.Overlay)
                 {
                     ImUtf8.Text(label);
@@ -188,123 +185,103 @@ public sealed class SourceTab(
             return;
         }
 
-        if (ImUtf8.Button("Load Worn Gear"u8))
-            LoadPlayer(PickerMode.Gear);
-        ImUtf8.HoverTooltip("Read the worn equipment models and materials of your character through Penumbra."u8);
-
-        ImGui.SameLine();
-        if (ImUtf8.Button("Load Skin"u8))
-            LoadPlayer(PickerMode.Skin);
-        ImUtf8.HoverTooltip("Read your character's skin materials (body, legs, face).\nDecals on skin bake into the skin texture like tattoos and conform to the body."u8);
-
-        ImGui.SameLine();
-        if (ImUtf8.Button("Load Hair"u8))
-            LoadPlayer(PickerMode.Hair);
-        ImUtf8.HoverTooltip(
-            "Read your character's current hairstyle materials.\nHair has no color texture — the game blends your hair and highlight colors by the normal map,\nso edits adjust where highlights appear and how the hair shines."u8);
-
-        if (_error.Length > 0)
-            ImUtf8.TextWrapped(_error);
-
-        if (_groups.Count == 0)
-            return;
-
-        using var table = ImUtf8.Table("##pickerGroups"u8, 4, ImGuiTableFlags.SizingStretchProp | ImGuiTableFlags.RowBg);
-        if (!table)
-            return;
-
-        ImUtf8.TableSetupColumn(""u8, ImGuiTableColumnFlags.WidthFixed);
-        ImUtf8.TableSetupColumn("Source"u8);
-        ImUtf8.TableSetupColumn("From Mod"u8);
-        ImUtf8.TableSetupColumn("Notes"u8);
-        ImGui.TableHeadersRow();
-
-        foreach (var (group, groupIdx) in _groups.WithIndex())
+        if (ImUtf8.Button("Add Worn Gear..."u8))
         {
-            using var id = ImUtf8.PushId(groupIdx);
-            DrawGroupRow(dTexture, group, conflicts);
+            LoadPlayer(PickerMode.Gear);
+            ImGui.OpenPopup("##sourcePicker"u8);
         }
+
+        ImUtf8.HoverTooltip("Pick one of the worn equipment pieces to add — read live from your character through Penumbra."u8);
+
+        ImGui.SameLine();
+        if (ImUtf8.Button("Add Skin..."u8))
+        {
+            LoadPlayer(PickerMode.Skin);
+            ImGui.OpenPopup("##sourcePicker"u8);
+        }
+
+        ImUtf8.HoverTooltip("Add your character's bare body (or face).\nDecals on skin bake into the skin texture like tattoos and conform to the body."u8);
+
+        ImGui.SameLine();
+        if (ImUtf8.Button("Add Hair..."u8))
+        {
+            LoadPlayer(PickerMode.Hair);
+            ImGui.OpenPopup("##sourcePicker"u8);
+        }
+
+        ImUtf8.HoverTooltip(
+            "Add your character's current hairstyle.\nHair has no color texture — the game blends your hair and highlight colors by the normal map,\nso edits adjust how the hair shines or animate its highlights."u8);
+
+        DrawPickerPopup(dTexture, conflicts);
     }
 
     /// <summary>
-    /// One pickable MODEL unit: the piece is added or removed as a whole — all its materials
-    /// (and, for hair, the model's companion materials) come along. Editing still targets
-    /// individual materials through the editing panel's material selector.
+    /// The picker popup: one row per MODEL unit read from the character; picking one adds the
+    /// whole piece (all its materials — and, for hair, the model's companions) and closes.
     /// </summary>
-    private void DrawGroupRow(DTexture dTexture, ResolvedModelGroup group, Dictionary<string, List<string>> conflicts)
+    private void DrawPickerPopup(DTexture dTexture, Dictionary<string, List<string>> conflicts)
     {
-        var sourceMaterials = dTexture.Data.Source.Materials;
-        var addedCount = group.Materials.Count(m => sourceMaterials.Any(s
-            => string.Equals(s.GamePath, m.GamePath, StringComparison.OrdinalIgnoreCase)));
-        var added   = addedCount > 0;
-        var primary = group.Materials.FirstOrDefault(m => !m.IsOverlayPart) ?? group.Materials[0];
+        // Without a floor the popup sizes to its longest unwrappable word and error text
+        // wraps into a one-word-per-line column.
+        ImGui.SetNextWindowSizeConstraints(new System.Numerics.Vector2(360, 0) * ImUtf8.GlobalScale,
+            new System.Numerics.Vector2(700, 600) * ImUtf8.GlobalScale);
+        using var popup = ImUtf8.Popup("##sourcePicker"u8);
+        if (!popup)
+            return;
 
-        // With a generated overlay active, the resource tree reports a DTM mod as the file's
-        // origin — that is never a clean base to capture, so adding is blocked until the
-        // overlay is disabled and the piece reloaded. Already-added entries keep their
-        // originally captured base and are unaffected.
-        var fromOverlay = !added && group.Materials.Any(m
-            => m.ModDirectory.StartsWith("DTM_", StringComparison.OrdinalIgnoreCase));
-
-        ImGui.TableNextColumn();
-        if (added)
+        if (_error.Length > 0)
         {
-            if (ImUtf8.SmallButton("Remove"u8))
-                RemoveUnit(dTexture, primary.MdlGamePath);
-            if (ImGui.IsItemHovered())
-                ImUtf8.HoverTooltip("Remove this piece and everything belonging to it from the source. Its colorset edits and decals are removed too."u8);
+            ImUtf8.TextWrapped(_error);
+            return;
         }
-        else
+
+        if (_groups.Count == 0)
         {
-            using (ImRaii.Disabled(fromOverlay))
+            ImUtf8.Text("Nothing found on your character."u8);
+            return;
+        }
+
+        var sourceMaterials = dTexture.Data.Source.Materials;
+        foreach (var (group, groupIdx) in _groups.WithIndex())
+        {
+            using var id      = ImUtf8.PushId(groupIdx);
+            var       primary = group.Materials.FirstOrDefault(m => !m.IsOverlayPart) ?? group.Materials[0];
+            var added = group.Materials.Any(m => sourceMaterials.Any(s
+                => string.Equals(s.GamePath, m.GamePath, StringComparison.OrdinalIgnoreCase)));
+
+            // With a generated overlay active, the resource tree reports a DTM mod as the
+            // file's origin — never a clean base to capture, so adding is blocked until the
+            // overlay is disabled and the piece reloaded.
+            var fromOverlay = !added && group.Materials.Any(m
+                => m.ModDirectory.StartsWith("DTM_", StringComparison.OrdinalIgnoreCase));
+
+            var mod   = primary.ModName.Length > 0 ? primary.ModName : "Vanilla";
+            var label = $"{group.Label}  —  {mod}";
+            using (ImRaii.Disabled(added || fromOverlay))
             {
-                if (ImUtf8.SmallButton("Add"u8))
+                if (ImUtf8.Selectable(label))
+                {
                     AddGroup(dTexture, group);
+                    ImGui.CloseCurrentPopup();
+                }
             }
 
-            if (fromOverlay && ImGui.IsItemHovered(ImGuiHoveredFlags.AllowWhenDisabled))
-                ImUtf8.HoverTooltip(
-                    "A file of this piece currently comes from a generated overlay mod — not a clean base to edit.\nDisable that overlay, then reload to capture the real source."u8);
-        }
+            if (ImGui.IsItemHovered(ImGuiHoveredFlags.AllowWhenDisabled))
+                ImUtf8.HoverTooltip(fromOverlay
+                    ? "A generated overlay currently owns files of this piece — disable it and reload to add it."
+                    : added
+                        ? "Already part of this mod's source."
+                        : string.Join("\n", group.Materials.Select(m => $"{m.Label}: {m.GamePath}")));
 
-        ImGui.TableNextColumn();
-        if (added)
-        {
-            if (ImUtf8.Selectable(group.Label))
-                decalsTab.SelectMaterial(primary.GamePath);
-            if (ImGui.IsItemHovered())
-                ImUtf8.HoverTooltip("Click to edit this piece — its textures and model show in the preview column."u8);
+            if (added)
+            {
+                ImGui.SameLine();
+                using (ImRaii.PushColor(ImGuiCol.Text, 0xFF40C040u))
+                    ImUtf8.Text("(added)"u8);
+            }
 
-            ImGui.SameLine();
-            using (ImRaii.PushColor(ImGuiCol.Text, 0xFF40C040u))
-                ImUtf8.Text(addedCount < group.Materials.Count ? "(partially added)"u8 : "(added)"u8);
-        }
-        else
-        {
-            ImUtf8.Text(group.Label);
-        }
-
-        foreach (var material in group.Materials)
-            DrawConflictMarker(material.GamePath, conflicts);
-        if (ImGui.IsItemHovered())
-            ImUtf8.HoverTooltip(string.Join("\n", group.Materials.Select(m => $"{m.Label}: {m.GamePath}")));
-
-        ImGui.TableNextColumn();
-        DrawModCell(primary.ModDirectory, primary.ModName, primary.ActualPath);
-
-        ImGui.TableNextColumn();
-        if (fromOverlay)
-        {
-            using (ImRaii.PushColor(ImGuiCol.Text, WarningColor))
-                ImUtf8.Text("overlay active"u8);
-            if (ImGui.IsItemHovered())
-                ImUtf8.HoverTooltip("A generated overlay currently owns files of this piece — disable it and reload to add it."u8);
-        }
-        else if (group.Materials.Count > 1)
-        {
-            ImUtf8.Text($"{group.Materials.Count} materials");
-            if (ImGui.IsItemHovered())
-                ImUtf8.HoverTooltip(string.Join("\n", group.Materials.Select(m => m.Label)));
+            foreach (var material in group.Materials)
+                DrawConflictMarker(material.GamePath, conflicts);
         }
     }
 
@@ -334,27 +311,6 @@ public sealed class SourceTab(
                     _               => "No materials found — is your character loaded?",
                 }
                 : string.Empty;
-
-            // Load Skin implies the user wants a preview of THEIR body — match the preview
-            // tone to the real character automatically, unless they already picked one
-            // deliberately (manual ColorEdit or the "Use my character's skin color" button).
-            if (mode == PickerMode.Skin && _groups.Count > 0 && !config.PreviewSkinToneUserSet
-             && skinColorReader.TryGetLocalPlayerSkin(out var liveTone))
-            {
-                config.PreviewSkinTone = new SixLabors.ImageSharp.PixelFormats.Rgba32(liveTone.X, liveTone.Y, liveTone.Z).PackedValue;
-                config.Save();
-            }
-
-            // Same idea for hair: preview with the character's real hair and highlight colors
-            // unless the user already picked their own.
-            if (mode == PickerMode.Hair && _groups.Count > 0 && !config.PreviewHairColorsUserSet
-             && hairColorReader.TryGetLocalPlayerHair(out var liveHair))
-            {
-                config.PreviewHairColor = new SixLabors.ImageSharp.PixelFormats.Rgba32(liveHair.Main.X, liveHair.Main.Y, liveHair.Main.Z).PackedValue;
-                config.PreviewHairHighlight =
-                    new SixLabors.ImageSharp.PixelFormats.Rgba32(liveHair.Highlight.X, liveHair.Highlight.Y, liveHair.Highlight.Z).PackedValue;
-                config.Save();
-            }
         }
         catch (Exception ex)
         {
@@ -366,57 +322,21 @@ public sealed class SourceTab(
 
     /// <summary>
     /// Equipment, accessory and weapon models — the character's own body parts live behind
-    /// Load Skin. One entry per worn piece, labeled and ordered by its slot.
+    /// Load Skin. One entry per worn piece, labeled and ordered by its slot. Gear models
+    /// also EMBED body-skin materials (the exposed skin patches, so gear conforms to the
+    /// body) — those belong to the Body unit, not the gear: a gear piece never needs to
+    /// touch the shared skin texture, so keeping them here would add them with the piece and
+    /// flag a false conflict against a body mod.
     /// </summary>
     private static IReadOnlyList<ResolvedModelGroup> FilterGearGroups(IReadOnlyList<ResolvedModelGroup> groups)
-        => groups.Where(g => !IsHumanModel(g) && g.Materials.Count > 0)
-            .Select(g => (Slot: GearSlot(g.Materials[0].MdlGamePath), Group: g))
+        => groups.Where(g => !IsHumanModel(g))
+            .Select(g => g with { Materials = g.Materials.Where(m => !ModelUvReader.IsBodySkinMaterial(m.GamePath)).ToList() })
+            .Where(g => g.Materials.Count > 0)
+            .Select(g => (Slot: SourceUnits.GearSlot(g.Materials[0].MdlGamePath), Group: g))
             .OrderBy(t => t.Slot.Order)
             .Select(t => new ResolvedModelGroup($"{t.Slot.Label}: {t.Group.Label}", t.Group.Materials))
             .ToList();
 
-    /// <summary> The equipment/accessory slot of a model, from its file name suffix. </summary>
-    private static (int Order, string Label) GearSlot(string mdlGamePath)
-    {
-        if (mdlGamePath.Contains("/weapon/", StringComparison.OrdinalIgnoreCase))
-            return (10, "Weapon");
-
-        var name   = Path.GetFileNameWithoutExtension(mdlGamePath);
-        var suffix = name.Length >= 3 ? name[^3..].ToLowerInvariant() : string.Empty;
-        return suffix switch
-        {
-            "met" => (0, "Head"),
-            "top" => (1, "Body"),
-            "glv" => (2, "Hands"),
-            "dwn" => (3, "Legs"),
-            "sho" => (4, "Feet"),
-            "ear" => (5, "Earrings"),
-            "nek" => (6, "Necklace"),
-            "wrs" => (7, "Bracelets"),
-            "rir" => (8, "Ring (Right)"),
-            "ril" => (9, "Ring (Left)"),
-            _     => (11, "Other"),
-        };
-    }
-
-    /// <summary>
-    /// The kind of unit a selected source material belongs to, for the model-based lists:
-    /// sources are picked and removed as whole models, and this names them.
-    /// </summary>
-    private static string UnitLabel(string mdlGamePath, string materialGamePath)
-    {
-        if (ModelUvReader.IsBodySkinMaterial(materialGamePath))
-            return "Body";
-        if (HairModelPattern.IsMatch(mdlGamePath))
-            return "Hair";
-        if (mdlGamePath.Contains("/obj/face/", StringComparison.OrdinalIgnoreCase))
-            return "Face";
-        if (mdlGamePath.Contains("/obj/tail/", StringComparison.OrdinalIgnoreCase))
-            return "Tail";
-        if (mdlGamePath.Contains("/human/", StringComparison.OrdinalIgnoreCase))
-            return "Character";
-        return GearSlot(mdlGamePath).Label;
-    }
 
     /// <summary>
     /// The character's skin materials. Body skin has no model node of its own — the game has
@@ -479,13 +399,8 @@ public sealed class SourceTab(
             ret.Add(new ResolvedModelGroup("Body", bodyUnit));
         }
 
-        foreach (var group in groups.Where(IsHumanModel))
-        {
-            var skinMaterials = group.Materials.Where(m => seen.Add(m.GamePath) && IsSkinMaterial(m)).ToList();
-            if (skinMaterials.Count > 0)
-                ret.Add(new ResolvedModelGroup(group.Label, skinMaterials));
-        }
-
+        // Skin means the BODY, one unit — the face is its own category and stays out of this
+        // picker (like hair is just the hair).
         return ret;
     }
 
@@ -500,7 +415,7 @@ public sealed class SourceTab(
         var ret = new List<ResolvedModelGroup>();
         foreach (var group in groups)
         {
-            if (group.Materials.Count == 0 || !HairModelPattern.IsMatch(group.Materials[0].MdlGamePath))
+            if (group.Materials.Count == 0 || !SourceUnits.HairModelPattern.IsMatch(group.Materials[0].MdlGamePath))
                 continue;
 
             var hairMaterials = group.Materials.Where(IsHairMaterial).ToList();
@@ -524,13 +439,22 @@ public sealed class SourceTab(
         new(@"/hair/(h\d{4})/", System.Text.RegularExpressions.RegexOptions.IgnoreCase | System.Text.RegularExpressions.RegexOptions.Compiled);
 
 
-    private static readonly System.Text.RegularExpressions.Regex HairModelPattern =
-        new(@"^chara/human/c\d{4}/obj/hair/h\d{4}/model/",
-            System.Text.RegularExpressions.RegexOptions.IgnoreCase | System.Text.RegularExpressions.RegexOptions.Compiled);
-
     private bool IsHairMaterial(ResolvedMaterial material)
     {
-        var mtrl = sourceFiles.GetMaterial(new SourcePath { GamePath = material.GamePath, ActualPath = material.ActualPath }, null);
+        // Hair converted by one of OUR generated mods currently resolves to a characterscroll
+        // material — classify from the unmodified base instead, so the hairstyle still lists
+        // (greyed by the overlay-active guard) rather than vanishing as "no hair found".
+        Penumbra.GameData.Files.MtrlFile? mtrl;
+        if (material.ModDirectory.StartsWith("DTM_", StringComparison.OrdinalIgnoreCase))
+        {
+            var exclude = Path.Combine(penumbra.GetModDirectory(), material.ModDirectory);
+            mtrl = sourceFiles.GetMaterial(new SourcePath { GamePath = material.GamePath }, exclude);
+        }
+        else
+        {
+            mtrl = sourceFiles.GetMaterial(new SourcePath { GamePath = material.GamePath, ActualPath = material.ActualPath }, null);
+        }
+
         if (mtrl == null)
             return false;
 
@@ -636,7 +560,7 @@ public sealed class SourceTab(
             });
 
             // A hairstyle brings its model's sibling materials along as hidden companions.
-            if (!material.IsOverlayPart && HairModelPattern.IsMatch(material.MdlGamePath))
+            if (!material.IsOverlayPart && SourceUnits.HairModelPattern.IsMatch(material.MdlGamePath))
                 ModGeneration.HairSources.AddCompanions(dTexture.Data, source.Materials[^1], uvReader, sourceFiles, shaderHandlers, penumbra);
 
             select ??= material.IsOverlayPart ? null : material.GamePath;

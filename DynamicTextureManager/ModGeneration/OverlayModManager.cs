@@ -37,10 +37,12 @@ public sealed class OverlayModManager : IService, IDisposable
     private readonly TextureCompositor     compositor;
     private readonly Shaders.ShaderHandlerRegistry shaderHandlers;
     private readonly ModelUvReader         uvReader;
+    private readonly Interop.HairColorReader hairColors;
 
     public OverlayModManager(PenumbraService penumbra, SourceFileProvider sourceFiles, ModWriter modWriter, SaveService saveService,
         Configuration config, DTextureStorage storage, DTextureChanged dTextureChanged, IFramework framework, TextureIO textureIO,
-        TextureCompositor compositor, Shaders.ShaderHandlerRegistry shaderHandlers, ModelUvReader uvReader)
+        TextureCompositor compositor, Shaders.ShaderHandlerRegistry shaderHandlers, ModelUvReader uvReader,
+        Interop.HairColorReader hairColors)
     {
         this.penumbra        = penumbra;
         this.sourceFiles     = sourceFiles;
@@ -54,6 +56,7 @@ public sealed class OverlayModManager : IService, IDisposable
         this.compositor      = compositor;
         this.shaderHandlers  = shaderHandlers;
         this.uvReader        = uvReader;
+        this.hairColors      = hairColors;
 
         this.penumbra.Attached   += ReconcileMissingMods;
         this.penumbra.ModDeleted += OnPenumbraModDeleted;
@@ -616,10 +619,26 @@ public sealed class OverlayModManager : IService, IDisposable
             return true;
         }
 
-        foreach (var (gamePath, edit) in dTexture.Data.AnimatedHair.Where(kvp => kvp.Value.Enabled))
+        foreach (var (gamePath, storedEdit) in dTexture.Data.AnimatedHair.Where(kvp => kvp.Value.Enabled))
         {
             if (converted.Contains(gamePath))
                 continue;
+
+            // Hair + highlight colors follow the CHARACTER (Glamourer included) unless the
+            // override toggle is set: resolve the live colors into the baked copy at build
+            // time, squared to the colorset domain. Unreadable character -> the stored
+            // fallback bakes instead. The effect color is always the stored one.
+            var edit = storedEdit;
+            if (!edit.OverrideHairColors && hairColors.TryGetLocalPlayerHair(out var live))
+            {
+                edit           = edit.Clone();
+                edit.BaseColor = [live.Main.X * live.Main.X, live.Main.Y * live.Main.Y, live.Main.Z * live.Main.Z];
+                edit.HighlightColor =
+                [
+                    live.Highlight.X * live.Highlight.X, live.Highlight.Y * live.Highlight.Y,
+                    live.Highlight.Z * live.Highlight.Z,
+                ];
+            }
 
             var source = dTexture.Data.Source.Materials.FirstOrDefault(m
                 => string.Equals(m.GamePath, gamePath, StringComparison.OrdinalIgnoreCase));

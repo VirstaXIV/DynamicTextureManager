@@ -40,12 +40,6 @@ public class Configuration: IPluginConfiguration, ISavable
     /// </summary>
     public uint PreviewSkinTone { get; set; } = 0xFF8AAAD6;
 
-    /// <summary>
-    /// Whether <see cref="PreviewSkinTone"/> was ever set deliberately (manual ColorEdit or the
-    /// "Use my character's skin color" button) — gates the Load Skin auto-populate from
-    /// clobbering a choice the user actually made.
-    /// </summary>
-    public bool PreviewSkinToneUserSet { get; set; } = false;
 
     /// <summary>
     /// Preview-only hair colors (packed Rgba32) for hair materials in the 3D viewport. Hair has
@@ -58,11 +52,6 @@ public class Configuration: IPluginConfiguration, ISavable
     /// <summary> Preview-only hair highlight color, see <see cref="PreviewHairColor"/>. </summary>
     public uint PreviewHairHighlight { get; set; } = 0xFFC8B09A;
 
-    /// <summary>
-    /// Whether the preview hair colors were ever set deliberately — gates the Load Hair
-    /// auto-populate from clobbering a choice the user actually made.
-    /// </summary>
-    public bool PreviewHairColorsUserSet { get; set; } = false;
 
     /// <summary> Debug tunables for the empirical mask-map finish semantics, see ModGeneration.FinishMapping. </summary>
     public int MaskRoughnessChannel { get; set; } = 1;
