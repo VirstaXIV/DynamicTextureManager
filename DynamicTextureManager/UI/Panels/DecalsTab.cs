@@ -104,6 +104,7 @@ public sealed class DecalsTab(
     {
         _viewport.Dispose();
         _texturePreviewWrap?.Dispose();
+        _patternThumbnail.Wrap?.Dispose();
     }
 
     /// <summary> The editing controls (left column): material selection, decal library, layers, per-kind sections. </summary>
@@ -174,7 +175,9 @@ public sealed class DecalsTab(
             var overlayPaths = dTexture.Data.Source.Materials.Where(m => m.Overlay).Select(m => m.GamePath).ToHashSet(StringComparer.OrdinalIgnoreCase);
             var all = TextureOptions.Collect(dTexture.Data, sourceFiles, shaderHandlers);
             _options        = all.Where(o => !overlayPaths.Contains(o.MaterialGamePath)).ToList();
-            _overlayOptions = all.Where(o => overlayPaths.Contains(o.MaterialGamePath) && o.Slot is TextureSlot.Diffuse).ToList();
+            // All slots kept: body overlay entries use the diffuse, hair companions their
+            // normal + mask (the viewport renders the whole hairstyle from them).
+            _overlayOptions = all.Where(o => overlayPaths.Contains(o.MaterialGamePath)).ToList();
         }
 
         if (_options.Count == 0)
@@ -1846,8 +1849,8 @@ public sealed class DecalsTab(
             return;
         }
 
-        // A bound placement layer must belong to the selected material — switching materials
-        // would otherwise pair its overlay with the wrong mesh and shading.
+        // A bound placement or paint layer must belong to the selected material — switching
+        // materials would otherwise pair its overlay with the wrong mesh and shading.
         var placement = _viewport.PlacementLayer;
         if (placement != null)
         {
@@ -1905,7 +1908,7 @@ public sealed class DecalsTab(
         // Hair preview colors; when the character's highlights are disabled the game shows no
         // highlight blend at all, so collapse the preview the same way (the header explains).
         // The hair mask's alpha (ambient occlusion) additionally shades the strands.
-        var (hairColor, hairHighlight) = HairPreviewColorsPacked(kind);
+        var (hairColor, hairHighlight) = HairPreviewColorsPacked(dTexture, kind);
         var maskEntry = kind is MaterialKind.Hair
             ? EntryFor(MaterialOptions().Find(o => o.Slot is TextureSlot.Mask))
             : null;
@@ -1931,7 +1934,7 @@ public sealed class DecalsTab(
         }
 
         _viewport.UpdateShading(new ViewportShading(PreviewBuffer(diffuseEntry), PreviewBuffer(indexEntry), _rowDiffuse, tone,
-            HairPreviewColors(kind), PreviewBuffer(maskEntry)));
+            HairPreviewColors(dTexture, kind), PreviewBuffer(maskEntry)));
         _viewport.SetOverlays(overlayEntries);
     }
 
@@ -1943,18 +1946,34 @@ public sealed class DecalsTab(
                 : entry.Pristine;
 
     /// <summary> The effective packed preview hair colors (highlight collapsed to main while disabled), 0 for non-hair. </summary>
-    private (uint Main, uint Highlight) HairPreviewColorsPacked(MaterialKind kind)
-        => kind is not MaterialKind.Hair
-            ? (0u, 0u)
-            : (config.PreviewHairColor,
-                LiveHair() is { HighlightsEnabled: false } ? config.PreviewHairColor : config.PreviewHairHighlight);
+    private (uint Main, uint Highlight) HairPreviewColorsPacked(DTexture dTexture, MaterialKind kind)
+    {
+        if (kind is not MaterialKind.Hair)
+            return (0u, 0u);
 
-    private (Vector3 Main, Vector3 Highlight)? HairPreviewColors(MaterialKind kind)
+        // Converted (animated) hair: its colorset colors replace the character colors and the
+        // Highlights toggle entirely — preview the base color with the effect color in the
+        // highlight areas. Static stand-in; the scrolling only shows in game. Colorset colors
+        // live in the squared domain, so take the root here — the renderer squares them back.
+        if (dTexture.Data.AnimatedHair.GetValueOrDefault(_selectedMaterial) is { Enabled: true } animated)
+            return (PackSqrt(animated.BaseColor, 1f), PackSqrt(animated.EffectColor, animated.EffectIntensity));
+
+        return (config.PreviewHairColor,
+            LiveHair() is { HighlightsEnabled: false } ? config.PreviewHairColor : config.PreviewHairHighlight);
+    }
+
+    private static uint PackSqrt(float[] rgb, float scale)
+        => new Rgba32(
+            MathF.Sqrt(Math.Clamp(rgb[0] * scale, 0f, 1f)),
+            MathF.Sqrt(Math.Clamp(rgb[1] * scale, 0f, 1f)),
+            MathF.Sqrt(Math.Clamp(rgb[2] * scale, 0f, 1f))).PackedValue;
+
+    private (Vector3 Main, Vector3 Highlight)? HairPreviewColors(DTexture dTexture, MaterialKind kind)
     {
         if (kind is not MaterialKind.Hair)
             return null;
 
-        var (main, highlight) = HairPreviewColorsPacked(kind);
+        var (main, highlight) = HairPreviewColorsPacked(dTexture, kind);
         var mainPacked        = new Rgba32(main);
         var highlightPacked   = new Rgba32(highlight);
         return (new Vector3(mainPacked.R / 255f, mainPacked.G / 255f, mainPacked.B / 255f),
@@ -1983,7 +2002,7 @@ public sealed class DecalsTab(
         }
 
         if (_overlayOptions is { Count: > 0 } && ModelUvReader.IsBodySkinMaterial(_selectedMaterial))
-            foreach (var option in _overlayOptions)
+            foreach (var option in _overlayOptions.Where(o => o.Slot is TextureSlot.Diffuse))
             {
                 var source = dTexture.Data.Source.Materials.FirstOrDefault(m
                     => string.Equals(m.GamePath, option.MaterialGamePath, StringComparison.OrdinalIgnoreCase));
@@ -2009,8 +2028,10 @@ public sealed class DecalsTab(
         if (primary == null)
             return;
 
-        var hairColors = HairPreviewColors(MaterialKind.Hair);
-        foreach (var option in _options!)
+        var hairColors = HairPreviewColors(dTexture, MaterialKind.Hair);
+        // Companion hair materials live in the overlay list (hidden from the material
+        // selector); older saves may still carry them as regular sources — scan both.
+        foreach (var option in _options!.Concat(_overlayOptions ?? []))
         {
             if (option.Kind is not MaterialKind.Hair || option.Slot is not TextureSlot.Normal
              || string.Equals(option.MaterialGamePath, _selectedMaterial, StringComparison.OrdinalIgnoreCase))
@@ -2120,7 +2141,7 @@ public sealed class DecalsTab(
         }
 
         var rgba = !_previewShowSource && entry.Composited != null ? entry.Composited : pristine.Rgba;
-        var (hairMain, hairHighlight) = colorView ? HairPreviewColorsPacked(MaterialKind.Hair) : (0u, 0u);
+        var (hairMain, hairHighlight) = colorView ? HairPreviewColorsPacked(dTexture, MaterialKind.Hair) : (0u, 0u);
         var key = (current.GamePath, entry.Version, _previewShowSource, colorView, hairMain, hairHighlight);
         if (_texturePreviewWrap == null || key != _texturePreviewKey)
         {
@@ -2196,19 +2217,250 @@ public sealed class DecalsTab(
         using var indent = ImRaii.PushIndent();
 
         var normalOption = NormalOption();
-        if (normalOption != null)
-            DrawHighlightControls(dTexture, normalOption);
-
-        var maskOption = MaterialOptions().Find(o => o.Slot is TextureSlot.Mask);
+        var maskOption   = MaterialOptions().Find(o => o.Slot is TextureSlot.Mask);
         if (maskOption != null)
-        {
-            if (normalOption != null)
-                ImGui.Separator();
             DrawShineControls(dTexture, maskOption);
+
+        if (normalOption != null && _selectedMaterial.Length > 0)
+        {
+            ImGui.Separator();
+            DrawAnimatedControls(dTexture);
         }
 
         if (normalOption == null && maskOption == null)
             ImUtf8.Text("This hair material exposes no normal or mask texture to adjust."u8);
+    }
+
+    /// <summary>
+    /// All hair materials of the selected hairstyle — the selected one plus every other added
+    /// hair material sharing its model. Modded styles split their strands across several
+    /// materials; converting only one leaves the rest on the plain hair shader, so the
+    /// animated conversion always applies to the whole set.
+    /// </summary>
+    private List<string> HairstyleMaterialPaths(DTexture dTexture)
+    {
+        var result  = new List<string> { _selectedMaterial };
+        var primary = FindMaterialSource(dTexture);
+        if (primary == null)
+            return result;
+
+        // Every source material of the same hair model — the auto-added hidden companions
+        // included (they are not part of the material selector's options).
+        foreach (var material in dTexture.Data.Source.Materials)
+        {
+            if (!result.Contains(material.GamePath, StringComparer.OrdinalIgnoreCase)
+             && string.Equals(material.MdlGamePath, primary.MdlGamePath, StringComparison.OrdinalIgnoreCase))
+                result.Add(material.GamePath);
+        }
+
+        return result;
+    }
+
+    private (string Material, int Count) _animatedMaterialCount = (string.Empty, 0);
+
+    /// <summary>
+    /// How many hair materials the selected hairstyle's MODEL references (the build converts
+    /// them all). Cached per material — the count comes from parsing the model file.
+    /// </summary>
+    private int HairstyleModelMaterialCount(DTexture dTexture)
+    {
+        if (string.Equals(_animatedMaterialCount.Material, _selectedMaterial, StringComparison.OrdinalIgnoreCase))
+            return _animatedMaterialCount.Count;
+
+        var primary = FindMaterialSource(dTexture);
+        var count = primary == null
+            ? 1
+            : Math.Max(1, uvReader.ModelMaterialNames(primary)
+                .Count(n => AnimatedHairBuilder.IsHairMaterialName(System.IO.Path.GetFileName(n))));
+        _animatedMaterialCount = (_selectedMaterial, count);
+        return count;
+    }
+
+    /// <summary> Store the animated config on every material of the hairstyle and save. </summary>
+    private void CommitAnimated(DTexture dTexture, AnimatedHairEdit staged)
+    {
+        foreach (var path in HairstyleMaterialPaths(dTexture))
+            dTexture.Data.AnimatedHair[path] = string.Equals(path, _selectedMaterial, StringComparison.OrdinalIgnoreCase)
+                ? staged
+                : staged.Clone();
+
+        Save(dTexture);
+    }
+
+    /// <summary>
+    /// Animated-highlight conversion: swaps the hair material to the game's scrolling-effect
+    /// shader so the highlight areas (authored + everything painted/edited into normal B)
+    /// become an animated emissive effect. Colors and animation parameters bake into the
+    /// replacement material's colorset and constants at build time. Applied to every material
+    /// of the hairstyle at once (multi-material styles must convert together).
+    /// </summary>
+    private void DrawAnimatedControls(DTexture dTexture)
+    {
+        var edit    = dTexture.Data.AnimatedHair.GetValueOrDefault(_selectedMaterial);
+        var staged  = edit ?? new AnimatedHairEdit();
+        var changed = false;
+
+        var enabled = staged.Enabled;
+        if (ImUtf8.Checkbox("Animated Highlights"u8, ref enabled))
+        {
+            staged.Enabled = enabled;
+            changed        = true;
+            if (enabled && !staged.BaseColorUserSet && LiveHair() is { } live)
+            {
+                // Converted hair takes its base color from the colorset, not the character
+                // sheet — seed it from the live hair color (squared, matching the shader's
+                // customize-color convention) so the swap starts out looking familiar.
+                staged.BaseColor = [live.Main.X * live.Main.X, live.Main.Y * live.Main.Y, live.Main.Z * live.Main.Z];
+            }
+        }
+
+        ImUtf8.HoverTooltip(
+            "Replaces this hairstyle's materials with the game's scrolling-effect shader: the highlight areas become a glowing effect that moves through the hair.\nApplies to every material of the hairstyle at once. The preview shows the new colors statically — the movement itself only shows IN GAME after a Build.\nWhile converted: the in-game hair color picker and Highlights toggle no longer affect this hair (colors below are used instead), and the Shine sliders above do not apply."u8);
+
+        var hairstyleMaterials = HairstyleMaterialPaths(dTexture);
+
+        // Heal older saves (and newly added sibling materials): an enabled conversion always
+        // covers the whole hairstyle, so mirror it to any material that lacks it.
+        if (staged.Enabled && !changed
+         && hairstyleMaterials.Any(p => dTexture.Data.AnimatedHair.GetValueOrDefault(p) is not { Enabled: true }))
+            CommitAnimated(dTexture, staged);
+
+        if (staged.Enabled && HairstyleModelMaterialCount(dTexture) is > 1 and var modelMaterials)
+        {
+            ImGui.SameLine();
+            ImUtf8.Text($"({modelMaterials} materials)");
+            ImUtf8.HoverTooltip("This hairstyle's model splits across several hair materials — the build converts all of them together, whether or not each was added as a source."u8);
+        }
+
+        if (!staged.Enabled)
+        {
+            if (changed)
+                CommitAnimated(dTexture, staged);
+
+            return;
+        }
+
+        using var indent = ImRaii.PushIndent();
+
+        var effectColor = new Vector3(staged.EffectColor[0], staged.EffectColor[1], staged.EffectColor[2]);
+        if (ImUtf8.ColorEdit("Effect Color"u8, ref effectColor))
+        {
+            staged.EffectColor = [effectColor.X, effectColor.Y, effectColor.Z];
+            changed            = true;
+        }
+
+        ImUtf8.HoverTooltip("Emissive color of the moving effect — what the highlight areas glow with."u8);
+
+        var baseColor = new Vector3(staged.BaseColor[0], staged.BaseColor[1], staged.BaseColor[2]);
+        if (ImUtf8.ColorEdit("Base Hair Color"u8, ref baseColor))
+        {
+            staged.BaseColor        = [baseColor.X, baseColor.Y, baseColor.Z];
+            staged.BaseColorUserSet = true;
+            changed                 = true;
+        }
+
+        ImUtf8.HoverTooltip("Color of the rest of the hair. The in-game hair color picker cannot reach converted hair, so this replaces it."u8);
+
+        ImGui.SameLine();
+        if (ImUtf8.SmallButton("Use My Hair Colors"u8) && LiveHair() is { } hair)
+        {
+            staged.BaseColor        = [hair.Main.X * hair.Main.X, hair.Main.Y * hair.Main.Y, hair.Main.Z * hair.Main.Z];
+            staged.EffectColor      = [hair.Highlight.X * hair.Highlight.X, hair.Highlight.Y * hair.Highlight.Y, hair.Highlight.Z * hair.Highlight.Z];
+            staged.BaseColorUserSet = true;
+            changed                 = true;
+        }
+
+        ImUtf8.HoverTooltip("Read your character's current hair and highlight colors: base color from the hair color, effect color from the highlight color."u8);
+
+        ImGui.SetNextItemWidth(220 * ImUtf8.GlobalScale);
+        var intensity = staged.EffectIntensity;
+        if (ImUtf8.Slider("Effect Intensity"u8, ref intensity, "%.2f"u8, 0f, 4f))
+        {
+            staged.EffectIntensity = Math.Clamp(intensity, 0f, 4f);
+            changed                = true;
+        }
+
+        ImUtf8.HoverTooltip("Brightness of the glow — above 1 overdrives the effect color."u8);
+
+        ImGui.SetNextItemWidth(150 * ImUtf8.GlobalScale);
+        var speedU = staged.SpeedU;
+        if (ImUtf8.Slider("##speedU"u8, ref speedU, "%.2f"u8, -5f, 5f))
+        {
+            staged.SpeedU = speedU;
+            changed       = true;
+        }
+
+        ImGui.SameLine();
+        ImGui.SetNextItemWidth(150 * ImUtf8.GlobalScale);
+        var speedV = staged.SpeedV;
+        if (ImUtf8.Slider("Scroll Speed U/V"u8, ref speedV, "%.2f"u8, -5f, 5f))
+        {
+            staged.SpeedV = speedV;
+            changed       = true;
+        }
+
+        ImUtf8.HoverTooltip("How fast the effect pattern moves across the hair in each texture direction. Negative reverses the direction; 0/0 freezes it."u8);
+
+        ImGui.SetNextItemWidth(150 * ImUtf8.GlobalScale);
+        var stretchU = staged.StretchU;
+        if (ImUtf8.Slider("##stretchU"u8, ref stretchU, "%.2f"u8, 0.05f, 8f))
+        {
+            staged.StretchU = Math.Clamp(stretchU, 0.01f, 16f);
+            changed         = true;
+        }
+
+        ImGui.SameLine();
+        ImGui.SetNextItemWidth(150 * ImUtf8.GlobalScale);
+        var stretchV = staged.StretchV;
+        if (ImUtf8.Slider("Pattern Stretch U/V"u8, ref stretchV, "%.2f"u8, 0.05f, 8f))
+        {
+            staged.StretchV = Math.Clamp(stretchV, 0.01f, 16f);
+            changed         = true;
+        }
+
+        ImUtf8.HoverTooltip("Scale of the effect pattern along each texture direction — low = broad waves, high = fine ripples."u8);
+
+        var pattern = (AnimatedHairBuilder.HairEffectPattern)staged.Pattern;
+        ImGui.SetNextItemWidth(220 * ImUtf8.GlobalScale);
+        using (var combo = ImUtf8.Combo("Effect Pattern"u8, AnimatedHairBuilder.PatternLabel(pattern)))
+        {
+            if (combo)
+                foreach (var candidate in Enum.GetValues<AnimatedHairBuilder.HairEffectPattern>())
+                {
+                    if (!ImUtf8.Selectable(AnimatedHairBuilder.PatternLabel(candidate), candidate == pattern) || candidate == pattern)
+                        continue;
+
+                    staged.Pattern         = (int)candidate;
+                    staged.EffectImagePath = string.Empty;
+                    changed                = true;
+                }
+        }
+
+        ImUtf8.HoverTooltip("The black/white pattern scrolled across the hair — bright areas show the effect color. Shown below as it tiles."u8);
+
+        DrawPatternThumbnail(staged.Pattern);
+
+        if (!changed)
+            return;
+
+        CommitAnimated(dTexture, staged);
+    }
+
+    private (int Pattern, IDalamudTextureWrap? Wrap) _patternThumbnail = (-1, null);
+
+    /// <summary> A small preview of the selected built-in effect pattern, rendered once per selection. </summary>
+    private void DrawPatternThumbnail(int pattern)
+    {
+        if (_patternThumbnail.Pattern != pattern)
+        {
+            _patternThumbnail.Wrap?.Dispose();
+            const int size = 256;
+            var pixels = AnimatedHairBuilder.GeneratePattern((AnimatedHairBuilder.HairEffectPattern)pattern, size);
+            _patternThumbnail = (pattern, textureProvider.CreateFromRaw(RawImageSpecification.Rgba32(size, size), pixels));
+        }
+
+        if (_patternThumbnail.Wrap is { } wrap)
+            ImGui.Image(wrap.Handle, new Vector2(192, 96) * ImUtf8.GlobalScale);
     }
 
     /// <summary> Find the singleton hair layer of a texture's stack, or stage a fresh neutral one. </summary>
@@ -2249,235 +2501,6 @@ public sealed class DecalsTab(
 
         Save(dTexture);
     }
-
-    private void DrawHighlightControls(DTexture dTexture, TextureOption option)
-    {
-        var layer   = HairLayerFor<HairHighlightLayer>(dTexture, option, out var exists);
-        var changed = false;
-
-        ImUtf8.TextWrapped(
-            "Highlights — pick where they sit; everything generated keeps the strength and layering of the style's own highlights."u8);
-
-        ImGui.SetNextItemWidth(220 * ImUtf8.GlobalScale);
-        using (var combo = ImUtf8.Combo("Placement"u8, HighlightBaseLabel(layer.Base)))
-        {
-            if (combo)
-                foreach (var placement in PlacementOrder)
-                {
-                    if (!ImUtf8.Selectable(HighlightBaseLabel(placement), placement == layer.Base) || placement == layer.Base)
-                        continue;
-
-                    layer.Base = placement;
-                    changed    = true;
-                }
-        }
-
-        ImUtf8.HoverTooltip(
-            "Where the highlights sit:\nHairstyle Layout: keep the style's own placement.\nInverted Layout: swap — highlighted areas turn plain, plain areas light up.\nFrom the Roots / From the Tips: an ombre zone you slide along the hair — measured on the actual 3D hair (roots near the head, tips away from it).\nExtra Strands: random strands lit on top of the style's own highlights.\nStrands Only: random strands replace them.\nAll Main / All Highlight: one solid color."u8);
-
-        if (layer.Base is HighlightBase.Roots or HighlightBase.Tips)
-        {
-            using var baseIndent = ImRaii.PushIndent();
-            ImGui.SetNextItemWidth(220 * ImUtf8.GlobalScale);
-            var extent = layer.BaseExtent;
-            if (ImUtf8.Slider("Amount"u8, ref extent, "%.2f"u8, 0f, 1f))
-            {
-                layer.BaseExtent = Math.Clamp(extent, 0f, 1f);
-                changed          = true;
-            }
-
-            ImUtf8.HoverTooltip("How far along the hair the highlight zone reaches — drag to slide the color boundary."u8);
-
-            ImGui.SetNextItemWidth(220 * ImUtf8.GlobalScale);
-            var feather = layer.BaseFeather;
-            if (ImUtf8.Slider("Fade"u8, ref feather, "%.2f"u8, 0.01f, 1f))
-            {
-                layer.BaseFeather = Math.Clamp(feather, 0.01f, 1f);
-                changed           = true;
-            }
-
-            ImUtf8.HoverTooltip("Width of the color transition — low = hard dye line, high = long ombre fade."u8);
-        }
-
-        if (layer.Base is HighlightBase.StrandsAdd or HighlightBase.StrandsOnly)
-        {
-            using var strandIndent = ImRaii.PushIndent();
-            ImGui.SetNextItemWidth(220 * ImUtf8.GlobalScale);
-            var coverage = layer.Coverage;
-            if (ImUtf8.Slider("Amount"u8, ref coverage, "%.2f"u8, 0f, 1f))
-            {
-                layer.Coverage = Math.Clamp(coverage, 0f, 1f);
-                changed        = true;
-            }
-
-            ImUtf8.HoverTooltip("How much of the hair the strands cover — low = a few lone strands, high = most of the head."u8);
-
-            ImGui.SetNextItemWidth(220 * ImUtf8.GlobalScale);
-            var scale = layer.NoiseScale;
-            if (ImUtf8.Slider("Strand Size"u8, ref scale, "%.0f"u8, 4f, 128f))
-            {
-                layer.NoiseScale = Math.Clamp(scale, 1f, 256f);
-                changed          = true;
-            }
-
-            ImUtf8.HoverTooltip("Low = broad chunky streaks, high = thin individual strands."u8);
-
-            ImGui.SetNextItemWidth(220 * ImUtf8.GlobalScale);
-            var softness = layer.Softness;
-            if (ImUtf8.Slider("Fade"u8, ref softness, "%.2f"u8, 0.01f, 0.5f))
-            {
-                layer.Softness = Math.Clamp(softness, 0.01f, 0.5f);
-                changed        = true;
-            }
-
-            ImUtf8.HoverTooltip("Feathering of the strand edges — low = crisp strands, high = soft blends."u8);
-
-            ImGui.SetNextItemWidth(220 * ImUtf8.GlobalScale);
-            var seed = layer.Seed;
-            if (ImUtf8.Slider("Seed"u8, ref seed, "%d"u8, 0, 9999))
-            {
-                layer.Seed = seed;
-                changed    = true;
-            }
-
-            ImUtf8.HoverTooltip("Reshuffle WHICH strands light up without changing their look."u8);
-        }
-
-        ImGui.SetNextItemWidth(220 * ImUtf8.GlobalScale);
-        var variation = layer.StrandVariation;
-        if (ImUtf8.Slider("Strand Variation"u8, ref variation, "%.2f"u8, 0f, 1f))
-        {
-            layer.StrandVariation = Math.Clamp(variation, 0f, 1f);
-            changed               = true;
-        }
-
-        ImUtf8.HoverTooltip(
-            "Naturalizes the result: every strand gets a slightly different highlight intensity and streaks break up raggedly along their length — like real layered hair.\n0 = perfectly uniform, 1 = strongly varied."u8);
-
-        ImGui.SetNextItemWidth(220 * ImUtf8.GlobalScale);
-        var strength = layer.Strength;
-        if (ImUtf8.Slider("Strength"u8, ref strength, "%.2f"u8, 0f, 1f))
-        {
-            layer.Strength = Math.Clamp(strength, 0f, 1f);
-            changed        = true;
-        }
-
-        ImUtf8.HoverTooltip("Overall fade between the hairstyle's own highlights and your changes."u8);
-
-        if (ImUtf8.CollapsingHeader("Advanced Shaping"u8))
-        {
-            using var advancedIndent = ImRaii.PushIndent();
-            var gradient = layer.GradientEnabled;
-            if (ImUtf8.Checkbox("Directional Fade"u8, ref gradient))
-            {
-                layer.GradientEnabled = gradient;
-                changed               = true;
-            }
-
-            ImUtf8.HoverTooltip("Fade the highlights out across one direction of the hair on top of the placement."u8);
-
-            if (layer.GradientEnabled)
-            {
-                using var gradientIndent = ImRaii.PushIndent();
-                ImGui.SetNextItemWidth(220 * ImUtf8.GlobalScale);
-                var angle = layer.GradientAngleDeg;
-                if (ImUtf8.Slider("Direction"u8, ref angle, "%.0f°"u8, -180f, 180f))
-                {
-                    layer.GradientAngleDeg = angle;
-                    changed                = true;
-                }
-
-                ImGui.SetNextItemWidth(220 * ImUtf8.GlobalScale);
-                var start = layer.GradientStart;
-                if (ImUtf8.Slider("Fade Start"u8, ref start, "%.2f"u8, 0f, 1f))
-                {
-                    layer.GradientStart = Math.Clamp(start, 0f, 1f);
-                    changed             = true;
-                }
-
-                ImGui.SetNextItemWidth(220 * ImUtf8.GlobalScale);
-                var end = layer.GradientEnd;
-                if (ImUtf8.Slider("Fade End"u8, ref end, "%.2f"u8, 0f, 1f))
-                {
-                    layer.GradientEnd = Math.Clamp(end, 0f, 1f);
-                    changed           = true;
-                }
-
-                var invert = layer.GradientInvert;
-                if (ImUtf8.Checkbox("Invert"u8, ref invert))
-                {
-                    layer.GradientInvert = invert;
-                    changed              = true;
-                }
-
-                ImGui.SameLine();
-                ImGui.SetNextItemWidth(160 * ImUtf8.GlobalScale);
-                var gradientStrength = layer.GradientStrength;
-                if (ImUtf8.Slider("Fade Strength"u8, ref gradientStrength, "%.2f"u8, 0f, 1f))
-                {
-                    layer.GradientStrength = Math.Clamp(gradientStrength, 0f, 1f);
-                    changed                = true;
-                }
-            }
-
-            ImGui.SetNextItemWidth(220 * ImUtf8.GlobalScale);
-            var contrast = layer.Contrast;
-            if (ImUtf8.Slider("Contrast"u8, ref contrast, "%.2f"u8, 0.25f, 4f))
-            {
-                layer.Contrast = Math.Clamp(contrast, 0.25f, 4f);
-                changed        = true;
-            }
-
-            ImUtf8.HoverTooltip("Sharpens (above 1) or softens (below 1) the transition between highlighted and plain hair."u8);
-
-            ImGui.SetNextItemWidth(220 * ImUtf8.GlobalScale);
-            var bias = layer.Bias;
-            if (ImUtf8.Slider("Boost"u8, ref bias, "%+.2f"u8, -1f, 1f))
-            {
-                layer.Bias = Math.Clamp(bias, -1f, 1f);
-                changed    = true;
-            }
-
-            ImUtf8.HoverTooltip("Shifts the whole blend: positive pushes more of the hair toward the highlight color, negative toward the main color."u8);
-        }
-
-        if (exists)
-        {
-            if (ImUtf8.SmallButton("Reset Highlight Adjustment"u8))
-            {
-                RemoveHairLayer<HairHighlightLayer>(dTexture, option);
-                return;
-            }
-
-            ImUtf8.HoverTooltip("Remove the adjustment — the authored highlight layout returns on the next build."u8);
-        }
-
-        if (!changed)
-            return;
-
-        if (!exists)
-            InsertHairLayer(dTexture, option, layer);
-        Save(dTexture);
-    }
-
-    private static readonly HighlightBase[] PlacementOrder =
-    [
-        HighlightBase.Layout, HighlightBase.Inverted, HighlightBase.Roots, HighlightBase.Tips,
-        HighlightBase.StrandsAdd, HighlightBase.StrandsOnly, HighlightBase.MainOnly, HighlightBase.HighlightOnly,
-    ];
-
-    private static string HighlightBaseLabel(HighlightBase placement)
-        => placement switch
-        {
-            HighlightBase.Inverted      => "Inverted Layout",
-            HighlightBase.Roots         => "From the Roots",
-            HighlightBase.Tips          => "From the Tips",
-            HighlightBase.StrandsAdd    => "Extra Strands",
-            HighlightBase.StrandsOnly   => "Strands Only",
-            HighlightBase.MainOnly      => "All Main Color",
-            HighlightBase.HighlightOnly => "All Highlight Color",
-            _                           => "Hairstyle Layout",
-        };
 
     private void DrawShineControls(DTexture dTexture, TextureOption option)
     {

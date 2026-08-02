@@ -34,9 +34,6 @@ public sealed class TextureCompositor(DecalLibrary decals) : IService
                 case DecalLayer decal:
                     ApplyDecal(image, decal, mesh);
                     break;
-                case HairHighlightLayer highlight:
-                    HairAdjust.ApplyHighlight(image, highlight, mesh);
-                    break;
                 case HairShineLayer shine:
                     HairAdjust.ApplyShine(image, shine);
                     break;

@@ -33,10 +33,9 @@ public abstract class TextureLayer
         var type = json["LayerType"]?.ToObject<string>();
         TextureLayer? ret = type switch
         {
-            DecalLayer.Type         => DecalLayer.LoadDecal(json),
-            HairHighlightLayer.Type => HairHighlightLayer.LoadHighlight(json),
-            HairShineLayer.Type     => HairShineLayer.LoadShine(json),
-            _                       => null,
+            DecalLayer.Type     => DecalLayer.LoadDecal(json),
+            HairShineLayer.Type => HairShineLayer.LoadShine(json),
+            _                   => null,
         };
         if (ret == null)
         {
