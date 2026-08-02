@@ -108,15 +108,20 @@ public static class AnimatedHairBuilder
             new MtrlFile.ShaderKey { Key = 0xF886E10E, Value = 0x9A8A46F5 },
         ];
 
-        // Scalar constants in the reference cbuffer order. 0x43345395/0x4172EDCC scroll the
-        // effect texture along U/V; 0x738A241C/0x71CC9A45 stretch it.
+        // Scalar constants in the reference cbuffer order. Shader-verified (SM5 disasm of
+        // the one characterscroll pixel shader binding g_SamplerCatchlight): the effect UV
+        // is texcoord × (tilingU, tilingV) + instanceTime × (scrollU, scrollV), with the
+        // colorset row's effect-channel field selecting parameter set A
+        // (0x43345395/0x4172EDCC tiling, 0x738A241C/0x71CC9A45 scroll) or set B
+        // (0xDA3D022F/0xD87BBC76 tiling, 0xEA8375A6/0xE8C5CBFF scroll). Our rows select
+        // set B, but both sets get the same user values so every channel behaves.
         (uint Id, float Value)[] constants =
         [
             (0x29AC0223, 0.5f), (0xD925FF32, 0.5f), (0xB7FA33E2, 1f), (0xB5545FBB, 1f),
             (0xAD94E254, 0f), (0x39551220, 0f), (0xB61D7498, 0f), (0x5351646E, 0f),
-            (0x6421DD30, 0f), (0x43345395, edit.SpeedU), (0x4172EDCC, edit.SpeedV),
-            (0x738A241C, edit.StretchU), (0x71CC9A45, edit.StretchV), (0xDA3D022F, 1f),
-            (0xD87BBC76, 3f), (0xEA8375A6, 0f), (0xE8C5CBFF, 0.15f),
+            (0x6421DD30, 0f), (0x43345395, edit.TilingU), (0x4172EDCC, edit.TilingV),
+            (0x738A241C, edit.ScrollU), (0x71CC9A45, edit.ScrollV), (0xDA3D022F, edit.TilingU),
+            (0xD87BBC76, edit.TilingV), (0xEA8375A6, edit.ScrollU), (0xE8C5CBFF, edit.ScrollV),
         ];
         mtrl.ShaderPackage.Constants = constants.Select((c, i) => new MtrlFile.Constant
         {
