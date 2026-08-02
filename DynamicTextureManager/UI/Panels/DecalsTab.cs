@@ -81,13 +81,14 @@ public sealed class DecalsTab(
     private readonly List<(int Row, int Count)> _sortedRowUsage = [];
     private int                                _statsTotalTexels = 1;
 
-    private string _skinToneReadError = string.Empty;
-    private string _hairColorReadError = string.Empty;
-
-    // Live customize hair colors + highlights flag, refreshed at most once a second — the
-    // header warning and the preview's highlights-off collapse read this every frame.
+    // Live customize colors, refreshed at most once a second. THE CHARACTER (Glamourer
+    // included) is the source of truth for skin/hair colors — the preview always follows it.
+    // Every successful read refreshes the config cache, which only serves as the fallback
+    // while the character is unreadable (logged out, not human).
     private HairColors? _liveHair;
     private long        _liveHairMs = long.MinValue;
+    private Vector3?    _liveSkin;
+    private long        _liveSkinMs = long.MinValue;
 
     private HairColors? LiveHair()
     {
@@ -95,9 +96,54 @@ public sealed class DecalsTab(
         {
             _liveHairMs = Environment.TickCount64;
             _liveHair   = hairColorReader.TryGetLocalPlayerHair(out var hair) ? hair : null;
+            if (_liveHair is { } live)
+            {
+                var main      = new Rgba32(live.Main.X, live.Main.Y, live.Main.Z).PackedValue;
+                var highlight = new Rgba32(live.Highlight.X, live.Highlight.Y, live.Highlight.Z).PackedValue;
+                if (config.PreviewHairColor != main || config.PreviewHairHighlight != highlight)
+                {
+                    config.PreviewHairColor     = main;
+                    config.PreviewHairHighlight = highlight;
+                    config.Save();
+                }
+            }
         }
 
         return _liveHair;
+    }
+
+    private Vector3? LiveSkin()
+    {
+        if (Environment.TickCount64 - _liveSkinMs > 1000)
+        {
+            _liveSkinMs = Environment.TickCount64;
+            _liveSkin   = skinColorReader.TryGetLocalPlayerSkin(out var tone) ? tone : null;
+            if (_liveSkin is { } live)
+            {
+                var packed = new Rgba32(live.X, live.Y, live.Z).PackedValue;
+                if (config.PreviewSkinTone != packed)
+                {
+                    config.PreviewSkinTone = packed;
+                    config.Save();
+                }
+            }
+        }
+
+        return _liveSkin;
+    }
+
+    /// <summary> A small read-only swatch for a character-derived color. </summary>
+    private static void DrawColorSwatch(string label, uint packed, bool live)
+    {
+        var color = new Rgba32(packed);
+        ImGui.ColorButton(label, new System.Numerics.Vector4(color.R / 255f, color.G / 255f, color.B / 255f, 1f),
+            ImGuiColorEditFlags.NoTooltip | ImGuiColorEditFlags.NoAlpha);
+        ImGui.SameLine();
+        ImUtf8.Text(label);
+        if (ImGui.IsItemHovered())
+            ImUtf8.HoverTooltip(live
+                ? "Read live from your character (Glamourer changes included). The game applies this in its shader — it is never baked into textures."
+                : "Your character is not readable right now (not loaded, or not human) — showing the last known color.");
     }
 
     public void Dispose()
@@ -188,11 +234,7 @@ public sealed class DecalsTab(
             return;
         }
 
-        ImGui.SetNextItemWidth(350 * ImUtf8.GlobalScale);
-        TextureOptions.DrawMaterialCombo(_options, ref _selectedMaterial);
-        ImGui.SameLine();
-        ImUtf8.LabeledHelpMarker("Material"u8,
-            "Decals work per material: they stamp onto the right texture automatically (the colorset id map on colorset-driven gear, else the color texture) and their material effects touch the normal/mask maps.\nThe finished textures are viewable in the Textures tab."u8);
+        DrawUnitSelector(dTexture);
 
         // Modern gear stamps the colorset id map; skin and legacy gear stamp the diffuse;
         // hair stamps its normal map (highlight patterns). Materials exposing none of these
@@ -211,39 +253,8 @@ public sealed class DecalsTab(
                 case MaterialKind.Skin:
                 {
                     ImUtf8.TextWrapped("Skin material — decals bake directly into the skin texture like tattoos and conform to the body."u8);
-                    var packed = new Rgba32(config.PreviewSkinTone);
-                    var tone   = new Vector3(packed.R / 255f, packed.G / 255f, packed.B / 255f);
-                    ImGui.SetNextItemWidth(250 * ImUtf8.GlobalScale);
-                    if (ImUtf8.ColorEdit("Preview Skin Tone"u8, ref tone, ImGuiColorEditFlags.Float))
-                        config.PreviewSkinTone = new Rgba32(tone.X, tone.Y, tone.Z).PackedValue;
-                    if (ImGui.IsItemDeactivatedAfterEdit())
-                    {
-                        config.PreviewSkinToneUserSet = true;
-                        config.Save();
-                    }
-
-                    ImUtf8.HoverTooltip(
-                        "Preview-only: match your character's skin color so the 3D preview looks like your skin.\nThe game applies the real skin color in its shader — this never changes any texture."u8);
-
-                    ImGui.SameLine();
-                    if (ImUtf8.SmallButton("Use My Character's Skin Color"u8))
-                    {
-                        if (skinColorReader.TryGetLocalPlayerSkin(out var liveTone))
-                        {
-                            config.PreviewSkinTone         = new Rgba32(liveTone.X, liveTone.Y, liveTone.Z).PackedValue;
-                            config.PreviewSkinToneUserSet  = true;
-                            config.Save();
-                        }
-                        else
-                        {
-                            _skinToneReadError = "Could not read your character's skin color — not loaded, or not human.";
-                        }
-                    }
-
-                    ImUtf8.HoverTooltip(
-                        "Reads your currently loaded character's actual configured skin color from the game.\nRequires your character to be loaded and human."u8);
-                    if (_skinToneReadError.Length > 0)
-                        ImUtf8.TextWrapped(_skinToneReadError);
+                    var liveSkin = LiveSkin();
+                    DrawColorSwatch("Skin Color", config.PreviewSkinTone, liveSkin != null);
                     break;
                 }
                 case MaterialKind.LegacyDiffuse:
@@ -252,55 +263,14 @@ public sealed class DecalsTab(
                 case MaterialKind.Hair:
                 {
                     ImUtf8.TextWrapped(
-                        "Hair material — hair has no color texture; the game blends your main hair color toward your highlight color per pixel. Adjustments and decals reshape where highlights appear; decals stamp as highlight patterns."u8);
+                        "Hair material — hair has no color texture; the game blends your main hair color toward your highlight color per pixel, using the colors below (read live from your character)."u8);
 
-                    var mainPacked = new Rgba32(config.PreviewHairColor);
-                    var main       = new Vector3(mainPacked.R / 255f, mainPacked.G / 255f, mainPacked.B / 255f);
-                    ImGui.SetNextItemWidth(170 * ImUtf8.GlobalScale);
-                    if (ImUtf8.ColorEdit("Hair"u8, ref main, ImGuiColorEditFlags.Float))
-                        config.PreviewHairColor = new Rgba32(main.X, main.Y, main.Z).PackedValue;
-                    var edited = ImGui.IsItemDeactivatedAfterEdit();
-                    ImUtf8.HoverTooltip(
-                        "Preview-only: match your character's hair color so the 3D preview looks like your hair.\nThe game applies the real colors in its shader — this never changes any texture."u8);
+                    var liveHair = LiveHair();
+                    DrawColorSwatch("Hair", config.PreviewHairColor, liveHair != null);
+                    ImGui.SameLine(0, 24 * ImUtf8.GlobalScale);
+                    DrawColorSwatch("Highlights", config.PreviewHairHighlight, liveHair != null);
 
-                    ImGui.SameLine();
-                    var highlightPacked = new Rgba32(config.PreviewHairHighlight);
-                    var highlight       = new Vector3(highlightPacked.R / 255f, highlightPacked.G / 255f, highlightPacked.B / 255f);
-                    ImGui.SetNextItemWidth(170 * ImUtf8.GlobalScale);
-                    if (ImUtf8.ColorEdit("Highlights"u8, ref highlight, ImGuiColorEditFlags.Float))
-                        config.PreviewHairHighlight = new Rgba32(highlight.X, highlight.Y, highlight.Z).PackedValue;
-                    edited |= ImGui.IsItemDeactivatedAfterEdit();
-                    ImUtf8.HoverTooltip("Preview-only highlight color, see the hair color tooltip."u8);
-
-                    if (edited)
-                    {
-                        config.PreviewHairColorsUserSet = true;
-                        config.Save();
-                    }
-
-                    ImGui.SameLine();
-                    if (ImUtf8.SmallButton("Use My Character's Hair Colors"u8))
-                    {
-                        if (hairColorReader.TryGetLocalPlayerHair(out var liveHair))
-                        {
-                            config.PreviewHairColor         = new Rgba32(liveHair.Main.X, liveHair.Main.Y, liveHair.Main.Z).PackedValue;
-                            config.PreviewHairHighlight     = new Rgba32(liveHair.Highlight.X, liveHair.Highlight.Y, liveHair.Highlight.Z).PackedValue;
-                            config.PreviewHairColorsUserSet = true;
-                            config.Save();
-                            _hairColorReadError = string.Empty;
-                        }
-                        else
-                        {
-                            _hairColorReadError = "Could not read your character's hair colors — not loaded, or not human.";
-                        }
-                    }
-
-                    ImUtf8.HoverTooltip(
-                        "Reads your currently loaded character's actual configured hair and highlight colors from the game.\nRequires your character to be loaded and human."u8);
-                    if (_hairColorReadError.Length > 0)
-                        ImUtf8.TextWrapped(_hairColorReadError);
-
-                    if (LiveHair() is { HighlightsEnabled: false })
+                    if (liveHair is { HighlightsEnabled: false })
                         ImUtf8.TextWrapped(
                             "Your character has highlights DISABLED — highlight edits stay invisible in-game (and in this preview) until you enable highlights in the aesthetician/character appearance."u8);
                     break;
@@ -320,6 +290,69 @@ public sealed class DecalsTab(
 
     private List<TextureOption>? _materialOptionsCache;
     private (List<TextureOption>? Options, string Material) _materialOptionsKey;
+
+    /// <summary>
+    /// The editing target selector: sources are MODEL units (the pieces added to this mod),
+    /// so the dropdown lists those. A piece with several editable materials gets a Part
+    /// dropdown next to it; the common single-material case stays one control.
+    /// </summary>
+    private void DrawUnitSelector(DTexture dTexture)
+    {
+        var units = SourceUnits.Of(dTexture.Data.Source)
+            .Select(u => (Unit: u, Parts: u.Materials
+                .Where(m => !m.Overlay && _options!.Any(o => string.Equals(o.MaterialGamePath, m.GamePath, StringComparison.OrdinalIgnoreCase)))
+                .ToList()))
+            .Where(t => t.Parts.Count > 0)
+            .ToList();
+        if (units.Count == 0)
+            return;
+
+        var current = units.FirstOrDefault(t => t.Parts.Any(p
+            => string.Equals(p.GamePath, _selectedMaterial, StringComparison.OrdinalIgnoreCase)));
+        if (current.Unit == null)
+        {
+            current           = units[0];
+            _selectedMaterial = current.Parts[0].GamePath;
+        }
+
+        ImGui.SetNextItemWidth(280 * ImUtf8.GlobalScale);
+        using (var combo = ImUtf8.Combo("##sourceUnit"u8, current.Unit.Label))
+        {
+            if (combo)
+                foreach (var (unit, parts) in units)
+                {
+                    if (ImUtf8.Selectable($"{unit.Label}##{unit.Key}", ReferenceEquals(unit, current.Unit))
+                     && !ReferenceEquals(unit, current.Unit))
+                        _selectedMaterial = parts[0].GamePath;
+                }
+        }
+
+        if (current.Parts.Count > 1)
+        {
+            ImGui.SameLine();
+            var currentPart = current.Parts.FirstOrDefault(p
+                => string.Equals(p.GamePath, _selectedMaterial, StringComparison.OrdinalIgnoreCase)) ?? current.Parts[0];
+            ImGui.SetNextItemWidth(180 * ImUtf8.GlobalScale);
+            using var combo = ImUtf8.Combo("##unitPart"u8, currentPart.Label);
+            if (combo)
+                foreach (var part in current.Parts)
+                {
+                    if (ImUtf8.Selectable($"{part.Label}##{part.GamePath}",
+                            string.Equals(part.GamePath, _selectedMaterial, StringComparison.OrdinalIgnoreCase)))
+                        _selectedMaterial = part.GamePath;
+                }
+
+            ImGui.SameLine();
+            ImUtf8.LabeledHelpMarker("Part"u8,
+                "This piece has several materials (parts with their own colorsets/textures) — pick which one to edit."u8);
+        }
+        else
+        {
+            ImGui.SameLine();
+            ImUtf8.LabeledHelpMarker("Source"u8,
+                "The piece being edited. Decals stamp onto its right texture automatically (the colorset id map on colorset-driven gear, else the color texture) and their material effects touch the normal/mask maps.\nThe finished textures are viewable in the Textures tab."u8);
+        }
+    }
 
     /// <summary> The selected material's options, cached — Draw paths ask for this several times per frame. </summary>
     private List<TextureOption> MaterialOptions()
@@ -1902,7 +1935,9 @@ public sealed class DecalsTab(
         var indexEntry   = EntryFor(indexOption);
 
         // Skin diffuse textures are pale neutral maps the game tints with the customize skin
-        // color — stand in with the configured preview tone so the preview resembles skin.
+        // color — stand in with the character's live tone so the preview resembles skin.
+        if (kind is MaterialKind.Skin)
+            LiveSkin();
         var skinTone = kind is MaterialKind.Skin ? config.PreviewSkinTone : 0u;
 
         // Hair preview colors; when the character's highlights are disabled the game shows no
@@ -1955,11 +1990,20 @@ public sealed class DecalsTab(
         // Highlights toggle entirely — preview the base color with the effect color in the
         // highlight areas. Static stand-in; the scrolling only shows in game. Colorset colors
         // live in the squared domain, so take the root here — the renderer squares them back.
+        var live = LiveHair();
         if (dTexture.Data.AnimatedHair.GetValueOrDefault(_selectedMaterial) is { Enabled: true } animated)
-            return (PackSqrt(animated.BaseColor, 1f), PackSqrt(animated.EffectColor, animated.EffectIntensity));
+        {
+            var (baseColor, highlightColor) = EffectiveAnimatedColors(animated);
+            // Highlight areas show their hair diffuse with the emissive effect glowing on top —
+            // approximate the glow additively for the static stand-in.
+            var glow = new float[3];
+            for (var c = 0; c < 3; c++)
+                glow[c] = highlightColor[c] + animated.EffectColor[c] * animated.EffectIntensity;
+            return (PackSqrt(baseColor, 1f), PackSqrt(glow, 1f));
+        }
 
         return (config.PreviewHairColor,
-            LiveHair() is { HighlightsEnabled: false } ? config.PreviewHairColor : config.PreviewHairHighlight);
+            live is { HighlightsEnabled: false } ? config.PreviewHairColor : config.PreviewHairHighlight);
     }
 
     private static uint PackSqrt(float[] rgb, float scale)
@@ -1967,6 +2011,21 @@ public sealed class DecalsTab(
             MathF.Sqrt(Math.Clamp(rgb[0] * scale, 0f, 1f)),
             MathF.Sqrt(Math.Clamp(rgb[1] * scale, 0f, 1f)),
             MathF.Sqrt(Math.Clamp(rgb[2] * scale, 0f, 1f))).PackedValue;
+
+    /// <summary>
+    /// The animated conversion's hair + highlight colors as they will bake: the character's
+    /// live colors (squared — colorset colors live in the squared domain) unless the override
+    /// toggle is set; stored values also serve as the fallback while the character is
+    /// unreadable. The effect color is always the stored one and not part of this.
+    /// </summary>
+    private (float[] Base, float[] Highlight) EffectiveAnimatedColors(AnimatedHairEdit edit)
+    {
+        if (edit.OverrideHairColors || LiveHair() is not { } live)
+            return (edit.BaseColor, edit.HighlightColor);
+
+        return ([live.Main.X * live.Main.X, live.Main.Y * live.Main.Y, live.Main.Z * live.Main.Z],
+            [live.Highlight.X * live.Highlight.X, live.Highlight.Y * live.Highlight.Y, live.Highlight.Z * live.Highlight.Z]);
+    }
 
     private (Vector3 Main, Vector3 Highlight)? HairPreviewColors(DTexture dTexture, MaterialKind kind)
     {
@@ -2305,17 +2364,10 @@ public sealed class DecalsTab(
         {
             staged.Enabled = enabled;
             changed        = true;
-            if (enabled && !staged.BaseColorUserSet && LiveHair() is { } live)
-            {
-                // Converted hair takes its base color from the colorset, not the character
-                // sheet — seed it from the live hair color (squared, matching the shader's
-                // customize-color convention) so the swap starts out looking familiar.
-                staged.BaseColor = [live.Main.X * live.Main.X, live.Main.Y * live.Main.Y, live.Main.Z * live.Main.Z];
-            }
         }
 
         ImUtf8.HoverTooltip(
-            "Replaces this hairstyle's materials with the game's scrolling-effect shader: the highlight areas become a glowing effect that moves through the hair.\nApplies to every material of the hairstyle at once. The preview shows the new colors statically — the movement itself only shows IN GAME after a Build.\nWhile converted: the in-game hair color picker and Highlights toggle no longer affect this hair (colors below are used instead), and the Shine sliders above do not apply."u8);
+            "Replaces this hairstyle's materials with the game's scrolling-effect shader: the highlight areas become a glowing effect that moves through the hair.\nApplies to every material of the hairstyle at once. The preview shows the new colors statically — the movement itself only shows IN GAME after a Build.\nThe hair and highlight colors follow your character unless overridden below; the effect color is the glow and is always picked here. The in-game Highlights toggle and the Shine sliders above do not apply to converted hair."u8);
 
         var hairstyleMaterials = HairstyleMaterialPaths(dTexture);
 
@@ -2342,6 +2394,8 @@ public sealed class DecalsTab(
 
         using var indent = ImRaii.PushIndent();
 
+        // Three colors: the effect (emissive glow) is always authored here; the hair and
+        // highlight colors follow the character until the override toggle is set.
         var effectColor = new Vector3(staged.EffectColor[0], staged.EffectColor[1], staged.EffectColor[2]);
         if (ImUtf8.ColorEdit("Effect Color"u8, ref effectColor))
         {
@@ -2349,28 +2403,48 @@ public sealed class DecalsTab(
             changed            = true;
         }
 
-        ImUtf8.HoverTooltip("Emissive color of the moving effect — what the highlight areas glow with."u8);
+        ImUtf8.HoverTooltip("Emissive color of the moving effect — what glows and scrolls through the highlight areas."u8);
 
-        var baseColor = new Vector3(staged.BaseColor[0], staged.BaseColor[1], staged.BaseColor[2]);
-        if (ImUtf8.ColorEdit("Base Hair Color"u8, ref baseColor))
+        var overrideColors = staged.OverrideHairColors;
+        if (ImUtf8.Checkbox("Override Hair Colors"u8, ref overrideColors))
         {
-            staged.BaseColor        = [baseColor.X, baseColor.Y, baseColor.Z];
-            staged.BaseColorUserSet = true;
-            changed                 = true;
+            // Seed the overrides from what is currently shown so enabling starts from the
+            // character's colors instead of jumping to a stale stored value.
+            if (overrideColors)
+            {
+                var (liveBase, liveHighlight) = EffectiveAnimatedColors(staged);
+                staged.BaseColor      = (float[])liveBase.Clone();
+                staged.HighlightColor = (float[])liveHighlight.Clone();
+            }
+
+            staged.OverrideHairColors = overrideColors;
+            changed                   = true;
         }
 
-        ImUtf8.HoverTooltip("Color of the rest of the hair. The in-game hair color picker cannot reach converted hair, so this replaces it."u8);
+        ImUtf8.HoverTooltip("The hair and highlight colors normally follow your character (Glamourer included) at every Build.\nEnable to pick both manually instead — the in-game hair color picker cannot reach converted hair."u8);
 
-        ImGui.SameLine();
-        if (ImUtf8.SmallButton("Use My Hair Colors"u8) && LiveHair() is { } hair)
+        if (staged.OverrideHairColors)
         {
-            staged.BaseColor        = [hair.Main.X * hair.Main.X, hair.Main.Y * hair.Main.Y, hair.Main.Z * hair.Main.Z];
-            staged.EffectColor      = [hair.Highlight.X * hair.Highlight.X, hair.Highlight.Y * hair.Highlight.Y, hair.Highlight.Z * hair.Highlight.Z];
-            staged.BaseColorUserSet = true;
-            changed                 = true;
-        }
+            using var colorIndent = ImRaii.PushIndent();
 
-        ImUtf8.HoverTooltip("Read your character's current hair and highlight colors: base color from the hair color, effect color from the highlight color."u8);
+            var baseColor = new Vector3(staged.BaseColor[0], staged.BaseColor[1], staged.BaseColor[2]);
+            if (ImUtf8.ColorEdit("Hair Color"u8, ref baseColor))
+            {
+                staged.BaseColor = [baseColor.X, baseColor.Y, baseColor.Z];
+                changed          = true;
+            }
+
+            ImUtf8.HoverTooltip("Baked color of the hair outside the highlight areas."u8);
+
+            var highlightColor = new Vector3(staged.HighlightColor[0], staged.HighlightColor[1], staged.HighlightColor[2]);
+            if (ImUtf8.ColorEdit("Highlight Color"u8, ref highlightColor))
+            {
+                staged.HighlightColor = [highlightColor.X, highlightColor.Y, highlightColor.Z];
+                changed               = true;
+            }
+
+            ImUtf8.HoverTooltip("Baked hair color of the highlight areas underneath the glowing effect."u8);
+        }
 
         ImGui.SetNextItemWidth(220 * ImUtf8.GlobalScale);
         var intensity = staged.EffectIntensity;
