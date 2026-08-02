@@ -53,6 +53,26 @@ public sealed unsafe class SkinColorReader(IObjectTable objects, CmpFileCache cm
             if (!model.IsHuman)
                 return false;
 
+            // Preferred source: the draw object's customize-parameter constant buffer — the
+            // exact color the shader consumes, INCLUDING Glamourer's advanced (RGB) dyes,
+            // which never touch the customize bytes and are invisible to the palette lookup
+            // below. Buffer values live in the squared domain; take the root back to the
+            // palette domain this method promises.
+            // NOT trusted blindly: an all-zero read means the buffer wasn't usable on this
+            // setup (real skin colors are never exact zero) — fall through to the palette.
+            var cbuffer = model.AsHuman->CustomizeParameterCBuffer;
+            if (cbuffer != null)
+            {
+                var parameters = cbuffer->TryGetBuffer<FFXIVClientStructs.FFXIV.Shader.CustomizeParameter>();
+                if (parameters.Length > 0 && parameters[0].SkinColor is { } skin
+                 && skin.X + skin.Y + skin.Z > 0.001f)
+                {
+                    rgb = new Vector3(MathF.Sqrt(Math.Clamp(skin.X, 0f, 1f)), MathF.Sqrt(Math.Clamp(skin.Y, 0f, 1f)),
+                        MathF.Sqrt(Math.Clamp(skin.Z, 0f, 1f)));
+                    return true;
+                }
+            }
+
             var customize = model.GetCustomize();
             var clan      = customize.Clan;
             var gender    = customize.Gender;
