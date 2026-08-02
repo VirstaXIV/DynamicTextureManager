@@ -205,11 +205,48 @@ public static class AnimatedHairBuilder
 
     public const int MaskSize = 16;
 
-    /// <summary> The mask the reference uses: a small pure-white tile. </summary>
+    /// <summary>
+    /// The reference's mask: a small pure-white tile — flat shading, kept as the fallback
+    /// when the hair mask cannot be composited.
+    /// </summary>
     public static byte[] BuildMaskRgba()
     {
         var result = new byte[MaskSize * MaskSize * 4];
         Array.Fill(result, (byte)255);
+        return result;
+    }
+
+    /// <summary>
+    /// The character-shader mask derived from the composited HAIR mask, so the conversion
+    /// keeps the original per-strand shading instead of the reference's flat white tile.
+    /// Hair mask channels are R=spec power, G=roughness, B=SSS, A=ambient occlusion.
+    /// Character-family mask semantics as established in game: B MULTIPLIES THE DIFFUSE
+    /// (proven empirically — B=0 rendered the hair pure black, B=255 flat bright), R dims
+    /// the specular (cavity occlusion), G is roughness. Any ABSOLUTE use of the AO in B
+    /// tints the whole style grey (hair AO averages well under 1, and the real hair shader
+    /// clearly does not multiply diffuse by it — unconverted white hair stays white), so
+    /// the AO is NORMALIZED around its own mean: a typical strand keeps FULL diffuse
+    /// brightness, only crevices darker than typical shade down. Squared into the shader's
+    /// linear domain from the display-domain curve.
+    /// </summary>
+    public static byte[] BuildCharMaskRgba(byte[] compositedHairMask)
+    {
+        long aoSum = 0;
+        for (var i = 3; i < compositedHairMask.Length; i += 4)
+            aoSum += compositedHairMask[i];
+        var mean = Math.Max(1f, aoSum / (compositedHairMask.Length / 4f)) / 255f;
+
+        var result = new byte[compositedHairMask.Length];
+        for (var i = 0; i + 3 < result.Length; i += 4)
+        {
+            var relative = MathF.Min(1f, compositedHairMask[i + 3] / 255f / mean);
+            var display  = MathF.Pow(relative, 0.75f);
+            result[i]     = compositedHairMask[i + 3]; // R := AO (spec occlusion)
+            result[i + 1] = compositedHairMask[i + 1]; // G := roughness
+            result[i + 2] = (byte)Math.Clamp((int)MathF.Round(display * display * 255f), 0, 255);
+            result[i + 3] = 255;
+        }
+
         return result;
     }
 

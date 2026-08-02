@@ -27,7 +27,19 @@ namespace DynamicTextureManager.UI.Panels;
 /// to a flat silhouette.
 /// </summary>
 public sealed record ViewportShading(DecodedTexture? Diffuse, DecodedTexture? IdMap, Vector3[]? RowDiffuse, Vector3? SkinTone = null,
-    (Vector3 Main, Vector3 Highlight)? HairColors = null, DecodedTexture? HairMask = null);
+    (Vector3 Main, Vector3 Highlight)? HairColors = null, DecodedTexture? HairMask = null, ViewportEffect? Effect = null);
+
+/// <summary>
+/// A live stand-in for the animated-effect conversion: the effect pattern scrolled over the
+/// highlight areas (normal B) of every hair mesh as unlit emissive, animated in real time so
+/// pattern/speed/stretch/color edits can be judged without a build. DisplayColor is in the
+/// DISPLAY domain (root of the stored squared colorset color times intensity — the same
+/// conversion the hair colors get), so the glow's brightness matches the in-game emissive.
+/// PatternRgba must be a CACHED array — the record compares it by reference to decide
+/// whether the shading changed.
+/// </summary>
+public sealed record ViewportEffect(byte[] PatternRgba, int PatternSize, Vector3 DisplayColor,
+    float SpeedU, float SpeedV, float StretchU, float StretchV);
 
 /// <summary>
 /// An extra mesh rendered alongside the primary selected material — overlay parts (nails,
@@ -155,7 +167,8 @@ public sealed class DecalViewport(ITextureProvider textureProvider) : IDisposabl
          && ReferenceEquals(_shading?.RowDiffuse, shading?.RowDiffuse)
          && Nullable.Equals(_shading?.SkinTone, shading?.SkinTone)
          && Nullable.Equals(_shading?.HairColors, shading?.HairColors)
-         && ReferenceEquals(_shading?.HairMask, shading?.HairMask))
+         && ReferenceEquals(_shading?.HairMask, shading?.HairMask)
+         && Equals(_shading?.Effect, shading?.Effect))
             return;
 
         _shading     = shading;
@@ -283,10 +296,30 @@ public sealed class DecalViewport(ITextureProvider textureProvider) : IDisposabl
         var avail = ImGui.GetContentRegionAvail();
         var size  = MathF.Max(200f, MathF.Min(avail.X, avail.Y));
 
+        // Camera interaction degrades gracefully instead of re-rasterizing 768² every frame
+        // (which tanked game fps): while orbiting/panning/zooming, render at HALF resolution
+        // and at most 30 times a second; a final full-resolution render lands on release.
+        var now         = ImGui.GetTime();
+        var interacting = now - _lastCameraChange < 0.15;
         if (_renderDirty || _wrap == null)
         {
-            Render();
-            _renderDirty = false;
+            if (_wrap == null || !interacting || now - _lastRenderTime >= 1.0 / 30)
+            {
+                Render(interacting ? RenderSize / 2 : RenderSize);
+                _renderDirty    = false;
+                _fullResPending = interacting;
+            }
+        }
+        else if (_fullResPending && !interacting)
+        {
+            Render(RenderSize);
+            _fullResPending = false;
+        }
+        else if (_shading?.Effect != null && _effectPixelCount > 0 && now - _lastEffectFrame >= 1.0 / 30)
+        {
+            // Animate the effect WITHOUT re-rasterizing: only the scrolling emissive is
+            // re-composited over the cached base render.
+            PresentFrame();
         }
 
         var start = ImGui.GetCursorScreenPos();
@@ -392,8 +425,9 @@ public sealed class DecalViewport(ITextureProvider textureProvider) : IDisposabl
             }
             else
             {
-                _distance    = Math.Clamp(_distance * (1f - io.MouseWheel * 0.1f), 0.05f, 20f);
-                _renderDirty = true;
+                _distance         = Math.Clamp(_distance * (1f - io.MouseWheel * 0.1f), 0.05f, 20f);
+                _renderDirty      = true;
+                _lastCameraChange = ImGui.GetTime();
             }
         }
 
@@ -404,7 +438,8 @@ public sealed class DecalViewport(ITextureProvider textureProvider) : IDisposabl
             {
                 _yaw   -= delta.X * 0.01f;
                 _pitch  = Math.Clamp(_pitch + delta.Y * 0.01f, -1.5f, 1.5f);
-                _renderDirty = true;
+                _renderDirty      = true;
+                _lastCameraChange = ImGui.GetTime();
             }
         }
 
@@ -417,8 +452,9 @@ public sealed class DecalViewport(ITextureProvider textureProvider) : IDisposabl
                 var forward   = Vector3.Normalize(-eyeOffset);
                 var right     = Vector3.Normalize(Vector3.Cross(forward, Vector3.UnitY));
                 var up        = Vector3.Cross(right, forward);
-                _target      += (-right * delta.X + up * delta.Y) * _distance * 0.0015f;
-                _renderDirty  = true;
+                _target          += (-right * delta.X + up * delta.Y) * _distance * 0.0015f;
+                _renderDirty      = true;
+                _lastCameraChange = ImGui.GetTime();
             }
         }
 
@@ -607,6 +643,25 @@ public sealed class DecalViewport(ITextureProvider textureProvider) : IDisposabl
         return texture.Rgba[(y * texture.Width + x) * 4 + 3];
     }
 
+    private static byte SampleBlue(DecodedTexture texture, Vector2 uv)
+    {
+        var x = Math.Clamp((int)(uv.X * texture.Width), 0, texture.Width - 1);
+        var y = Math.Clamp((int)(uv.Y * texture.Height), 0, texture.Height - 1);
+        return texture.Rgba[(y * texture.Width + x) * 4 + 2];
+    }
+
+    /// <summary> The effect pattern's brightness at a scrolled, stretched, wrapping UV. </summary>
+    private static float SampleEffect(ViewportEffect effect, Vector2 uv, Vector2 offset)
+    {
+        var u = uv.X * effect.StretchU + offset.X;
+        var v = uv.Y * effect.StretchV + offset.Y;
+        u -= MathF.Floor(u);
+        v -= MathF.Floor(v);
+        var x = Math.Clamp((int)(u * effect.PatternSize), 0, effect.PatternSize - 1);
+        var y = Math.Clamp((int)(v * effect.PatternSize), 0, effect.PatternSize - 1);
+        return effect.PatternRgba[(y * effect.PatternSize + x) * 4] / 255f;
+    }
+
     // Fixed-size render targets, reused across frames — a drag re-renders every frame and
     // fresh 2.3 MB + 2.3 MB arrays per frame would churn the large-object heap.
     private readonly byte[]  _renderRgba  = new byte[RenderSize * RenderSize * 4];
@@ -625,15 +680,15 @@ public sealed class DecalViewport(ITextureProvider textureProvider) : IDisposabl
     /// between them is correct. Overlays are strictly additive: with none bound, this renders
     /// byte-identical to the original single-mesh path.
     /// </summary>
-    private void Render()
+    private void Render(int size = RenderSize)
     {
         if (_mesh == null)
             return;
 
-        const int size = RenderSize;
+        _renderedSize = size;
         var rgba  = _renderRgba;
         var depth = _renderDepth;
-        Array.Fill(depth, float.MaxValue);
+        depth.AsSpan(0, size * size).Fill(float.MaxValue);
         Array.Clear(_editableTouched);
         for (var i = 0; i < size * size; ++i)
         {
@@ -661,6 +716,19 @@ public sealed class DecalViewport(ITextureProvider textureProvider) : IDisposabl
         var realColor = !_highlightDecal && layer != null
          && (!layer.IdRemap || (rows != null && layer.PaletteRows.Count > 0 && layer.PaletteRows.Count == layer.PaletteColors.Count));
         var gradientPartners = layer is { IdRemap: true } ? DecalQuantizer.GradientPartners(layer) : [];
+
+        // Animated effect: the rasterizer only RECORDS which pixels are highlight areas (and
+        // their UV); the scrolling emissive itself is composited per animation frame in
+        // PresentFrame so the mesh never re-rasterizes for animation.
+        var effect = _shading?.Effect;
+        if (effect != null)
+        {
+            // Full capacity regardless of the current render size — a half-res interactive
+            // render must not shrink the buffers a later full-res render needs.
+            _effectBlend ??= new float[RenderSize * RenderSize];
+            _effectUv    ??= new Vector2[RenderSize * RenderSize];
+            Array.Clear(_effectBlend);
+        }
 
         // Renders one mesh into the shared framebuffer/depth-buffer. `skipContext` is true for
         // overlay entries: their OWN merged mesh includes the whole body as dimmed context
@@ -803,9 +871,10 @@ public sealed class DecalViewport(ITextureProvider textureProvider) : IDisposabl
                                 _editableTouched[index] = true;
 
                             var pixelNormal = mesh.Normals[i0] * w0 + mesh.Normals[i1] * w1 + mesh.Normals[i2] * w2;
-                            var light = pixelNormal.LengthSquared() > 1e-8f
-                                ? 0.35f + 0.65f * MathF.Abs(Vector3.Dot(Vector3.Normalize(pixelNormal), eyeDirection))
-                                : 0.6f;
+                            var facing = pixelNormal.LengthSquared() > 1e-8f
+                                ? MathF.Abs(Vector3.Dot(Vector3.Normalize(pixelNormal), eyeDirection))
+                                : 0.4f;
+                            var light = 0.35f + 0.65f * facing;
 
                             // Dimmed/context geometry belongs to a DIFFERENT material than the one
                             // shaded here — its UVs point into a texture this pass never loaded, so
@@ -814,13 +883,14 @@ public sealed class DecalViewport(ITextureProvider textureProvider) : IDisposabl
                             // reading garbage from the body's own diffuse). It's shown only for
                             // orientation, so use a flat neutral gray instead of sampling at all.
                             Vector3 color;
+                            var uv = Vector2.Zero;
                             if (dimmed)
                             {
                                 color = new Vector3(190f) * 0.4f;
                             }
                             else
                             {
-                                var uv = mesh.Uvs[i0] * w0 + mesh.Uvs[i1] * w1 + mesh.Uvs[i2] * w2;
+                                uv    = mesh.Uvs[i0] * w0 + mesh.Uvs[i1] * w1 + mesh.Uvs[i2] * w2;
                                 color = SampleAlbedo(meshDiffuse, meshIdMap, rows, meshSkinTone, meshHairColors, meshHairMask, uv) * 255f;
                             }
 
@@ -898,6 +968,34 @@ public sealed class DecalViewport(ITextureProvider textureProvider) : IDisposabl
                             }
 
                             color *= light;
+
+                            // Cheap view-based specular from the hair mask (R = spec power,
+                            // G = roughness), so the Shine sliders visibly respond in the
+                            // preview instead of only after an in-game Build.
+                            if (!dimmed && meshHairColors != null && meshHairMask != null)
+                            {
+                                var mx = Math.Clamp((int)(uv.X * meshHairMask.Width), 0, meshHairMask.Width - 1);
+                                var my = Math.Clamp((int)(uv.Y * meshHairMask.Height), 0, meshHairMask.Height - 1);
+                                var mo = (my * meshHairMask.Width + mx) * 4;
+                                var glossiness = 1f - meshHairMask.Rgba[mo + 1] / 255f;
+                                var spec = MathF.Pow(facing, 6f + glossiness * 58f)
+                                    * (meshHairMask.Rgba[mo] / 255f) * 0.45f;
+                                color += new Vector3(230f) * spec;
+                            }
+
+                            // Highlight-blend (composited normal B) of the pixel's final
+                            // surface, for the per-frame emissive pass. Every pixel write
+                            // updates it, so occlusion between meshes stays correct.
+                            if (effect != null)
+                            {
+                                var blend = !dimmed && meshHairColors != null && meshDiffuse != null
+                                    ? SampleBlue(meshDiffuse, uv) / 255f
+                                    : 0f;
+                                _effectBlend![index] = blend;
+                                if (blend > 0.01f)
+                                    _effectUv![index] = uv;
+                            }
+
                             rgba[index * 4]     = (byte)Math.Clamp((int)color.X, 0, 255);
                             rgba[index * 4 + 1] = (byte)Math.Clamp((int)color.Y, 0, 255);
                             rgba[index * 4 + 2] = (byte)Math.Clamp((int)color.Z, 0, 255);
@@ -913,7 +1011,75 @@ public sealed class DecalViewport(ITextureProvider textureProvider) : IDisposabl
             RasterizeMesh(overlay.Mesh, overlay.Diffuse, null, overlay.ApplySkinTone ? _shading?.SkinTone : null,
                 overlay.HairColors, overlay.HairMask, skipContext: true);
 
+        CollectEffectPixels();
+        PresentFrame();
+    }
+
+    // Interactive-degradation state: camera drags render half-resolution at ≤30fps, a final
+    // full-resolution render lands after release.
+    private int    _renderedSize = RenderSize;
+    private double _lastRenderTime;
+    private double _lastCameraChange;
+    private bool   _fullResPending;
+
+    // Animated-effect compositing state: the base render is rasterized once; each animation
+    // frame only re-adds the scrolling emissive over the recorded highlight pixels.
+    private readonly byte[] _animRgba = new byte[RenderSize * RenderSize * 4];
+    private float[]?   _effectBlend;
+    private Vector2[]? _effectUv;
+    private int[]      _effectPixels = [];
+    private int        _effectPixelCount;
+    private double     _lastEffectFrame;
+
+    /// <summary> Compact the highlight-blend buffer into the pixel list the emissive pass iterates. </summary>
+    private void CollectEffectPixels()
+    {
+        _effectPixelCount = 0;
+        if (_shading?.Effect == null || _effectBlend == null)
+            return;
+
+        if (_effectPixels.Length < _effectBlend.Length)
+            _effectPixels = new int[_effectBlend.Length];
+        var count = _renderedSize * _renderedSize;
+        for (var i = 0; i < count; ++i)
+            if (_effectBlend[i] > 0.01f)
+                _effectPixels[_effectPixelCount++] = i;
+    }
+
+    /// <summary>
+    /// Publish the frame: the cached base render, plus — for an active animated effect — the
+    /// scrolling emissive composited over the recorded highlight pixels only (unlit, like
+    /// in-game emissive; the timebase approximates the in-game scroll rate).
+    /// </summary>
+    private void PresentFrame()
+    {
+        var effect = _shading?.Effect;
+        var buffer = _renderRgba;
+        if (effect != null && _effectPixelCount > 0)
+        {
+            Array.Copy(_renderRgba, _animRgba, _renderedSize * _renderedSize * 4);
+            var t      = (float)ImGui.GetTime();
+            var offset = new Vector2(t * effect.SpeedU * 0.25f, t * effect.SpeedV * 0.25f);
+            for (var n = 0; n < _effectPixelCount; ++n)
+            {
+                var index  = _effectPixels[n];
+                var sample = SampleEffect(effect, _effectUv![index], offset);
+                if (sample <= 0f)
+                    continue;
+
+                var add = effect.DisplayColor * (255f * _effectBlend![index] * sample);
+                var o   = index * 4;
+                _animRgba[o]     = (byte)Math.Clamp(_animRgba[o] + (int)add.X, 0, 255);
+                _animRgba[o + 1] = (byte)Math.Clamp(_animRgba[o + 1] + (int)add.Y, 0, 255);
+                _animRgba[o + 2] = (byte)Math.Clamp(_animRgba[o + 2] + (int)add.Z, 0, 255);
+            }
+
+            buffer = _animRgba;
+        }
+
         _wrap?.Dispose();
-        _wrap = textureProvider.CreateFromRaw(RawImageSpecification.Rgba32(size, size), rgba, "DTM Viewport");
+        _wrap = textureProvider.CreateFromRaw(RawImageSpecification.Rgba32(_renderedSize, _renderedSize), buffer, "DTM Viewport");
+        _lastEffectFrame = ImGui.GetTime();
+        _lastRenderTime  = _lastEffectFrame;
     }
 }

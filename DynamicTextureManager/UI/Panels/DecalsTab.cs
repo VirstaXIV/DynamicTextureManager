@@ -85,10 +85,13 @@ public sealed class DecalsTab(
     // included) is the source of truth for skin/hair colors — the preview always follows it.
     // Every successful read refreshes the config cache, which only serves as the fallback
     // while the character is unreadable (logged out, not human).
+    // 0, NOT long.MinValue: TickCount64 - long.MinValue overflows negative, which made the
+    // refresh condition permanently false — the live read never ran and everything silently
+    // used the stored fallbacks.
     private HairColors? _liveHair;
-    private long        _liveHairMs = long.MinValue;
+    private long        _liveHairMs;
     private Vector3?    _liveSkin;
-    private long        _liveSkinMs = long.MinValue;
+    private long        _liveSkinMs;
 
     private HairColors? LiveHair()
     {
@@ -1855,7 +1858,20 @@ public sealed class DecalsTab(
     #region 3D preview shading
 
     private readonly record struct ShadingKey(int DiffuseVersion, int IndexVersion, int RowVersion, bool Placement, uint SkinTone,
-        uint HairColor, uint HairHighlight, int HairMaskVersion, int OverlayVersionHash);
+        uint HairColor, uint HairHighlight, int HairMaskVersion, int OverlayVersionHash, ViewportEffect? Effect);
+
+    // Effect pattern pixel buffers for the live viewport effect, cached per built-in pattern —
+    // ViewportEffect compares the array by reference, so the same pattern must return the
+    // same instance.
+    private readonly Dictionary<int, byte[]> _effectPatterns = [];
+
+    private byte[] EffectPatternPixels(int pattern)
+    {
+        if (!_effectPatterns.TryGetValue(pattern, out var pixels))
+            _effectPatterns[pattern] = pixels =
+                AnimatedHairBuilder.GeneratePattern((AnimatedHairBuilder.HairEffectPattern)pattern);
+        return pixels;
+    }
 
     private Vector3[]?  _rowDiffuse;
     private int         _rowDiffuseVersion;
@@ -1948,6 +1964,21 @@ public sealed class DecalsTab(
             ? EntryFor(MaterialOptions().Find(o => o.Slot is TextureSlot.Mask))
             : null;
 
+        // Converted hair: the scrolling effect renders live in the viewport, over the
+        // highlight areas of every hair mesh. The stored effect color lives in the squared
+        // colorset domain — take the root (intensity folded in) so the glow's on-screen
+        // brightness matches the in-game emissive.
+        ViewportEffect? viewportEffect = null;
+        if (kind is MaterialKind.Hair
+         && dTexture.Data.AnimatedHair.GetValueOrDefault(_selectedMaterial) is { Enabled: true } animatedEdit)
+            viewportEffect = new ViewportEffect(EffectPatternPixels(animatedEdit.Pattern), AnimatedHairBuilder.PatternSize,
+                new Vector3(
+                    MathF.Sqrt(Math.Clamp(animatedEdit.EffectColor[0] * animatedEdit.EffectIntensity, 0f, 1f)),
+                    MathF.Sqrt(Math.Clamp(animatedEdit.EffectColor[1] * animatedEdit.EffectIntensity, 0f, 1f)),
+                    MathF.Sqrt(Math.Clamp(animatedEdit.EffectColor[2] * animatedEdit.EffectIntensity, 0f, 1f))),
+                animatedEdit.SpeedU, animatedEdit.SpeedV,
+                animatedEdit.StretchU, animatedEdit.StretchV);
+
         // Extra meshes rendered alongside the primary — body overlay parts (nails, accents)
         // or the other hair materials of the same hair model — each with its own composited
         // texture from the SAME preview cache the build writes through, so the live preview
@@ -1955,7 +1986,8 @@ public sealed class DecalsTab(
         var overlayEntries = BuildOverlayEntries(dTexture, placementLayer, boundPath, out var overlayVersionHash);
 
         var key = new ShadingKey(diffuseEntry?.Version ?? -1, indexEntry?.Version ?? -1, _rowDiffuseVersion,
-            placementLayer != null, skinTone, hairColor, hairHighlight, maskEntry?.Version ?? -1, overlayVersionHash);
+            placementLayer != null, skinTone, hairColor, hairHighlight, maskEntry?.Version ?? -1, overlayVersionHash,
+            viewportEffect);
         if (key == _shadingKey)
             return;
 
@@ -1969,7 +2001,7 @@ public sealed class DecalsTab(
         }
 
         _viewport.UpdateShading(new ViewportShading(PreviewBuffer(diffuseEntry), PreviewBuffer(indexEntry), _rowDiffuse, tone,
-            HairPreviewColors(dTexture, kind), PreviewBuffer(maskEntry)));
+            HairPreviewColors(dTexture, kind), PreviewBuffer(maskEntry), viewportEffect));
         _viewport.SetOverlays(overlayEntries);
     }
 
@@ -1993,13 +2025,10 @@ public sealed class DecalsTab(
         var live = LiveHair();
         if (dTexture.Data.AnimatedHair.GetValueOrDefault(_selectedMaterial) is { Enabled: true } animated)
         {
+            // Hair and highlight diffuse only — the glow itself renders as a live animated
+            // overlay in the viewport (ViewportEffect), not baked into these colors.
             var (baseColor, highlightColor) = EffectiveAnimatedColors(animated);
-            // Highlight areas show their hair diffuse with the emissive effect glowing on top —
-            // approximate the glow additively for the static stand-in.
-            var glow = new float[3];
-            for (var c = 0; c < 3; c++)
-                glow[c] = highlightColor[c] + animated.EffectColor[c] * animated.EffectIntensity;
-            return (PackSqrt(baseColor, 1f), PackSqrt(glow, 1f));
+            return (PackSqrt(baseColor, 1f), PackSqrt(highlightColor, 1f));
         }
 
         return (config.PreviewHairColor,
@@ -2360,14 +2389,14 @@ public sealed class DecalsTab(
         var changed = false;
 
         var enabled = staged.Enabled;
-        if (ImUtf8.Checkbox("Animated Highlights"u8, ref enabled))
+        if (ImUtf8.Checkbox("Animated Effect"u8, ref enabled))
         {
             staged.Enabled = enabled;
             changed        = true;
         }
 
         ImUtf8.HoverTooltip(
-            "Replaces this hairstyle's materials with the game's scrolling-effect shader: the highlight areas become a glowing effect that moves through the hair.\nApplies to every material of the hairstyle at once. The preview shows the new colors statically — the movement itself only shows IN GAME after a Build.\nThe hair and highlight colors follow your character unless overridden below; the effect color is the glow and is always picked here. The in-game Highlights toggle and the Shine sliders above do not apply to converted hair."u8);
+            "Replaces this hairstyle's materials with the game's scrolling-effect shader: the highlight areas become a glowing effect that moves through the hair. Works whether or not your character's Highlights toggle is on — the areas come from the hair texture itself.\nApplies to every material of the hairstyle at once; the preview animates a stand-in of the effect (the exact look and speed need a Build to judge in game).\nThe hair and highlight colors follow your character unless overridden below; the effect color is the glow and is always picked here. Of the Shine sliders above, roughness and ambient occlusion carry into converted hair — specular and subsurface do not apply to it."u8);
 
         var hairstyleMaterials = HairstyleMaterialPaths(dTexture);
 
