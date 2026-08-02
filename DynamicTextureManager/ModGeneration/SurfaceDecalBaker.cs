@@ -55,7 +55,7 @@ public static class SurfaceDecalBaker
 
         // Accept triangles once, feeding both the density measurement below and the
         // rasterization — the two passes must agree on the footprint.
-        var accepted  = new List<(int I0, int I1, int I2, Vector2 D0, Vector2 D1, Vector2 D2)>();
+        var accepted  = new List<(int Tri, int I0, int I1, int I2, Vector2 D0, Vector2 D1, Vector2 D2)>();
         var decalArea = 0.0;
         var texelArea = 0.0;
 
@@ -69,6 +69,8 @@ public static class SurfaceDecalBaker
             if (!mesh.TriangleEditable[triangle])
                 continue;
             if (layer.SurfaceLimitToPart && layer.SurfacePart >= 0 && mesh.TriangleParts[triangle] != layer.SurfacePart)
+                continue;
+            if (layer.SurfaceLimitToMesh && layer.SurfaceMesh >= 0 && mesh.TriangleMeshes[triangle] != layer.SurfaceMesh)
                 continue;
             if ((mesh.TriangleAttributeMasks[triangle] & ~layer.SurfaceAttributes) != 0)
                 continue;
@@ -94,7 +96,7 @@ public static class SurfaceDecalBaker
              || (d0.Y < 0f && d1.Y < 0f && d2.Y < 0f) || (d0.Y > 1f && d1.Y > 1f && d2.Y > 1f))
                 continue;
 
-            accepted.Add((i0, i1, i2, d0, d1, d2));
+            accepted.Add((triangle, i0, i1, i2, d0, d1, d2));
             decalArea += MathF.Abs(Cross(d1 - d0, d2 - d0));
             var t0 = new Vector2(mesh.Uvs[i0].X * target.Width, mesh.Uvs[i0].Y * target.Height);
             var t1 = new Vector2(mesh.Uvs[i1].X * target.Width, mesh.Uvs[i1].Y * target.Height);
@@ -105,12 +107,91 @@ public static class SurfaceDecalBaker
         if (accepted.Count == 0)
             return;
 
+        var foreignMask = layer.SurfaceUniqueTexels ? BuildForeignMask(target, mesh, indices, layer, accepted) : null;
+
         var (decalPixels, decalWidth, decalHeight) = PrepareDecalPixels(decal, layer, decalArea, texelArea);
         var gradientPartners = DecalQuantizer.GradientPartners(layer);
 
-        foreach (var (i0, i1, i2, d0, d1, d2) in accepted)
+        foreach (var (_, i0, i1, i2, d0, d1, d2) in accepted)
             RasterizeTriangle(target, decalPixels, decalWidth, decalHeight,
-                mesh.Uvs[i0], mesh.Uvs[i1], mesh.Uvs[i2], d0, d1, d2, threshold, opacity, layer, effectSlot, gradientPartners);
+                mesh.Uvs[i0], mesh.Uvs[i1], mesh.Uvs[i2], d0, d1, d2, threshold, opacity, layer, effectSlot, gradientPartners,
+                foreignMask);
+    }
+
+    /// <summary>
+    /// Texels sampled by visible editable geometry VISUALLY ELSEWHERE than the decal. Card
+    /// hair reuses texture regions across strands (mirrored sides, duplicated clumps) — one
+    /// texel, many strands — so a stamp on a shared texel repeats on every strand reading it.
+    /// With <see cref="DecalLayer.SurfaceUniqueTexels"/> those texels are skipped: the
+    /// repeats disappear at the cost of gaps where a shared strand crosses the decal.
+    /// CRITICAL: strands NEAR the placement do not mask even when they share texels with the
+    /// stamped cards — card hair stacks several cards per clump on one island, and counting
+    /// them foreign erased the ENTIRE stamp (verified 2026-08-02: 2921 → 0 texels). The
+    /// stamp showing through same-spot stacked strands reads as painted into the hair
+    /// volume; only geometry beyond the distance allowance (the mirrored side sits at head
+    /// width, ~13 cm) is a repeat. Attribute-hidden variant geometry never masks (it is not
+    /// rendered), and context triangles sample a different texture entirely.
+    /// </summary>
+    private static bool[] BuildForeignMask(Image<Rgba32> target, MaterialMesh mesh, int[] indices, DecalLayer layer,
+        List<(int Tri, int I0, int I1, int I2, Vector2 D0, Vector2 D1, Vector2 D2)> accepted)
+    {
+        var mask        = new bool[target.Width * target.Height];
+        var acceptedSet = new HashSet<int>(accepted.Count);
+        foreach (var entry in accepted)
+            acceptedSet.Add(entry.Tri);
+
+        var anchor = new Vector3(layer.AnchorX, layer.AnchorY, layer.AnchorZ);
+        var allowance = 0.5f * MathF.Sqrt(layer.WorldWidth * layer.WorldWidth + layer.WorldHeight * layer.WorldHeight)
+          + 0.03f;
+
+        for (var i = 0; i + 2 < indices.Length; i += 3)
+        {
+            var triangle = i / 3;
+            if (acceptedSet.Contains(triangle) || !mesh.TriangleEditable[triangle])
+                continue;
+            if ((mesh.TriangleAttributeMasks[triangle] & ~layer.SurfaceAttributes) != 0)
+                continue;
+
+            var centroid = (mesh.Positions[indices[i]] + mesh.Positions[indices[i + 1]] + mesh.Positions[indices[i + 2]]) / 3f;
+            if (Vector3.Distance(centroid, anchor) <= allowance)
+                continue;
+
+            MarkUvCoverage(mask, target.Width, target.Height,
+                mesh.Uvs[indices[i]], mesh.Uvs[indices[i + 1]], mesh.Uvs[indices[i + 2]]);
+        }
+
+        return mask;
+    }
+
+    /// <summary> Mark every texel a UV triangle covers (texel-center inside test, matching the rasterizer). </summary>
+    private static void MarkUvCoverage(bool[] mask, int width, int height, Vector2 uv0, Vector2 uv1, Vector2 uv2)
+    {
+        var a = new Vector2(uv0.X * width, uv0.Y * height);
+        var b = new Vector2(uv1.X * width, uv1.Y * height);
+        var c = new Vector2(uv2.X * width, uv2.Y * height);
+
+        var area = Cross(b - a, c - a);
+        if (MathF.Abs(area) < 1e-6f)
+            return;
+
+        var minX = Math.Max(0, (int)MathF.Floor(MathF.Min(a.X, MathF.Min(b.X, c.X))));
+        var maxX = Math.Min(width - 1, (int)MathF.Ceiling(MathF.Max(a.X, MathF.Max(b.X, c.X))));
+        var minY = Math.Max(0, (int)MathF.Floor(MathF.Min(a.Y, MathF.Min(b.Y, c.Y))));
+        var maxY = Math.Min(height - 1, (int)MathF.Ceiling(MathF.Max(a.Y, MathF.Max(b.Y, c.Y))));
+
+        for (var y = minY; y <= maxY; ++y)
+        {
+            for (var x = minX; x <= maxX; ++x)
+            {
+                var p  = new Vector2(x + 0.5f, y + 0.5f);
+                var w0 = Cross(b - p, c - p) / area;
+                var w1 = Cross(c - p, a - p) / area;
+                if (w0 < 0f || w1 < 0f || 1f - w0 - w1 < 0f)
+                    continue;
+
+                mask[y * width + x] = true;
+            }
+        }
     }
 
     /// <summary>
@@ -161,6 +242,11 @@ public static class SurfaceDecalBaker
     /// </summary>
     public static bool FootprintTouches(MaterialMesh mesh, DecalLayer layer)
     {
+        // A mesh-limited decal never continues onto companion meshes at all — mesh ids are
+        // local to each MaterialMesh, so a cross-mesh comparison would be meaningless.
+        if (layer.SurfaceLimitToMesh)
+            return false;
+
         var anchor = new Vector3(layer.AnchorX, layer.AnchorY, layer.AnchorZ);
         var normal = new Vector3(layer.NormalX, layer.NormalY, layer.NormalZ);
         if (normal.LengthSquared() < 1e-6f || layer.WorldWidth <= 0f || layer.WorldHeight <= 0f)
@@ -354,7 +440,8 @@ public static class SurfaceDecalBaker
     /// <summary> Rasterize one triangle in texture space, sampling the decal through the interpolated projection coordinates. </summary>
     private static void RasterizeTriangle(Image<Rgba32> target, Rgba32[] decal, int decalWidth, int decalHeight,
         Vector2 uv0, Vector2 uv1, Vector2 uv2, Vector2 d0, Vector2 d1, Vector2 d2,
-        byte threshold, float opacity, DecalLayer layer, TextureSlot? effectSlot, int[] gradientPartners)
+        byte threshold, float opacity, DecalLayer layer, TextureSlot? effectSlot, int[] gradientPartners,
+        bool[]? foreignMask = null)
     {
         var a = new Vector2(uv0.X * target.Width, uv0.Y * target.Height);
         var b = new Vector2(uv1.X * target.Width, uv1.Y * target.Height);
@@ -399,6 +486,10 @@ public static class SurfaceDecalBaker
         {
             for (var x = minX; x <= maxX; ++x)
             {
+                // A texel other strands also sample would repeat on every one of them.
+                if (foreignMask != null && foreignMask[y * target.Width + x])
+                    continue;
+
                 var p  = new Vector2(x + 0.5f, y + 0.5f);
                 var w0 = Cross(b - p, c - p) / area;
                 var w1 = Cross(c - p, a - p) / area;

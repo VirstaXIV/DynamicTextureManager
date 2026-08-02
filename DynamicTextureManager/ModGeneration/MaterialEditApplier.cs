@@ -78,6 +78,30 @@ public static class MaterialEditApplier
         if (resolved.Table is not ColorTable table)
             return null;
 
+        return RowDiffuse(table);
+    }
+
+    /// <summary>
+    /// The 32 row diffuse colors of a bare color table with a dTexture's edits applied — the
+    /// material-less variant for GENERATED colorsets (the animated hair conversion), whose
+    /// source material carries no table to resolve through.
+    /// </summary>
+    public static Vector3[] ResolveRowDiffuse(ColorTable table, MaterialEdit? edit)
+    {
+        if (edit is { IsEmpty: false })
+        {
+            var resolved = new ColorTable(table);
+            foreach (var row in edit.Rows.Values)
+                if (row.RowIndex is >= 0 and < ColorTable.NumRows)
+                    resolved[row.RowIndex] = row.ToRow();
+            return RowDiffuse(resolved);
+        }
+
+        return RowDiffuse(table);
+    }
+
+    private static Vector3[] RowDiffuse(ColorTable table)
+    {
         var ret = new Vector3[ColorTable.NumRows];
         for (var i = 0; i < ColorTable.NumRows; ++i)
         {

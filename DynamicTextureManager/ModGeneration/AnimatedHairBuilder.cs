@@ -77,12 +77,36 @@ public static class AnimatedHairBuilder
     ];
 
     /// <summary>
+    /// The animated conversion's colorset: the base hair row everywhere (any stray id value
+    /// renders hair-colored — and colorset-decal edge interpolation between a claimed pair
+    /// and pair 16 crosses only base-colored rows), pair 16 split into the effect row (16A)
+    /// and the base row (16B). Also the UI's stand-in table for seeding decal rows — the
+    /// source hair.shpk material has no colorset to seed from.
+    /// </summary>
+    public static ColorTable BuildColorTable(AnimatedHairEdit edit)
+    {
+        var table = new ColorTable();
+        for (var r = 0; r < ColorTable.NumRows; r++)
+        {
+            WriteRow(table, r, BaseRowTemplate);
+            PatchColor(table, r, 0, edit.BaseColor, 1f);
+        }
+
+        WriteRow(table, 30, EffectRowTemplate);
+        PatchColor(table, 30, 0, edit.HighlightColor, 1f);                        // highlight-area hair diffuse
+        PatchColor(table, 30, 8, edit.EffectColor, edit.EffectIntensity);        // emissive
+        PatchColor(table, 30, 4, edit.EffectColor, edit.EffectIntensity * 0.27f); // spec tint
+        return table;
+    }
+
+    /// <summary>
     /// Transform a hair material into the animated characterscroll variant. The source can be
     /// the vanilla or a modded hair.shpk mtrl — everything shader-related is replaced
     /// wholesale, so only the file header/version carries over. The source instance is never
-    /// mutated.
+    /// mutated. Returned unparsed so callers can apply colorset row edits (decal slots)
+    /// before writing.
     /// </summary>
-    public static byte[] BuildMaterial(MtrlFile sourceMtrl, AnimatedHairEdit edit, TexturePaths paths)
+    public static MtrlFile BuildMaterialFile(MtrlFile sourceMtrl, AnimatedHairEdit edit, TexturePaths paths)
     {
         var mtrl = sourceMtrl.Clone();
 
@@ -135,23 +159,10 @@ public static class AnimatedHairBuilder
         mtrl.UvSets    = [new MtrlFile.AttributeSet { Name = "map1", Index = 0 }];
         mtrl.ColorSets = [new MtrlFile.AttributeSet { Name = "colorSet1", Index = 0 }];
 
-        var table = new ColorTable();
-        for (var r = 0; r < ColorTable.NumRows; r++)
-        {
-            // Base row everywhere so any stray id value still renders hair-colored; the
-            // generated id map only ever references pair 16 (rows 30/31).
-            WriteRow(table, r, BaseRowTemplate);
-            PatchColor(table, r, 0, edit.BaseColor, 1f);
-        }
-
-        WriteRow(table, 30, EffectRowTemplate);
-        PatchColor(table, 30, 0, edit.HighlightColor, 1f);                        // highlight-area hair diffuse
-        PatchColor(table, 30, 8, edit.EffectColor, edit.EffectIntensity);        // emissive
-        PatchColor(table, 30, 4, edit.EffectColor, edit.EffectIntensity * 0.27f); // spec tint
-        mtrl.Table    = table;
+        mtrl.Table    = BuildColorTable(edit);
         mtrl.DyeTable = new ColorDyeTable();
 
-        return mtrl.Write();
+        return mtrl;
     }
 
     private static void WriteRow(ColorTable table, int row, ushort[] template)

@@ -493,8 +493,10 @@ public sealed class OverlayModManager : IService, IDisposable
             if (mtrl.Table is not ColorTable)
             {
                 // Skin/legacy materials never carry row edits (their decals are texture-only);
-                // only warn when actual colorset edits would be dropped.
-                if (edit.Rows.Count > 0)
+                // only warn when actual colorset edits would be dropped. Hair materials with
+                // an enabled animated conversion carry DECAL row edits that apply onto the
+                // GENERATED characterscroll colorset instead (PrepareAnimatedHair).
+                if (edit.Rows.Count > 0 && dTexture.Data.AnimatedHair.GetValueOrDefault(gamePath) is not { Enabled: true })
                     DynamicTextureManager.Log.Warning(
                         $"Material {gamePath} has colorset row edits but no Dawntrail color table (shader {mtrl.ShaderPackage.Name}) — colorset edits require one, skipped.");
                 continue;
@@ -618,7 +620,12 @@ public sealed class OverlayModManager : IService, IDisposable
             var maskPath = classified.FirstOrDefault(t => t.Slot == Shaders.TextureSlot.Mask).GamePath ?? string.Empty;
 
             var paths = AnimatedHairBuilder.PathsFor(gamePath);
-            materials[gamePath] = AnimatedHairBuilder.BuildMaterial(mtrl, edit, paths);
+            var built = AnimatedHairBuilder.BuildMaterialFile(mtrl, edit, paths);
+            // Colorset row edits (the claimed slots of hair-colorset decals, recolors
+            // included) apply onto the GENERATED table — the source hair material has none.
+            if (dTexture.Data.Materials.TryGetValue(gamePath, out var rowEdits) && !rowEdits.IsEmpty)
+                MaterialEditApplier.Apply(built, rowEdits);
+            materials[gamePath] = built.Write();
             EnsureTextureJob(normalPath);
             if (maskPath.Length > 0)
                 EnsureTextureJob(maskPath);
@@ -942,7 +949,18 @@ public sealed class OverlayModManager : IService, IDisposable
             // uncompressed — only the strand-detail normal and mask take BC7.
             await penumbra.ConvertTextureData(AnimatedHairBuilder.BuildNormalRgba(normal.Rgba), normal.Width,
                 build.PrepareFile(job.Paths.Normal), TextureType.Bc7Tex).ConfigureAwait(false);
-            await penumbra.ConvertTextureData(AnimatedHairBuilder.BuildIdRgba(normal.Rgba), normal.Width,
+
+            // Hair-colorset decals live on the normal's layer stack but stamp into the
+            // generated id map: opaque pixels remap texels off the effect pair onto their
+            // claimed colorset rows, exactly like gear id-map decals.
+            var idRgba    = AnimatedHairBuilder.BuildIdRgba(normal.Rgba);
+            var normalJob = plan.TextureJobs.FirstOrDefault(t
+                => string.Equals(t.GamePath, job.NormalGamePath, StringComparison.OrdinalIgnoreCase));
+            if (normalJob != null
+             && normalJob.Layers.OfType<DTextures.Data.DecalLayer>().Any(l => l is { Enabled: true, HairColorset: true }))
+                idRgba = compositor.CompositeHairColorsetId(idRgba, normal.Width, idRgba.Length / 4 / normal.Width,
+                    normalJob.Layers, normalJob.Mesh);
+            await penumbra.ConvertTextureData(idRgba, normal.Width,
                 build.PrepareFile(job.Paths.Id), TextureType.RgbaTex).ConfigureAwait(false);
 
             // Real per-strand shading: mask derived from the composited hair mask; the flat

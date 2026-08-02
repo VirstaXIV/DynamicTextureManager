@@ -52,6 +52,15 @@ public sealed class MaterialMesh
     public required int[] TriangleParts { get; init; }
 
     /// <summary>
+    /// Per-triangle mdl MESH id (a running index over every mesh read into this
+    /// <see cref="MaterialMesh"/>). Coarser than <see cref="TriangleParts"/>: card hair is many
+    /// separate welded parts within ONE mdl mesh, but split hairstyles put e.g. bangs and back
+    /// sections into different meshes that overlap in space — a decal limited to its placed
+    /// mesh stays off the others without clipping to a single card.
+    /// </summary>
+    public required int[] TriangleMeshes { get; init; }
+
+    /// <summary>
     /// Whether a triangle belongs to the source material (true) or is context geometry from
     /// another material of the same model set (false) — shown dimmed for orientation, but its
     /// UVs live in a different texture, so it is never picked, seeded or baked onto.
@@ -601,8 +610,10 @@ public sealed class ModelUvReader(IDataManager dataManager, PenumbraService penu
         var indices   = new List<int>();
         var triMasks  = new List<uint>();
         var editable  = new List<bool>();
+        var triMeshes = new List<int>();
         var shapes    = new List<(string Name, (int IndexPosition, int NewVertex)[] Swaps)>();
         var editableTriangles = 0;
+        var meshCounter       = 0;
 
         foreach (var mdl in models)
         {
@@ -632,6 +643,7 @@ public sealed class ModelUvReader(IDataManager dataManager, PenumbraService penu
                     continue;
 
                 var vertexOffset = positions.Count;
+                var meshId       = meshCounter++;
                 included.Add((mesh.StartIndex, indices.Count, (int)mesh.IndexCount, vertexOffset, vertices.Length));
                 foreach (var vertex in vertices)
                 {
@@ -670,6 +682,7 @@ public sealed class ModelUvReader(IDataManager dataManager, PenumbraService penu
                     indices.Add(vertexOffset + c);
                     triMasks.Add(mask);
                     editable.Add(meshEditable);
+                    triMeshes.Add(meshId);
                     if (meshEditable)
                         ++editableTriangles;
                 }
@@ -697,6 +710,7 @@ public sealed class ModelUvReader(IDataManager dataManager, PenumbraService penu
             Indices                = indices.ToArray(),
             TriangleAttributeMasks = triMasks.ToArray(),
             TriangleParts          = parts,
+            TriangleMeshes         = triMeshes.ToArray(),
             TriangleEditable       = editable.ToArray(),
             PartCount              = partCount,
             GamePath               = meshGamePath,

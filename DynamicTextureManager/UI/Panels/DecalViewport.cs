@@ -464,13 +464,14 @@ public sealed class DecalViewport(ITextureProvider textureProvider) : IDisposabl
             var probe = (ImGui.GetMousePos() - start) / size;
             DynamicTextureManager.Log.Debug(_layer == null
                 ? $"Viewport click at ({probe.X:F2}, {probe.Y:F2}) — no placement layer bound."
-                : $"Viewport click at ({probe.X:F2}, {probe.Y:F2}) — pick {(TryPick(probe, out _, out _, out _) ? "hit" : "MISSED the mesh")}.");
+                : $"Viewport click at ({probe.X:F2}, {probe.Y:F2}) — pick {(TryPick(probe, out _, out _, out _, out _) ? "hit" : "MISSED the mesh")}.");
         }
 
         if (hovered && _layer != null && ImGui.IsMouseDown(ImGuiMouseButton.Left))
         {
             var local = (ImGui.GetMousePos() - start) / size;
-            if (local is { X: >= 0f and <= 1f, Y: >= 0f and <= 1f } && TryPick(local, out var position, out var normal, out var part))
+            if (local is { X: >= 0f and <= 1f, Y: >= 0f and <= 1f }
+             && TryPick(local, out var position, out var normal, out var part, out var meshId))
             {
                 _layer.AnchorX           = position.X;
                 _layer.AnchorY           = position.Y;
@@ -479,6 +480,7 @@ public sealed class DecalViewport(ITextureProvider textureProvider) : IDisposabl
                 _layer.NormalY           = normal.Y;
                 _layer.NormalZ           = normal.Z;
                 _layer.SurfacePart       = part;
+                _layer.SurfaceMesh       = meshId;
                 _layer.SurfaceAttributes = _visibleAttributes;
                 _layer.SurfaceShapes     = 0;
                 MarkEdited();
@@ -500,11 +502,12 @@ public sealed class DecalViewport(ITextureProvider textureProvider) : IDisposabl
         return view * proj;
     }
 
-    private bool TryPick(Vector2 canvasUv, out Vector3 position, out Vector3 normal, out int part)
+    private bool TryPick(Vector2 canvasUv, out Vector3 position, out Vector3 normal, out int part, out int meshId)
     {
         position = default;
         normal   = default;
         part     = -1;
+        meshId   = -1;
         if (_mesh == null || !Matrix4x4.Invert(_lastViewProjection, out var inverse))
             return false;
 
@@ -546,6 +549,7 @@ public sealed class DecalViewport(ITextureProvider textureProvider) : IDisposabl
         normal   = _mesh.Normals[i0] * bary.X + _mesh.Normals[i1] * bary.Y + _mesh.Normals[i2] * bary.Z;
         normal   = normal.LengthSquared() < 1e-8f ? Vector3.UnitY : Vector3.Normalize(normal);
         part     = _mesh.TriangleParts[bestTri / 3];
+        meshId   = _mesh.TriangleMeshes[bestTri / 3];
         return true;
     }
 
@@ -603,10 +607,20 @@ public sealed class DecalViewport(ITextureProvider textureProvider) : IDisposabl
             var i = (y * diffuse.Width + x) * 4;
             if (hairColors is { } hair)
             {
-                // Hair: the buffer is the composited NORMAL map. Its blue channel lerps the
-                // customize main color toward the highlight color; the customize colors are
-                // "squared RGB" in the game's constant buffer, so square them here too.
-                albedo = Vector3.Lerp(hair.Main * hair.Main, hair.Highlight * hair.Highlight, diffuse.Rgba[i + 2] / 255f);
+                // Converted hair with a synthesized id-map preview: texels routed off the
+                // effect pair belong to colorset decals — their claimed rows carry the color
+                // (same squared color domain as the squared customize colors below).
+                var (idR, idG) = idMap != null && rows != null ? SampleIdTexel(idMap, uv) : ((byte)255, (byte)0);
+                if (idMap != null && rows != null && IdMapTexel.Pair(idR) != AnimatedEffectPair)
+                    // Decal rows store squared (colorset-domain) values — display their root,
+                    // so the preview shows exactly the color the picker set and the game renders.
+                    albedo = SqrtRgb(IdMapTexel.BlendedRowColor(rows, idR, idG));
+                else
+                    // Hair: the buffer is the composited NORMAL map. Its blue channel lerps the
+                    // customize main color toward the highlight color; the customize colors are
+                    // "squared RGB" in the game's constant buffer, so square them here too.
+                    albedo = Vector3.Lerp(hair.Main * hair.Main, hair.Highlight * hair.Highlight, diffuse.Rgba[i + 2] / 255f);
+
                 // The mask's alpha is the strand ambient occlusion — softened so roots never
                 // go pitch black; without this a light hairstyle reads as a flat silhouette.
                 if (hairMask != null)
@@ -622,17 +636,31 @@ public sealed class DecalViewport(ITextureProvider textureProvider) : IDisposabl
             shaded = true;
         }
 
-        if (idMap != null && rows != null)
+        // Gear id maps multiply the (usually absent) diffuse; hair consumed its id above.
+        if (hairColors == null && idMap != null && rows != null)
         {
-            // Nearest texel: bilinear on the pair byte would blend unrelated pairs.
-            var x = Math.Clamp((int)(uv.X * idMap.Width), 0, idMap.Width - 1);
-            var y = Math.Clamp((int)(uv.Y * idMap.Height), 0, idMap.Height - 1);
-            var i = (y * idMap.Width + x) * 4;
-            albedo *= IdMapTexel.BlendedRowColor(rows, idMap.Rgba[i], idMap.Rgba[i + 1]);
+            var (idR, idG) = SampleIdTexel(idMap, uv);
+            albedo *= IdMapTexel.BlendedRowColor(rows, idR, idG);
             shaded  = true;
         }
 
         return shaded ? albedo : new Vector3(190f / 255f);
+    }
+
+    /// <summary> 0-based colorset pair of converted hair's effect/base rows (pair 16). </summary>
+    private const int AnimatedEffectPair = 15;
+
+    /// <summary> Per-channel square root — squared colorset-domain color to display domain. </summary>
+    private static Vector3 SqrtRgb(Vector3 v)
+        => new(MathF.Sqrt(MathF.Max(0f, v.X)), MathF.Sqrt(MathF.Max(0f, v.Y)), MathF.Sqrt(MathF.Max(0f, v.Z)));
+
+    /// <summary> Nearest id-map texel: bilinear on the pair byte would blend unrelated pairs. </summary>
+    private static (byte R, byte G) SampleIdTexel(DecodedTexture idMap, Vector2 uv)
+    {
+        var x = Math.Clamp((int)(uv.X * idMap.Width), 0, idMap.Width - 1);
+        var y = Math.Clamp((int)(uv.Y * idMap.Height), 0, idMap.Height - 1);
+        var i = (y * idMap.Width + x) * 4;
+        return (idMap.Rgba[i], idMap.Rgba[i + 1]);
     }
 
     private static byte SampleAlpha(DecodedTexture texture, Vector2 uv)
@@ -759,8 +787,10 @@ public sealed class DecalViewport(ITextureProvider textureProvider) : IDisposabl
             // bake uses (SurfaceDecalBaker.ComputeSurfaceProjection), so the live preview always
             // matches the built texture, including how it wraps/warps on curved surfaces, and
             // now also how it continues onto this specific mesh (the companion-bake reprojection).
+            // A mesh-limited layer stays on the primary mesh it was placed on — never project
+            // it onto overlay meshes (their mesh ids are local and the bake never touches them).
             SurfaceDecalBaker.SurfaceProjection? projection = null;
-            if (anchored && layer != null)
+            if (anchored && layer != null && !(skipContext && layer.SurfaceLimitToMesh))
             {
                 var walkRadius = SurfaceDecalBaker.WalkRadius(layer.WorldWidth, layer.WorldHeight);
                 projection = SurfaceDecalBaker.ComputeSurfaceProjection(mesh, anchor, normalDir, tangent, bitangent, walkRadius);
@@ -793,8 +823,12 @@ public sealed class DecalViewport(ITextureProvider textureProvider) : IDisposabl
 
                     // Context geometry (other materials of the model set) renders dimmed for
                     // orientation — it shows the whole body/model, but decals cannot land on it.
+                    // The part/mesh limits only apply to the PRIMARY mesh: overlay meshes have
+                    // their own local part/mesh ids that never compare against this layer's.
                     var dimmed = !mesh.TriangleEditable[triangle]
-                     || (layer is { SurfaceLimitToPart: true, SurfacePart: >= 0 } && mesh.TriangleParts[triangle] != layer.SurfacePart);
+                     || (!skipContext
+                         && ((layer is { SurfaceLimitToPart: true, SurfacePart: >= 0 } && mesh.TriangleParts[triangle] != layer.SurfacePart)
+                          || (layer is { SurfaceLimitToMesh: true, SurfaceMesh: >= 0 } && mesh.TriangleMeshes[triangle] != layer.SurfaceMesh)));
                     if (!skipContext && dimmed != wantDimmed)
                         continue;
 
@@ -934,6 +968,7 @@ public sealed class DecalViewport(ITextureProvider textureProvider) : IDisposabl
                                                 // halves' row colors by the pixel's own G.
                                                 var palIdx = DecalQuantizer.NearestIndex(sample, layer.PaletteColors);
                                                 var row    = layer.PaletteRows[palIdx];
+                                                Vector3 rowColor;
                                                 if (gradientPartners[palIdx] >= 0)
                                                 {
                                                     var aIndex = row % 2 == 0 ? palIdx : gradientPartners[palIdx];
@@ -941,13 +976,20 @@ public sealed class DecalViewport(ITextureProvider textureProvider) : IDisposabl
                                                     var blend  = DecalQuantizer.GradientG(sample,
                                                         layer.PaletteColors[aIndex], layer.PaletteColors[bIndex]) / 255f;
                                                     var pair = row / 2;
-                                                    color = Vector3.Lerp(_shading!.RowDiffuse![pair * 2 + 1],
-                                                        _shading.RowDiffuse[pair * 2], blend) * 255f;
+                                                    rowColor = Vector3.Lerp(_shading!.RowDiffuse![pair * 2 + 1],
+                                                        _shading.RowDiffuse[pair * 2], blend);
                                                 }
                                                 else
                                                 {
-                                                    color = _shading!.RowDiffuse![row] * 255f;
+                                                    rowColor = _shading!.RowDiffuse![row];
                                                 }
+
+                                                // Hair decal rows store squared (colorset-domain)
+                                                // values — display their root, matching the picker
+                                                // and the in-game render exactly.
+                                                if (meshHairColors != null)
+                                                    rowColor = SqrtRgb(rowColor);
+                                                color = rowColor * 255f;
                                             }
                                         }
                                     }
@@ -1004,6 +1046,11 @@ public sealed class DecalViewport(ITextureProvider textureProvider) : IDisposabl
                                 var blend = !dimmed && meshHairColors != null && meshDiffuse != null
                                     ? SampleBlue(meshDiffuse, uv) / 255f
                                     : 0f;
+                                // Colorset decal texels route off the effect pair — the game
+                                // renders no emissive there, so the preview glow skips them too.
+                                if (blend > 0.01f && meshIdMap != null
+                                 && IdMapTexel.Pair(SampleIdTexel(meshIdMap, uv).R) != AnimatedEffectPair)
+                                    blend = 0f;
                                 _effectBlend![index] = blend;
                                 if (blend > 0.01f)
                                     _effectUv![index] = uv;
