@@ -17,6 +17,9 @@ public sealed class DTextureData
     /// <summary> Animated-highlight conversions keyed by hair material game path. </summary>
     public Dictionary<string, AnimatedHairEdit> AnimatedHair = [];
 
+    /// <summary> Animated-effect conversions keyed by gear material game path. </summary>
+    public Dictionary<string, AnimatedGearEdit> AnimatedGear = [];
+
     /// <summary> Texture layer stacks keyed by texture game path. </summary>
     public Dictionary<string, List<TextureLayer>> Textures = [];
 
@@ -35,7 +38,7 @@ public sealed class DTextureData
 
     public bool HasEdits
         => Materials.Values.Any(m => !m.IsEmpty) || Textures.Values.Any(t => t.Count > 0)
-         || AnimatedHair.Values.Any(a => a.Enabled);
+         || AnimatedHair.Values.Any(a => a.Enabled) || AnimatedGear.Values.Any(a => a.Enabled);
 
     public JObject Serialize()
         => new()
@@ -48,6 +51,8 @@ public sealed class DTextureData
                 .Where(kvp => kvp.Value.Count > 0)
                 .Select(kvp => new JProperty(kvp.Key, new JArray(kvp.Value.Select(l => l.Serialize()))))),
             ["AnimatedHair"] = new JObject(AnimatedHair
+                .Select(kvp => new JProperty(kvp.Key, kvp.Value.Serialize()))),
+            ["AnimatedGear"] = new JObject(AnimatedGear
                 .Select(kvp => new JProperty(kvp.Key, kvp.Value.Serialize()))),
             ["TextureSourcePaths"] = new JObject(TextureSourcePaths
                 .Select(kvp => new JProperty(kvp.Key, kvp.Value))),
@@ -80,6 +85,11 @@ public sealed class DTextureData
             foreach (var property in animated.Properties())
                 if (property.Value is JObject value)
                     ret.AnimatedHair[property.Name] = AnimatedHairEdit.Load(value);
+
+        if (json["AnimatedGear"] is JObject animatedGear)
+            foreach (var property in animatedGear.Properties())
+                if (property.Value is JObject value)
+                    ret.AnimatedGear[property.Name] = AnimatedGearEdit.Load(value);
 
         if (json["TextureSourcePaths"] is JObject sourcePaths)
             foreach (var property in sourcePaths.Properties())

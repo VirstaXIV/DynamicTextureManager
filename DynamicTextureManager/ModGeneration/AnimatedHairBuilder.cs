@@ -77,12 +77,30 @@ public static class AnimatedHairBuilder
     ];
 
     /// <summary>
+    /// Whether a hair-family normal carries NO highlight-blend information in its blue
+    /// channel. Hairstyles author their highlight streaks there (typical mean ~35); TAIL
+    /// normals are flat zero (verified on the vanilla Miqo'te tail textures) — there is no
+    /// area for the animated effect to follow, so the conversion switches to full-piece
+    /// coverage instead (see <see cref="BuildIdRgba"/>).
+    /// </summary>
+    public static bool IsFlatHighlightChannel(byte[] normalRgba)
+    {
+        long sum = 0;
+        for (var i = 2; i < normalRgba.Length; i += 4)
+            sum += normalRgba[i];
+        return sum < 2.0 * (normalRgba.Length / 4.0);
+    }
+
+    /// <summary>
     /// Transform a hair material into the animated characterscroll variant. The source can be
     /// the vanilla or a modded hair.shpk mtrl — everything shader-related is replaced
     /// wholesale, so only the file header/version carries over. The source instance is never
-    /// mutated.
+    /// mutated. With <paramref name="fullCoverage"/> (tails — no authored highlight areas)
+    /// the effect row keeps the BASE color as its diffuse: every texel renders through it,
+    /// so the piece must not flip to the highlight color — the glow rides on the unchanged
+    /// look and the scrolling pattern alone provides the variation.
     /// </summary>
-    public static byte[] BuildMaterial(MtrlFile sourceMtrl, AnimatedHairEdit edit, TexturePaths paths)
+    public static byte[] BuildMaterial(MtrlFile sourceMtrl, AnimatedHairEdit edit, TexturePaths paths, bool fullCoverage = false)
     {
         var mtrl = sourceMtrl.Clone();
 
@@ -145,7 +163,7 @@ public static class AnimatedHairBuilder
         }
 
         WriteRow(table, 30, EffectRowTemplate);
-        PatchColor(table, 30, 0, edit.HighlightColor, 1f);                        // highlight-area hair diffuse
+        PatchColor(table, 30, 0, fullCoverage ? edit.BaseColor : edit.HighlightColor, 1f); // effect-area diffuse
         PatchColor(table, 30, 8, edit.EffectColor, edit.EffectIntensity);        // emissive
         PatchColor(table, 30, 4, edit.EffectColor, edit.EffectIntensity * 0.27f); // spec tint
         mtrl.Table    = table;
@@ -192,15 +210,17 @@ public static class AnimatedHairBuilder
     /// The id map routing the highlight distribution into colorset pair 16: R=255 selects the
     /// pair, G = the hair normal's blue channel (0 = base row B, 255 = effect row A) — so the
     /// authored highlights AND every highlight edit baked into the composited normal decide
-    /// where the effect appears.
+    /// where the effect appears. With <paramref name="fullCoverage"/> (tails — the normal's
+    /// B is flat zero, see <see cref="IsFlatHighlightChannel"/>) every texel routes to the
+    /// effect row instead, whose diffuse then carries the BASE color.
     /// </summary>
-    public static byte[] BuildIdRgba(byte[] compositedNormal)
+    public static byte[] BuildIdRgba(byte[] compositedNormal, bool fullCoverage = false)
     {
         var result = new byte[compositedNormal.Length];
         for (var i = 0; i + 3 < result.Length; i += 4)
         {
             result[i]     = 255;
-            result[i + 1] = compositedNormal[i + 2]; // G := highlight blend (normal B)
+            result[i + 1] = fullCoverage ? (byte)255 : compositedNormal[i + 2]; // G := highlight blend (normal B)
             result[i + 2] = 255;
             result[i + 3] = 255;
         }

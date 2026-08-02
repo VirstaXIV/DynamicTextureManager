@@ -364,11 +364,22 @@ public sealed class OverlayModManager : IService, IDisposable
     /// written. MaskGamePath is empty when the source material has no mask — the flat
     /// reference tile ships instead.
     /// </summary>
+    /// <param name="FullCoverage">
+    /// The source normal carries no highlight-blend channel (tails) — the effect covers the
+    /// whole piece instead of following highlight areas; see AnimatedHairBuilder.
+    /// </param>
     private sealed record AnimatedHairJob(string MaterialGamePath, string NormalGamePath, string MaskGamePath,
-        AnimatedHairBuilder.TexturePaths Paths, DTextures.Data.AnimatedHairEdit Edit);
+        AnimatedHairBuilder.TexturePaths Paths, DTextures.Data.AnimatedHairEdit Edit, bool FullCoverage);
+
+    /// <summary>
+    /// One gear animated-effect conversion: the converted material is emitted at prepare
+    /// time (it only rewrites the shader package and rows); the build just ships the
+    /// generated effect pattern texture it references.
+    /// </summary>
+    private sealed record AnimatedGearJob(string MaterialGamePath, string EffectPath, DTextures.Data.AnimatedGearEdit Edit);
 
     private sealed record BuildPlan(Dictionary<string, byte[]> MaterialFiles, List<TextureJob> TextureJobs,
-        List<AnimatedHairJob> AnimatedJobs);
+        List<AnimatedHairJob> AnimatedJobs, List<AnimatedGearJob> AnimatedGearJobs);
 
     /// <summary>
     /// Build the overlay mod for a dTexture and register or reload it in Penumbra.
@@ -408,7 +419,7 @@ public sealed class OverlayModManager : IService, IDisposable
                 : null;
             plan = emptyReason == null
                 ? PrepareBuild(dTexture, modDirectory)
-                : new BuildPlan(new Dictionary<string, byte[]>(StringComparer.OrdinalIgnoreCase), [], []);
+                : new BuildPlan(new Dictionary<string, byte[]>(StringComparer.OrdinalIgnoreCase), [], [], []);
             cleaning = plan.MaterialFiles.Count == 0 && plan.TextureJobs.Count == 0;
             if (cleaning && isNew)
             {
@@ -562,15 +573,74 @@ public sealed class OverlayModManager : IService, IDisposable
         AddSiblingEffectJobs(dTexture, textures);
         AddOverlayCompanionJobs(dTexture, textures);
 
-        var animated = PrepareAnimatedHair(dTexture, modDirectory, materials, textures);
+        var animated     = PrepareAnimatedHair(dTexture, modDirectory, materials, textures);
+        var animatedGear = PrepareAnimatedGear(dTexture, modDirectory, materials);
 
         // One compact line of what actually builds — the first thing to check when a decal
         // ships that the UI no longer shows.
         DynamicTextureManager.Log.Debug(
-            $"Build plan: {materials.Count} material(s); {animated.Count} animated hair conversion(s); "
+            $"Build plan: {materials.Count} material(s); {animated.Count} animated hair + {animatedGear.Count} gear conversion(s); "
           + $"textures [{string.Join(", ", textures.Select(t => $"{t.GamePath} ({t.Layers.Count} layer(s))"))}]");
 
-        return new BuildPlan(materials, textures, animated);
+        return new BuildPlan(materials, textures, animated, animatedGear);
+    }
+
+    /// <summary>
+    /// Stage every enabled gear animated-effect conversion. Runs AFTER the regular material
+    /// pass so colorset row edits (decal slots, recolors) are already applied — the
+    /// conversion rewrites the shader package on top of them and adds the glow rows.
+    /// </summary>
+    private List<AnimatedGearJob> PrepareAnimatedGear(DTexture dTexture, string modDirectory,
+        Dictionary<string, byte[]> materials)
+    {
+        var jobs = new List<AnimatedGearJob>();
+        foreach (var (gamePath, edit) in dTexture.Data.AnimatedGear.Where(kvp => kvp.Value.Enabled))
+        {
+            var source = dTexture.Data.Source.Materials.FirstOrDefault(m
+                => string.Equals(m.GamePath, gamePath, StringComparison.OrdinalIgnoreCase));
+            if (source == null)
+            {
+                DynamicTextureManager.Log.Warning($"Gear animated effect for {gamePath} skipped — material is not part of the source.");
+                continue;
+            }
+
+            Penumbra.GameData.Files.MtrlFile? mtrl = null;
+            if (materials.TryGetValue(gamePath, out var edited))
+                try
+                {
+                    mtrl = new Penumbra.GameData.Files.MtrlFile(edited);
+                }
+                catch
+                {
+                    mtrl = null;
+                }
+
+            mtrl ??= sourceFiles.GetMaterial(source, modDirectory);
+            if (mtrl == null)
+                continue;
+
+            if (!AnimatedGearBuilder.CanConvert(mtrl))
+            {
+                DynamicTextureManager.Log.Warning(
+                    $"Gear animated effect for {gamePath} skipped — only modern colorset gear (character.shpk) can be converted, this is {mtrl.ShaderPackage.Name}.");
+                continue;
+            }
+
+            var effectPath = AnimatedHairBuilder.PathsFor(gamePath).Effect;
+            try
+            {
+                materials[gamePath] = AnimatedGearBuilder.BuildMaterial(mtrl, edit, effectPath);
+            }
+            catch (Exception ex)
+            {
+                DynamicTextureManager.Log.Warning($"Gear animated effect for {gamePath} failed: {ex.Message}");
+                continue;
+            }
+
+            jobs.Add(new AnimatedGearJob(gamePath, effectPath, edit));
+        }
+
+        return jobs;
     }
 
     /// <summary>
@@ -617,13 +687,25 @@ public sealed class OverlayModManager : IService, IDisposable
             // survives the conversion (shine edits included — they layer onto this texture).
             var maskPath = classified.FirstOrDefault(t => t.Slot == Shaders.TextureSlot.Mask).GamePath ?? string.Empty;
 
+            // Tails carry no highlight-blend channel (normal B flat zero — verified on the
+            // vanilla Miqo'te tails), so there is no area for the effect to follow: switch
+            // to full-piece coverage with the base color kept as the effect row's diffuse.
+            // Decided from the SOURCE normal — nothing edits B anymore, so the composited
+            // normal the id derives from agrees by construction.
+            var normalSource = GetOrCaptureTextureSource(dTexture, normalPath);
+            var decodedNormal = textureIO.Load(normalPath, normalSource is { Length: > 0 } ? normalSource : null, modDirectory);
+            var fullCoverage  = decodedNormal != null && AnimatedHairBuilder.IsFlatHighlightChannel(decodedNormal.Rgba);
+            if (fullCoverage)
+                DynamicTextureManager.Log.Information(
+                    $"Animated effect for {gamePath}: no highlight channel in the normal — using full-piece coverage.");
+
             var paths = AnimatedHairBuilder.PathsFor(gamePath);
-            materials[gamePath] = AnimatedHairBuilder.BuildMaterial(mtrl, edit, paths);
+            materials[gamePath] = AnimatedHairBuilder.BuildMaterial(mtrl, edit, paths, fullCoverage);
             EnsureTextureJob(normalPath);
             if (maskPath.Length > 0)
                 EnsureTextureJob(maskPath);
 
-            animated.Add(new AnimatedHairJob(gamePath, normalPath, maskPath, paths, edit));
+            animated.Add(new AnimatedHairJob(gamePath, normalPath, maskPath, paths, edit, fullCoverage));
             converted.Add(gamePath);
             return true;
         }
@@ -942,7 +1024,7 @@ public sealed class OverlayModManager : IService, IDisposable
             // uncompressed — only the strand-detail normal and mask take BC7.
             await penumbra.ConvertTextureData(AnimatedHairBuilder.BuildNormalRgba(normal.Rgba), normal.Width,
                 build.PrepareFile(job.Paths.Normal), TextureType.Bc7Tex).ConfigureAwait(false);
-            await penumbra.ConvertTextureData(AnimatedHairBuilder.BuildIdRgba(normal.Rgba), normal.Width,
+            await penumbra.ConvertTextureData(AnimatedHairBuilder.BuildIdRgba(normal.Rgba, job.FullCoverage), normal.Width,
                 build.PrepareFile(job.Paths.Id), TextureType.RgbaTex).ConfigureAwait(false);
 
             // Real per-strand shading: mask derived from the composited hair mask; the flat
@@ -960,6 +1042,15 @@ public sealed class OverlayModManager : IService, IDisposable
 
             written += 4;
             DynamicTextureManager.Log.Debug($"Animated hair companions written for {job.MaterialGamePath}.");
+        }
+
+        foreach (var job in plan.AnimatedGearJobs)
+        {
+            await penumbra.ConvertTextureData(
+                AnimatedHairBuilder.GeneratePattern((AnimatedHairBuilder.HairEffectPattern)job.Edit.Pattern),
+                AnimatedHairBuilder.PatternSize, build.PrepareFile(job.EffectPath), TextureType.RgbaTex).ConfigureAwait(false);
+            ++written;
+            DynamicTextureManager.Log.Debug($"Gear effect pattern written for {job.MaterialGamePath}.");
         }
 
         if (written > 0 || commitWhenEmpty)
