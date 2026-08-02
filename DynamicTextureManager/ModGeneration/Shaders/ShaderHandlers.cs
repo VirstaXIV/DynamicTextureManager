@@ -108,10 +108,12 @@ public sealed class SkinShaderHandler : ShaderHandlerBase
 
 /// <summary>
 /// Hair shader: no diffuse and no colorset — the wearer's customize hair/highlight colors are
-/// blended in-shader by the normal map's blue channel (0 = main color, 1 = highlight color), so
-/// decals target the normal texture and stamp highlight patterns rather than colors. Materials
-/// whose GetSubColor key selects the Face variant (brows/lashes) reinterpret that channel as the
-/// race-feature color and are left unsupported.
+/// blended in-shader by the normal map's blue channel (0 = main color, 1 = highlight color).
+/// DECALS ARE DISABLED on hair: card hair reuses/mirrors texture regions across strands, so
+/// any texel-space stamp repeats on every strand sharing them (see the hair-decal-uv-sharing
+/// project notes; the full colorset-decal implementation for converted hair is parked on
+/// branch wip/hair-colorset-decals). Materials whose GetSubColor key selects the Face variant
+/// (brows/lashes) reinterpret the blend channel as the race-feature color.
 /// </summary>
 public sealed class HairShaderHandler : ShaderHandlerBase
 {
@@ -130,14 +132,6 @@ public sealed class HairShaderHandler : ShaderHandlerBase
 
     public override MaterialKind Kind(MtrlFile material)
         => IsFaceVariant(material) ? MaterialKind.Unknown : MaterialKind.Hair;
-
-    public override IReadOnlyList<TextureSlotInfo> ClassifyTextures(MtrlFile material)
-    {
-        var ret = base.ClassifyTextures(material);
-        return Kind(material) is MaterialKind.Hair
-            ? ret.Select(i => i.Slot is TextureSlot.Normal ? i with { SupportsDecals = true } : i).ToList()
-            : ret;
-    }
 }
 
 /// <summary> Unknown shaders: expose the raw texture list, no colorset, decals only on decodable diffuse textures. </summary>

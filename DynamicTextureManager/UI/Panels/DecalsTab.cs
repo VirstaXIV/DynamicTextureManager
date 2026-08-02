@@ -60,6 +60,28 @@ public sealed class DecalsTab(
     /// <summary> Darkening applied to a shade-partner row: the benign blend target for a pair's unused half. </summary>
     private const float ShadeFactor = 0.6f;
 
+    /// <summary>
+    /// Colorset colors live in the game's SQUARED domain: the shader's display response is
+    /// ~sqrt of the stored value (the same convention as the customize colors — see the
+    /// PackSqrt pattern). Row edits store the squared value so authored-row roundtrips stay
+    /// byte-exact (extraction); every picker and palette boundary converts through these, so
+    /// the color the user picks is the color the game actually renders. Without this, decal
+    /// colors written as display values rendered washed out in game (sqrt-brightened) while
+    /// the preview showed them as picked.
+    /// </summary>
+    private static float[] DisplayToRowRgb(float r, float g, float b)
+        => [r * r, g * g, b * b];
+
+    private static Vector3 RowToDisplayRgb(IReadOnlyList<float> rgb)
+        => new(MathF.Sqrt(MathF.Max(0f, rgb[0])), MathF.Sqrt(MathF.Max(0f, rgb[1])), MathF.Sqrt(MathF.Max(0f, rgb[2])));
+
+    /// <summary> A row edit's diffuse packed as a display-domain Rgba32 (for presets/swatches). </summary>
+    private static uint PackedDisplayDiffuse(ColorRowEdit row)
+    {
+        var display = RowToDisplayRgb(row.Diffuse);
+        return new Rgba32(display.X, display.Y, display.Z).PackedValue;
+    }
+
     private bool           _slotPreviewDirty;
     private long           _slotPreviewMs;
     private TextureOption? _slotPreviewOption;
@@ -239,52 +261,59 @@ public sealed class DecalsTab(
 
         DrawUnitSelector(dTexture);
 
-        // Modern gear stamps the colorset id map; skin and legacy gear stamp the diffuse;
-        // hair stamps its normal map (highlight patterns). Materials exposing none of these
-        // (colorset-only legacy gear, vfx) stay gated off.
-        if (DefaultTargetOption() == null)
+        // Hair takes NO decals — card hair shares/mirrors texture regions between strands,
+        // so any texel-space stamp repeats on strands it was never placed on (see the
+        // hair-decal-uv-sharing project notes; the implementation is parked on branch
+        // wip/hair-colorset-decals). The tab shows only the hair color context and the
+        // Shine/Animated adjustments for hair materials.
+        if (SelectedKind() is MaterialKind.Hair)
         {
-            var legacyIndex = MaterialOptions().Any(o => o is { Slot: TextureSlot.Index, DecalRecommended: false });
-            ImUtf8.TextWrapped(legacyIndex
-                ? "This material has no color texture — its look comes entirely from its colorset, which decals cannot stamp onto yet."u8
-                : "This material exposes no texture decals can stamp onto."u8);
+            ImUtf8.TextWrapped(
+                "Hair material — the game blends your main hair color toward your highlight color per pixel, using the colors below (read live from your character)."u8);
+
+            var liveHair = LiveHair();
+            DrawColorSwatch("Hair", config.PreviewHairColor, liveHair != null);
+            ImGui.SameLine(0, 24 * ImUtf8.GlobalScale);
+            DrawColorSwatch("Highlights", config.PreviewHairHighlight, liveHair != null);
+
+            if (liveHair is { HighlightsEnabled: false })
+                ImUtf8.TextWrapped(
+                    "Your character has highlights DISABLED — highlight edits stay invisible in-game (and in this preview) until you enable highlights in the aesthetician/character appearance."u8);
         }
         else
         {
-            switch (SelectedKind())
+            // Modern gear stamps the colorset id map; skin and legacy gear stamp the diffuse;
+            // materials exposing neither (colorset-only legacy gear, vfx) stay gated off.
+            if (DefaultTargetOption() == null)
             {
-                case MaterialKind.Skin:
+                var legacyIndex = MaterialOptions().Any(o => o is { Slot: TextureSlot.Index, DecalRecommended: false });
+                ImUtf8.TextWrapped(legacyIndex
+                    ? "This material has no color texture — its look comes entirely from its colorset, which decals cannot stamp onto yet."u8
+                    : "This material exposes no texture decals can stamp onto."u8);
+            }
+            else
+            {
+                switch (SelectedKind())
                 {
-                    ImUtf8.TextWrapped("Skin material — decals bake directly into the skin texture like tattoos and conform to the body."u8);
-                    var liveSkin = LiveSkin();
-                    DrawColorSwatch("Skin Color", config.PreviewSkinTone, liveSkin != null);
-                    break;
-                }
-                case MaterialKind.LegacyDiffuse:
-                    ImUtf8.TextWrapped("Legacy material — decal colors are baked into the color texture. Recoloring rebuilds the mod; dyes never affect the decal."u8);
-                    break;
-                case MaterialKind.Hair:
-                {
-                    ImUtf8.TextWrapped(
-                        "Hair material — hair has no color texture; the game blends your main hair color toward your highlight color per pixel, using the colors below (read live from your character)."u8);
-
-                    var liveHair = LiveHair();
-                    DrawColorSwatch("Hair", config.PreviewHairColor, liveHair != null);
-                    ImGui.SameLine(0, 24 * ImUtf8.GlobalScale);
-                    DrawColorSwatch("Highlights", config.PreviewHairHighlight, liveHair != null);
-
-                    if (liveHair is { HighlightsEnabled: false })
-                        ImUtf8.TextWrapped(
-                            "Your character has highlights DISABLED — highlight edits stay invisible in-game (and in this preview) until you enable highlights in the aesthetician/character appearance."u8);
-                    break;
+                    case MaterialKind.Skin:
+                    {
+                        ImUtf8.TextWrapped("Skin material — decals bake directly into the skin texture like tattoos and conform to the body."u8);
+                        var liveSkin = LiveSkin();
+                        DrawColorSwatch("Skin Color", config.PreviewSkinTone, liveSkin != null);
+                        break;
+                    }
+                    case MaterialKind.LegacyDiffuse:
+                        ImUtf8.TextWrapped("Legacy material — decal colors are baked into the color texture. Recoloring rebuilds the mod; dyes never affect the decal."u8);
+                        break;
                 }
             }
+
+            ImGui.Separator();
+            DrawDecalLibrary(dTexture);
+            ImGui.Separator();
+            DrawLayers(dTexture);
         }
 
-        ImGui.Separator();
-        DrawDecalLibrary(dTexture);
-        ImGui.Separator();
-        DrawLayers(dTexture);
         DrawHairSection(dTexture);
         DrawExtractionSection(dTexture);
         DrawStrayRows(dTexture);
@@ -388,14 +417,16 @@ public sealed class DecalsTab(
 
     /// <summary>
     /// Where a new decal goes: modern gear prefers the colorset id map; skin, legacy and
-    /// unknown materials take color decals on their diffuse; hair stamps highlight patterns
-    /// onto its normal map (the highlight-blend channel — hair has no diffuse).
+    /// unknown materials take color decals on their diffuse. Hair takes NO decals: card hair
+    /// reuses/mirrors texture regions across strands, so any texel-space stamp repeats on
+    /// every strand sharing them (see the hair-decal-uv-sharing project notes; implementation
+    /// parked on branch wip/hair-colorset-decals).
     /// </summary>
     private TextureOption? DefaultTargetOption()
         => SelectedKind() switch
         {
             MaterialKind.ModernColorset => IndexOption() ?? DiffuseOption(),
-            MaterialKind.Hair           => NormalOption(),
+            MaterialKind.Hair           => null,
             _                           => DiffuseOption(),
         };
 
@@ -539,14 +570,6 @@ public sealed class DecalsTab(
         // tattoos that cross them. The tight depth window still contains the projection.
         if (target.Kind is MaterialKind.Skin)
             layer.SurfaceLimitToPart = false;
-        // Hair decals stamp the normal map's highlight-blend channel (there is no diffuse),
-        // and card hair is many separate parts sitting flush — the clicked-part limit would
-        // clip the stamp to a single card.
-        if (target.Kind is MaterialKind.Hair)
-        {
-            layer.HairHighlightMode  = true;
-            layer.SurfaceLimitToPart = false;
-        }
         if (preset != null)
         {
             // The preset may opt out of colorset mode, but never forces it onto a diffuse target.
@@ -585,12 +608,12 @@ public sealed class DecalsTab(
                 {
                     var color = new Rgba32(preset.PaletteColors[i]);
                     var row   = layer.PaletteRows[i];
-                    GetOrSeedRow(edit, table, row).Diffuse = [color.R / 255f, color.G / 255f, color.B / 255f];
+                    GetOrSeedRow(edit, table, row).Diffuse = DisplayToRowRgb(color.R / 255f, color.G / 255f, color.B / 255f);
                     // Gradient pairs restore each half from its own preset entry; only a solo
                     // slot's B half carries the derived shade.
                     if (!layer.PaletteRows.Contains(row ^ 1))
-                        GetOrSeedRow(edit, table, row + 1).Diffuse =
-                            [color.R / 255f * ShadeFactor, color.G / 255f * ShadeFactor, color.B / 255f * ShadeFactor];
+                        GetOrSeedRow(edit, table, row + 1).Diffuse = DisplayToRowRgb(
+                            color.R / 255f * ShadeFactor, color.G / 255f * ShadeFactor, color.B / 255f * ShadeFactor);
                 }
             }
         }
@@ -661,7 +684,7 @@ public sealed class DecalsTab(
         if (decal.IdRemap && dTexture.Data.Materials.TryGetValue(option.MaterialGamePath, out var edit))
             for (var i = 0; i < decal.PaletteRows.Count; ++i)
                 preset.PaletteColors.Add(edit.Rows.TryGetValue(decal.PaletteRows[i], out var rowEdit)
-                    ? new Rgba32(rowEdit.Diffuse[0], rowEdit.Diffuse[1], rowEdit.Diffuse[2]).PackedValue
+                    ? PackedDisplayDiffuse(rowEdit)
                     : i < decal.PaletteColors.Count
                         ? decal.PaletteColors[i]
                         : uint.MaxValue);
@@ -871,7 +894,8 @@ public sealed class DecalsTab(
                 ImUtf8.HoverTooltip("The color extracted from the decal image — image pixels closest to it render through this row."u8);
 
             ImGui.SameLine();
-            var color = new Vector3(rowEdit.Diffuse[0], rowEdit.Diffuse[1], rowEdit.Diffuse[2]);
+            // The picker edits the DISPLAY color; the row stores its square (colorset domain).
+            var color = RowToDisplayRgb(rowEdit.Diffuse);
             ImGui.SetNextItemWidth(250 * ImUtf8.GlobalScale);
             // Gradient pairs render two of the decal's colors on one slot's halves — each is
             // its own editable color, so no shade sync (that would clobber the partner).
@@ -879,11 +903,11 @@ public sealed class DecalsTab(
             var label     = partnered ? $"Slot {row / 2 + 1}{(row % 2 == 0 ? "A" : "B")}" : $"Slot {row / 2 + 1}";
             if (ImUtf8.ColorEdit(label, ref color, ImGuiColorEditFlags.Float))
             {
-                rowEdit.Diffuse = [color.X, color.Y, color.Z];
+                rowEdit.Diffuse = DisplayToRowRgb(color.X, color.Y, color.Z);
                 // Keep a solo slot's B row a darkened copy so the baked shading blend darkens.
                 if (!partnered)
                     GetOrSeedRow(edit, table, row + 1).Diffuse =
-                        [color.X * ShadeFactor, color.Y * ShadeFactor, color.Z * ShadeFactor];
+                        DisplayToRowRgb(color.X * ShadeFactor, color.Y * ShadeFactor, color.Z * ShadeFactor);
                 changed = true;
             }
 
@@ -1184,7 +1208,7 @@ public sealed class DecalsTab(
                     var light = new Rgba32(palette[groups[g].Light]);
                     edit.Rows.Remove(rowA);
                     edit.Rows.Remove(rowA + 1);
-                    GetOrSeedRow(edit, table, rowA).Diffuse = [light.R / 255f, light.G / 255f, light.B / 255f];
+                    GetOrSeedRow(edit, table, rowA).Diffuse = DisplayToRowRgb(light.R / 255f, light.G / 255f, light.B / 255f);
 
                     // A gradient pair's B row carries its own real color; a solo slot's B row
                     // gets a darkened copy — the id map's G channel blends A toward B exactly
@@ -1193,7 +1217,7 @@ public sealed class DecalsTab(
                     var dark = groups[g].Dark >= 0
                         ? new Rgba32(palette[groups[g].Dark])
                         : new Rgba32((byte)(light.R * ShadeFactor), (byte)(light.G * ShadeFactor), (byte)(light.B * ShadeFactor));
-                    GetOrSeedRow(edit, table, rowA + 1).Diffuse = [dark.R / 255f, dark.G / 255f, dark.B / 255f];
+                    GetOrSeedRow(edit, table, rowA + 1).Diffuse = DisplayToRowRgb(dark.R / 255f, dark.G / 255f, dark.B / 255f);
                 }
 
                 decal.PaletteRows = rowByColor.ToList();
@@ -1270,9 +1294,7 @@ public sealed class DecalsTab(
         // Colorset decals carry their finish on the claimed rows, so the control works even
         // without a mask sibling. Mask finish semantics are authored for modern gear masks —
         // skin and legacy mask/specular maps encode different channels and stay untouched.
-        // Hair masks share the gear layout closely enough (R specular, G roughness) that the
-        // same finish replay applies; the mapping stays empirical, like the gear one.
-        var showFinish = decal.IdRemap || (hasMask && option.Kind is MaterialKind.ModernColorset or MaterialKind.Hair);
+        var showFinish = decal.IdRemap || (hasMask && option.Kind is MaterialKind.ModernColorset);
         if (!hasNormal && !showFinish)
             return false;
 
