@@ -32,6 +32,19 @@ public sealed class MaterialMesh
     public required Vector2[] Uvs { get; init; }
     public required int[] Indices { get; init; }
 
+    /// <summary>
+    /// Per-vertex authored tangents (hair meshes: the anisotropic strand-flow direction).
+    /// Zero for vertices whose stream carries no tangent element — check <see cref="AnyTangents"/>
+    /// before relying on them.
+    /// </summary>
+    public required Vector3[] Tangents { get; init; }
+
+    private bool? _anyTangents;
+
+    /// <summary> Whether any vertex carried a usable tangent. </summary>
+    public bool AnyTangents
+        => _anyTangents ??= Array.Exists(Tangents, t => t.LengthSquared() > 1e-6f);
+
     /// <summary> Per-triangle submesh attribute mask — used to skip variant geometry the game currently hides. </summary>
     public required uint[] TriangleAttributeMasks { get; init; }
 
@@ -317,6 +330,28 @@ public sealed class ModelUvReader(IDataManager dataManager, PenumbraService penu
     }
 
     /// <summary>
+    /// Raw material names the source's model references (e.g. "/mt_c0201h0179_hir_a.mtrl") —
+    /// how a multi-material hairstyle's OTHER materials are discovered without each having
+    /// been added as a source. Empty when the model cannot be loaded.
+    /// </summary>
+    public IReadOnlyList<string> ModelMaterialNames(SourcePath source)
+    {
+        if (source.MdlGamePath.Length == 0)
+            return [];
+
+        try
+        {
+            var bytes = LoadModelBytes(source);
+            return bytes == null ? [] : new MdlFile(bytes).Materials;
+        }
+        catch (Exception ex)
+        {
+            DynamicTextureManager.Log.Warning($"Could not read material names of {source.MdlGamePath}: {ex.Message}");
+            return [];
+        }
+    }
+
+    /// <summary>
     /// Material file names the resolved SmallClothes body models reference — i.e. the skin
     /// materials the character's body actually renders with. A body material outside this set
     /// (e.g. the vanilla _a material while a body mod is active) only shows on stray gear-
@@ -514,8 +549,23 @@ public sealed class ModelUvReader(IDataManager dataManager, PenumbraService penu
     private byte[]? LoadModelBytes(SourcePath source)
     {
         if (source.MdlActualPath.Length > 0 && Path.IsPathRooted(source.MdlActualPath) && File.Exists(source.MdlActualPath))
+        {
+            DynamicTextureManager.Log.Debug($"Model {source.MdlGamePath}: loading stored file \"{source.MdlActualPath}\".");
             return File.ReadAllBytes(source.MdlActualPath);
+        }
 
+        // The stored snapshot can be absent or stale (resource trees do not always carry a
+        // usable actual path for model nodes — 2026-07-29: a modded hair mdl came through as
+        // its game path, silently rendering the VANILLA mesh under the mod's textures).
+        // Resolve fresh through the collection like the body models do.
+        var resolved = penumbra.ResolvePlayerPath(source.MdlGamePath);
+        if (resolved.Length > 0 && Path.IsPathRooted(resolved) && File.Exists(resolved))
+        {
+            DynamicTextureManager.Log.Debug($"Model {source.MdlGamePath}: loading resolved file \"{resolved}\".");
+            return File.ReadAllBytes(resolved);
+        }
+
+        DynamicTextureManager.Log.Debug($"Model {source.MdlGamePath}: loading vanilla game file.");
         return dataManager.GetFile(source.MdlGamePath)?.Data;
     }
 
@@ -547,6 +597,7 @@ public sealed class ModelUvReader(IDataManager dataManager, PenumbraService penu
         var positions = new List<Vector3>();
         var normals   = new List<Vector3>();
         var uvs       = new List<Vector2>();
+        var tangents  = new List<Vector3>();
         var indices   = new List<int>();
         var triMasks  = new List<uint>();
         var editable  = new List<bool>();
@@ -587,6 +638,7 @@ public sealed class ModelUvReader(IDataManager dataManager, PenumbraService penu
                     positions.Add(vertex.Position);
                     normals.Add(vertex.Normal);
                     uvs.Add(WrapUv(vertex.Uv));
+                    tangents.Add(vertex.Tangent);
                 }
 
                 // Submesh attribute masks let the picker skip variant geometry the game hides.
@@ -641,6 +693,7 @@ public sealed class ModelUvReader(IDataManager dataManager, PenumbraService penu
             Positions              = positions.ToArray(),
             Normals                = normals.ToArray(),
             Uvs                    = uvs.ToArray(),
+            Tangents               = tangents.ToArray(),
             Indices                = indices.ToArray(),
             TriangleAttributeMasks = triMasks.ToArray(),
             TriangleParts          = parts,
@@ -748,16 +801,16 @@ public sealed class ModelUvReader(IDataManager dataManager, PenumbraService penu
         return (parts, partIds.Count);
     }
 
-    private readonly record struct RawVertex(Vector3 Position, Vector3 Normal, Vector2 Uv);
+    private readonly record struct RawVertex(Vector3 Position, Vector3 Normal, Vector2 Uv, Vector3 Tangent);
 
-    /// <summary> Decode positions, normals, UV0 and skinning of one mesh from the raw vertex streams. </summary>
+    /// <summary> Decode positions, normals, UV0, tangents and skinning of one mesh from the raw vertex streams. </summary>
     private static bool TryReadMeshVertices(MdlFile mdl, byte[] data, int meshIndex, out RawVertex[] vertices)
     {
         vertices = [];
         if (meshIndex >= mdl.VertexDeclarations.Length)
             return false;
 
-        (byte Stream, byte Offset, MdlFile.VertexType Type)? position = null, normal = null, uv = null;
+        (byte Stream, byte Offset, MdlFile.VertexType Type)? position = null, normal = null, uv = null, tangent = null;
         foreach (var element in mdl.VertexDeclarations[meshIndex].VertexElements)
         {
             if (element.Stream == 255)
@@ -774,6 +827,9 @@ public sealed class ModelUvReader(IDataManager dataManager, PenumbraService penu
                     break;
                 case MdlFile.VertexUsage.UV when element.UsageIndex == 0:
                     uv = entry;
+                    break;
+                case MdlFile.VertexUsage.Tangent1:
+                    tangent = entry;
                     break;
             }
         }
@@ -797,7 +853,17 @@ public sealed class ModelUvReader(IDataManager dataManager, PenumbraService penu
             if (pos == null || nrm == null || tex == null)
                 return false;
 
-            vertices[v] = new RawVertex(pos.Value, nrm.Value, tex.Value);
+            // Tangents are optional flow data — a missing or unreadable one degrades to zero,
+            // never fails the mesh.
+            var tan = Vector3.Zero;
+            if (tangent != null && ReadVector3(data, VertexBase(tangent.Value, v), tangent.Value.Type) is { } rawTan)
+            {
+                var lengthSq = rawTan.LengthSquared();
+                if (lengthSq > 1e-6f)
+                    tan = rawTan / MathF.Sqrt(lengthSq);
+            }
+
+            vertices[v] = new RawVertex(pos.Value, nrm.Value, tex.Value, tan);
         }
 
         return true;
@@ -805,7 +871,16 @@ public sealed class ModelUvReader(IDataManager dataManager, PenumbraService penu
 
     private static Vector3? ReadVector3(byte[] data, long p, MdlFile.VertexType type)
     {
-        if (p < 0 || p + 16 > data.Length)
+        // Bound by what each format actually reads — a fixed 16-byte requirement would
+        // spuriously reject a 4-byte tangent sitting at the very end of a vertex stream.
+        var size = type switch
+        {
+            MdlFile.VertexType.Single3 or MdlFile.VertexType.Single4 => 12,
+            MdlFile.VertexType.Half4                                 => 6,
+            MdlFile.VertexType.NByte4                                => 4,
+            _                                                        => 0,
+        };
+        if (p < 0 || p + size > data.Length)
             return null;
 
         return type switch

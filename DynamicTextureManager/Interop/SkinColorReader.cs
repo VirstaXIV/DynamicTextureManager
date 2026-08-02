@@ -30,12 +30,8 @@ namespace DynamicTextureManager.Interop;
 /// <c>byte[]</c> indexer — any layout surprise now produces a wrong color or a caught exception,
 /// never a crash.
 /// </remarks>
-public sealed unsafe class SkinColorReader(IObjectTable objects, IDataManager dataManager) : IService
+public sealed unsafe class SkinColorReader(IObjectTable objects, CmpFileCache cmpCache) : IService
 {
-    // The cmp file never changes at runtime — bytes cached, re-fetch only retried on failure.
-    private byte[]? _cmpBytes;
-    private bool    _cmpLoadFailed;
-
     /// <summary> The local player's configured skin color as 0..1 RGB, if readable. </summary>
     public bool TryGetLocalPlayerSkin(out Vector3 rgb)
     {
@@ -70,7 +66,7 @@ public sealed unsafe class SkinColorReader(IObjectTable objects, IDataManager da
 
             var raceGenderIndex = gender == Gender.Female ? ((int)clan - 1) * 2 + 1 : ((int)clan - 1) * 2;
 
-            var bytes = GetCmpBytes();
+            var bytes = cmpCache.GetCmpBytes();
             if (bytes == null)
                 return false;
 
@@ -91,28 +87,5 @@ public sealed unsafe class SkinColorReader(IObjectTable objects, IDataManager da
             DynamicTextureManager.Log.Warning($"Could not read the local player's skin color: {ex.Message}");
             return false;
         }
-    }
-
-    private byte[]? GetCmpBytes()
-    {
-        if (_cmpBytes != null || _cmpLoadFailed)
-            return _cmpBytes;
-
-        try
-        {
-            _cmpBytes = dataManager.GetFile("chara/xls/charamake/human.cmp")?.Data;
-            if (_cmpBytes is not { Length: > 0 })
-            {
-                _cmpBytes      = null;
-                _cmpLoadFailed = true;
-            }
-        }
-        catch (Exception ex)
-        {
-            DynamicTextureManager.Log.Warning($"Could not load human.cmp: {ex.Message}");
-            _cmpLoadFailed = true;
-        }
-
-        return _cmpBytes;
     }
 }

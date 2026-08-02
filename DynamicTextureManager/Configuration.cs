@@ -47,6 +47,23 @@ public class Configuration: IPluginConfiguration, ISavable
     /// </summary>
     public bool PreviewSkinToneUserSet { get; set; } = false;
 
+    /// <summary>
+    /// Preview-only hair colors (packed Rgba32) for hair materials in the 3D viewport. Hair has
+    /// no diffuse texture — the game lerps the customize main/highlight colors by the normal
+    /// map's blue channel in-shader, so the preview needs stand-in colors. Never written into
+    /// any texture.
+    /// </summary>
+    public uint PreviewHairColor { get; set; } = 0xFF2A2D45;
+
+    /// <summary> Preview-only hair highlight color, see <see cref="PreviewHairColor"/>. </summary>
+    public uint PreviewHairHighlight { get; set; } = 0xFFC8B09A;
+
+    /// <summary>
+    /// Whether the preview hair colors were ever set deliberately — gates the Load Hair
+    /// auto-populate from clobbering a choice the user actually made.
+    /// </summary>
+    public bool PreviewHairColorsUserSet { get; set; } = false;
+
     /// <summary> Debug tunables for the empirical mask-map finish semantics, see ModGeneration.FinishMapping. </summary>
     public int MaskRoughnessChannel { get; set; } = 1;
 

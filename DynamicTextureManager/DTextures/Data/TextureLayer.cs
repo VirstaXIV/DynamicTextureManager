@@ -33,8 +33,9 @@ public abstract class TextureLayer
         var type = json["LayerType"]?.ToObject<string>();
         TextureLayer? ret = type switch
         {
-            DecalLayer.Type => DecalLayer.LoadDecal(json),
-            _               => null,
+            DecalLayer.Type     => DecalLayer.LoadDecal(json),
+            HairShineLayer.Type => HairShineLayer.LoadShine(json),
+            _                   => null,
         };
         if (ret == null)
         {
@@ -126,6 +127,14 @@ public sealed class DecalLayer : TextureLayer
     /// <summary> Whether the tint is active and consistent enough to apply. </summary>
     public bool HasTint
         => TintEnabled && PaletteColors.Count > 0 && TintColors.Count == PaletteColors.Count;
+
+    /// <summary>
+    /// Hair-highlight decal mode for the hair normal map (no diffuse exists): instead of
+    /// alpha-blending colors, the decal's LUMINANCE writes the blue channel — the per-pixel
+    /// blend between the wearer's main hair color (dark pixels) and highlight color (bright
+    /// pixels). NormalSmooth additionally flattens the strand bump inside the footprint.
+    /// </summary>
+    public bool HairHighlightMode;
 
     /// <summary> Runtime-only allocation failure shown in the UI; the layer auto-disables when set. </summary>
     public string? RowError;
@@ -258,6 +267,7 @@ public sealed class DecalLayer : TextureLayer
         json["PaletteRows"]    = new JArray(PaletteRows);
         json["TintEnabled"]    = TintEnabled;
         json["TintColors"]     = new JArray(TintColors);
+        json["HairHighlightMode"] = HairHighlightMode;
         json["AlphaThreshold"] = AlphaThreshold;
         json["NormalSmooth"]    = NormalSmooth;
         json["Finish"]          = (int)Finish;
@@ -308,6 +318,7 @@ public sealed class DecalLayer : TextureLayer
             PaletteRows    = json["PaletteRows"]?.ToObject<List<int>>() ?? [],
             TintEnabled    = json["TintEnabled"]?.ToObject<bool>() ?? false,
             TintColors     = json["TintColors"]?.ToObject<List<uint>>() ?? [],
+            HairHighlightMode = json["HairHighlightMode"]?.ToObject<bool>() ?? false,
             AlphaThreshold = json["AlphaThreshold"]?.ToObject<float>() ?? 0.5f,
             NormalSmooth   = json["NormalSmooth"]?.ToObject<float>() ?? 0f,
             // "Finish" replaced the pre-v0.5 "MaskPreset" key; old Matte/Glossy values map 1:1.
