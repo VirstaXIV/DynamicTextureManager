@@ -32,17 +32,20 @@ public sealed class AnimatedHairEdit
 
     public float StretchV = 1f;
 
-    /// <summary> Emissive color of the effect (colorset row 16A), linear RGB. </summary>
+    /// <summary> Emissive color of the moving effect (colorset row 16A), linear RGB. Always user-authored. </summary>
     public float[] EffectColor = [0.391f, 0.089f, 0.002f];
 
     /// <summary> Overall intensity multiplier applied to the effect color. </summary>
     public float EffectIntensity = 1f;
 
-    /// <summary> Base hair color (colorset row 16B diffuse), linear RGB. </summary>
+    /// <summary> Base hair color (colorset row 16B diffuse), linear RGB. Follows the character unless overridden. </summary>
     public float[] BaseColor = [0.1f, 0.1f, 0.1f];
 
-    /// <summary> Whether the user picked the base color manually — blocks auto-refresh from the live hair color. </summary>
-    public bool BaseColorUserSet;
+    /// <summary> Hair color of the highlight areas under the glow (row 16A diffuse), linear RGB. Follows the character unless overridden. </summary>
+    public float[] HighlightColor = [0.16f, 0.16f, 0.16f];
+
+    /// <summary> When set, BaseColor/HighlightColor are used as stored instead of following the character's hair/highlight colors. </summary>
+    public bool OverrideHairColors;
 
     public JObject Serialize()
         => new()
@@ -54,10 +57,11 @@ public sealed class AnimatedHairEdit
             ["SpeedV"]           = SpeedV,
             ["StretchU"]         = StretchU,
             ["StretchV"]         = StretchV,
-            ["EffectColor"]      = new JArray(EffectColor),
-            ["EffectIntensity"]  = EffectIntensity,
-            ["BaseColor"]        = new JArray(BaseColor),
-            ["BaseColorUserSet"] = BaseColorUserSet,
+            ["EffectColor"]        = new JArray(EffectColor),
+            ["EffectIntensity"]    = EffectIntensity,
+            ["BaseColor"]          = new JArray(BaseColor),
+            ["HighlightColor"]     = new JArray(HighlightColor),
+            ["OverrideHairColors"] = OverrideHairColors,
         };
 
     public static AnimatedHairEdit Load(JObject json)
@@ -73,7 +77,10 @@ public sealed class AnimatedHairEdit
             EffectColor      = LoadColor(json["EffectColor"], [0.391f, 0.089f, 0.002f]),
             EffectIntensity  = json["EffectIntensity"]?.ToObject<float>() ?? 1f,
             BaseColor        = LoadColor(json["BaseColor"], [0.1f, 0.1f, 0.1f]),
-            BaseColorUserSet = json["BaseColorUserSet"]?.ToObject<bool>() ?? false,
+            HighlightColor   = LoadColor(json["HighlightColor"], [0.16f, 0.16f, 0.16f]),
+            // Older saves: a manually pinned base color carries over as the override toggle.
+            OverrideHairColors = json["OverrideHairColors"]?.ToObject<bool>()
+             ?? json["BaseColorUserSet"]?.ToObject<bool>() ?? false,
         };
 
     private static float[] LoadColor(JToken? token, float[] fallback)

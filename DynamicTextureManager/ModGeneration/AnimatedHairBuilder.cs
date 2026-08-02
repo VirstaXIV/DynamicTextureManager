@@ -59,7 +59,8 @@ public static class AnimatedHairBuilder
     }
 
     // Colorset row templates from the reference material (raw half bits, 32 halves per row).
-    // Row 16A: the effect row — emissive + spec patched from the edit's effect color.
+    // Row 16A: the effect row — diffuse patched from the edit's highlight color, emissive +
+    // spec from the effect color.
     private static readonly ushort[] EffectRowTemplate =
     [
         0x0000, 0x0000, 0x0000, 0x3C00, 0x2EA9, 0x0000, 0x0000, 0x0000, 0x3640, 0x2DAD, 0x1837, 0x3C00,
@@ -139,6 +140,7 @@ public static class AnimatedHairBuilder
         }
 
         WriteRow(table, 30, EffectRowTemplate);
+        PatchColor(table, 30, 0, edit.HighlightColor, 1f);                        // highlight-area hair diffuse
         PatchColor(table, 30, 8, edit.EffectColor, edit.EffectIntensity);        // emissive
         PatchColor(table, 30, 4, edit.EffectColor, edit.EffectIntensity * 0.27f); // spec tint
         mtrl.Table    = table;
