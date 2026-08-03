@@ -1,21 +1,8 @@
-using System;
 using System.Collections.Generic;
 using System.Linq;
 using Newtonsoft.Json.Linq;
 
 namespace DynamicTextureManager.DTextures.Data;
-
-public enum SourceType
-{
-    /// <summary> Materials picked from a character's resolved resource tree or an item. </summary>
-    GamePath,
-
-    /// <summary> An item picked from game data (resolved to game paths at build time). </summary>
-    Item,
-
-    /// <summary> Files of an installed Penumbra mod. </summary>
-    PenumbraMod,
-}
 
 /// <summary> A single source material: its game path plus the actual file it resolved to when selected. </summary>
 public sealed class SourcePath
@@ -52,9 +39,6 @@ public sealed class SourcePath
     /// </summary>
     public bool Overlay = false;
 
-    public bool IsModded
-        => ModDirectory.Length > 0;
-
     public JObject Serialize()
         => new()
         {
@@ -85,19 +69,8 @@ public sealed class SourcePath
 /// <summary> What a dTexture overlays. </summary>
 public sealed class SourceRef
 {
-    public SourceType Type = SourceType.GamePath;
-
-    /// <summary> Display name of the selection (character name, item name or mod name). </summary>
-    public string DisplayName = string.Empty;
-
     /// <summary> The selected source materials. </summary>
     public List<SourcePath> Materials = [];
-
-    /// <summary> Directory name of the source mod for <see cref="SourceType.PenumbraMod"/>. </summary>
-    public string ModDirectory = string.Empty;
-
-    /// <summary> Item id for <see cref="SourceType.Item"/>. </summary>
-    public uint ItemId;
 
     public bool IsEmpty
         => Materials.Count == 0;
@@ -105,11 +78,7 @@ public sealed class SourceRef
     public JObject Serialize()
         => new()
         {
-            ["Type"]         = Type.ToString(),
-            ["DisplayName"]  = DisplayName,
-            ["Materials"]    = new JArray(Materials.Select(m => m.Serialize())),
-            ["ModDirectory"] = ModDirectory,
-            ["ItemId"]       = ItemId,
+            ["Materials"] = new JArray(Materials.Select(m => m.Serialize())),
         };
 
     public static SourceRef Load(JObject? json)
@@ -117,14 +86,7 @@ public sealed class SourceRef
         if (json == null)
             return new SourceRef();
 
-        var ret = new SourceRef
-        {
-            DisplayName  = json["DisplayName"]?.ToObject<string>() ?? string.Empty,
-            ModDirectory = json["ModDirectory"]?.ToObject<string>() ?? string.Empty,
-            ItemId       = json["ItemId"]?.ToObject<uint>() ?? 0,
-        };
-        if (Enum.TryParse<SourceType>(json["Type"]?.ToObject<string>(), out var type))
-            ret.Type = type;
+        var ret = new SourceRef();
         if (json["Materials"] is JArray materials)
             ret.Materials = materials.OfType<JObject>().Select(SourcePath.Load).ToList();
         return ret;

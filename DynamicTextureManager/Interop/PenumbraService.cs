@@ -25,7 +25,6 @@ public sealed class PenumbraService : IDisposable, IService
     private readonly EventSubscriber                 _initializedEvent;
     private readonly EventSubscriber                 _disposedEvent;
     private readonly EventSubscriber<string>         _modDeletedEvent;
-    private readonly EventSubscriber<string>         _modAddedEvent;
     private readonly EventSubscriber<string, string> _modMovedEvent;
 
     private readonly ApiVersion                    _apiVersion;
@@ -63,9 +62,6 @@ public sealed class PenumbraService : IDisposable, IService
     /// <summary> Fired when a mod is deleted in Penumbra, with its directory name. </summary>
     public event Action<string>? ModDeleted;
 
-    /// <summary> Fired when a mod is added in Penumbra, with its directory name. </summary>
-    public event Action<string>? ModAdded;
-
     /// <summary> Fired when a mod directory is moved in Penumbra, with old and new directory names. </summary>
     public event Action<string, string>? ModMoved;
 
@@ -99,7 +95,6 @@ public sealed class PenumbraService : IDisposable, IService
         _initializedEvent = Initialized.Subscriber(pi, OnPenumbraInitialized);
         _disposedEvent    = Disposed.Subscriber(pi, OnPenumbraDisposed);
         _modDeletedEvent  = Penumbra.Api.IpcSubscribers.ModDeleted.Subscriber(pi, d => ModDeleted?.Invoke(d));
-        _modAddedEvent    = Penumbra.Api.IpcSubscribers.ModAdded.Subscriber(pi, d => ModAdded?.Invoke(d));
         _modMovedEvent    = Penumbra.Api.IpcSubscribers.ModMoved.Subscriber(pi, (o, n) => ModMoved?.Invoke(o, n));
 
         OnPenumbraInitialized();
@@ -110,7 +105,6 @@ public sealed class PenumbraService : IDisposable, IService
         _initializedEvent.Dispose();
         _disposedEvent.Dispose();
         _modDeletedEvent.Dispose();
-        _modAddedEvent.Dispose();
         _modMovedEvent.Dispose();
         Available = false;
     }

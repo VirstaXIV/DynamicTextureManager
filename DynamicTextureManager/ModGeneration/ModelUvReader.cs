@@ -9,7 +9,6 @@ using DynamicTextureManager.DTextures.Data;
 using DynamicTextureManager.Interop;
 using OtterGui.Services;
 using Penumbra.GameData.Files;
-using Penumbra.GameData.Files.MaterialStructs;
 
 namespace DynamicTextureManager.ModGeneration;
 
@@ -31,19 +30,6 @@ public sealed class MaterialMesh
     public required Vector3[] Normals { get; init; }
     public required Vector2[] Uvs { get; init; }
     public required int[] Indices { get; init; }
-
-    /// <summary>
-    /// Per-vertex authored tangents (hair meshes: the anisotropic strand-flow direction).
-    /// Zero for vertices whose stream carries no tangent element — check <see cref="AnyTangents"/>
-    /// before relying on them.
-    /// </summary>
-    public required Vector3[] Tangents { get; init; }
-
-    private bool? _anyTangents;
-
-    /// <summary> Whether any vertex carried a usable tangent. </summary>
-    public bool AnyTangents
-        => _anyTangents ??= Array.Exists(Tangents, t => t.LengthSquared() > 1e-6f);
 
     /// <summary> Per-triangle submesh attribute mask — used to skip variant geometry the game currently hides. </summary>
     public required uint[] TriangleAttributeMasks { get; init; }
@@ -242,31 +228,6 @@ public sealed class ModelUvReader(IDataManager dataManager, PenumbraService penu
         }
 
         return string.Empty;
-    }
-
-    /// <summary>
-    /// TEMPORARY diagnostic (2026-07 overlay-part investigation): a quick summary of a
-    /// material's shader package and whether it carries a colorset — distinguishes a diffuse-
-    /// paintable overlay (nails/accents) from a colorset-driven one (piercings/pubic hair,
-    /// which decals cannot target via the tattoo/diffuse-bake mechanism, only via the
-    /// gear-style id-map mechanism). Remove alongside the rest of the A0 diagnostic.
-    /// </summary>
-    private string ClassifyOverlayMaterial(string gamePath)
-    {
-        try
-        {
-            var bytes = LoadGameFile(gamePath);
-            if (bytes == null)
-                return "unreadable";
-
-            var mtrl = new MtrlFile(bytes);
-            var hasColorTable = mtrl.Table is ColorTable or LegacyColorTable;
-            return $"shader {mtrl.ShaderPackage.Name}, colorTable={hasColorTable}";
-        }
-        catch (Exception ex)
-        {
-            return $"unreadable ({ex.Message})";
-        }
     }
 
     /// <summary> The race code in a body skin material's path — a fallback only, see <see cref="BodyTopModelPattern"/>. </summary>
@@ -597,7 +558,6 @@ public sealed class ModelUvReader(IDataManager dataManager, PenumbraService penu
         var positions = new List<Vector3>();
         var normals   = new List<Vector3>();
         var uvs       = new List<Vector2>();
-        var tangents  = new List<Vector3>();
         var indices   = new List<int>();
         var triMasks  = new List<uint>();
         var editable  = new List<bool>();
@@ -638,7 +598,6 @@ public sealed class ModelUvReader(IDataManager dataManager, PenumbraService penu
                     positions.Add(vertex.Position);
                     normals.Add(vertex.Normal);
                     uvs.Add(WrapUv(vertex.Uv));
-                    tangents.Add(vertex.Tangent);
                 }
 
                 // Submesh attribute masks let the picker skip variant geometry the game hides.
@@ -693,7 +652,6 @@ public sealed class ModelUvReader(IDataManager dataManager, PenumbraService penu
             Positions              = positions.ToArray(),
             Normals                = normals.ToArray(),
             Uvs                    = uvs.ToArray(),
-            Tangents               = tangents.ToArray(),
             Indices                = indices.ToArray(),
             TriangleAttributeMasks = triMasks.ToArray(),
             TriangleParts          = parts,
@@ -801,16 +759,16 @@ public sealed class ModelUvReader(IDataManager dataManager, PenumbraService penu
         return (parts, partIds.Count);
     }
 
-    private readonly record struct RawVertex(Vector3 Position, Vector3 Normal, Vector2 Uv, Vector3 Tangent);
+    private readonly record struct RawVertex(Vector3 Position, Vector3 Normal, Vector2 Uv);
 
-    /// <summary> Decode positions, normals, UV0, tangents and skinning of one mesh from the raw vertex streams. </summary>
+    /// <summary> Decode positions, normals and UV0 of one mesh from the raw vertex streams. </summary>
     private static bool TryReadMeshVertices(MdlFile mdl, byte[] data, int meshIndex, out RawVertex[] vertices)
     {
         vertices = [];
         if (meshIndex >= mdl.VertexDeclarations.Length)
             return false;
 
-        (byte Stream, byte Offset, MdlFile.VertexType Type)? position = null, normal = null, uv = null, tangent = null;
+        (byte Stream, byte Offset, MdlFile.VertexType Type)? position = null, normal = null, uv = null;
         foreach (var element in mdl.VertexDeclarations[meshIndex].VertexElements)
         {
             if (element.Stream == 255)
@@ -827,9 +785,6 @@ public sealed class ModelUvReader(IDataManager dataManager, PenumbraService penu
                     break;
                 case MdlFile.VertexUsage.UV when element.UsageIndex == 0:
                     uv = entry;
-                    break;
-                case MdlFile.VertexUsage.Tangent1:
-                    tangent = entry;
                     break;
             }
         }
@@ -853,17 +808,7 @@ public sealed class ModelUvReader(IDataManager dataManager, PenumbraService penu
             if (pos == null || nrm == null || tex == null)
                 return false;
 
-            // Tangents are optional flow data — a missing or unreadable one degrades to zero,
-            // never fails the mesh.
-            var tan = Vector3.Zero;
-            if (tangent != null && ReadVector3(data, VertexBase(tangent.Value, v), tangent.Value.Type) is { } rawTan)
-            {
-                var lengthSq = rawTan.LengthSquared();
-                if (lengthSq > 1e-6f)
-                    tan = rawTan / MathF.Sqrt(lengthSq);
-            }
-
-            vertices[v] = new RawVertex(pos.Value, nrm.Value, tex.Value, tan);
+            vertices[v] = new RawVertex(pos.Value, nrm.Value, tex.Value);
         }
 
         return true;
@@ -872,7 +817,7 @@ public sealed class ModelUvReader(IDataManager dataManager, PenumbraService penu
     private static Vector3? ReadVector3(byte[] data, long p, MdlFile.VertexType type)
     {
         // Bound by what each format actually reads — a fixed 16-byte requirement would
-        // spuriously reject a 4-byte tangent sitting at the very end of a vertex stream.
+        // spuriously reject a 4-byte element sitting at the very end of a vertex stream.
         var size = type switch
         {
             MdlFile.VertexType.Single3 or MdlFile.VertexType.Single4 => 12,
