@@ -31,11 +31,8 @@ public sealed class DTextureChanged() : EventWrapper<DTextureChanged.Type, DText
 
     public enum Priority
     {
-        /// <seealso cref="DTextureFileSystem.OnDesignChange"/>
+        /// <seealso cref="DTextureFileSystem.OnDTextureChange"/>
         DTextureFileSystem = 0,
-
-        /// <seealso cref="UI.DTMFileSystemSelector.OnDesignChange"/>
-        DTMFileSystemSelector = -1,
 
         /// <seealso cref="ModGeneration.OverlayModManager.OnDTextureChanged"/>
         OverlayModManager = -2,

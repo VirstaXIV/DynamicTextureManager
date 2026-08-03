@@ -18,9 +18,6 @@ public sealed record ResolvedMaterial(
     string MdlGamePath,
     string MdlActualPath)
 {
-    public bool IsModded
-        => ModDirectory.Length > 0;
-
     /// <summary> Whether this is an overlay-part material (nails, accents) — see DTextures.Data.SourcePath.Overlay. </summary>
     public bool IsOverlayPart { get; init; }
 }

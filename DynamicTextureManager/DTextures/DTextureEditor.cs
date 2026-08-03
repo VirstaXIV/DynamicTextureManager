@@ -6,7 +6,7 @@ namespace DynamicTextureManager.DTextures;
 public class DTextureEditor(
     SaveService saveService,
     DTextureChanged dTextureChanged,
-    Configuration config) : IDTextureEditor
+    Configuration config)
 {
     protected readonly DTextureChanged DTextureChanged  = dTextureChanged;
     protected readonly SaveService SaveService = saveService;

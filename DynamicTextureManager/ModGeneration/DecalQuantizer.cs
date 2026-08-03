@@ -23,33 +23,13 @@ public static class DecalQuantizer
     private const int SampleBudget = 120_000;
 
     /// <summary>
-    /// Extract at most <paramref name="maxColors"/> colors from the pixels whose alpha passes
-    /// the layer's threshold. Images that already use few enough distinct colors keep them
-    /// exactly; otherwise similar colors are merged by a Wu quantizer. The palette is sorted
-    /// by luminance (brightest first) so re-extracting the same image is stable.
-    /// </summary>
-    public static uint[] ExtractPalette(string pngPath, int maxColors, float alphaThreshold)
-    {
-        maxColors = Math.Max(1, maxColors);
-        var opaque = LoadOpaquePixels(pngPath, alphaThreshold);
-        if (opaque.Count == 0)
-            return [];
-
-        var distinct = opaque.Distinct().ToList();
-        if (distinct.Count > maxColors)
-            distinct = QuantizeDown(opaque, maxColors);
-
-        return SortPalette(distinct);
-    }
-
-    /// <summary>
     /// Extract the SMALLEST palette that still renders the image faithfully: candidate
     /// palettes grow one color at a time until the blended rendering error — each pixel's
     /// distance to the nearest gradient-pair segment or solo color, the same model the
     /// composite renders with — drops within <paramref name="mergeDistance"/> (0-255 RGB
     /// scale, 95th percentile so stray specks don't force extra colors). The color count is
     /// automatic; the threshold is the only knob. Deterministic for the same image and
-    /// settings, like <see cref="ExtractPalette"/>.
+    /// settings.
     /// </summary>
     public static uint[] ExtractPaletteAuto(string pngPath, float alphaThreshold, float mergeDistance)
     {
