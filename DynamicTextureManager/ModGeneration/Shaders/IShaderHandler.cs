@@ -37,8 +37,6 @@ public interface IShaderHandler
 {
     bool Matches(string shpkName);
 
-    bool SupportsColorSet(MtrlFile material);
-
     /// <summary>
     /// Whether ID-map colorset decals (multi-color row remapping) work on this material.
     /// Only Dawntrail gear materials with the 32-row color table are supported; legacy

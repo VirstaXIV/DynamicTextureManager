@@ -66,22 +66,4 @@ public static class ProceduralMasks
 
         return sum / total;
     }
-
-    /// <summary>
-    /// Directional gradient across the 0..1 UV tile in [0,1]: the UV projected onto the given
-    /// direction, smoothstep-remapped between <paramref name="start"/> and <paramref name="end"/>.
-    /// 90° runs along V — root-to-tip on typical hair layouts.
-    /// </summary>
-    public static float Gradient(Vector2 uv, float angleDeg, float start, float end, bool invert)
-    {
-        var radians   = angleDeg * MathF.PI / 180f;
-        var direction = new Vector2(MathF.Cos(radians), MathF.Sin(radians));
-        // Remap the projection so the full [start, end] window is reachable for any direction:
-        // t spans [-1, 1] across the tile diagonally, normalize to [0, 1].
-        var t = (Vector2.Dot(uv - new Vector2(0.5f), direction) + 1f) * 0.5f;
-        var value = end - start < 1e-5f
-            ? t < start ? 0f : 1f
-            : SmoothStep(Math.Clamp((t - start) / (end - start), 0f, 1f));
-        return invert ? 1f - value : value;
-    }
 }
