@@ -2784,41 +2784,45 @@ public sealed class DecalsTab(
 
         ImGui.SetNextItemWidth(150 * ImUtf8.GlobalScale);
         var scrollU = staged.ScrollU;
-        if (ImUtf8.Slider("##scrollU"u8, ref scrollU, "%.2f"u8, -1f, 1f))
+        if (ImUtf8.Slider("##scrollU"u8, ref scrollU, "Across: %.2f"u8, -1f, 1f))
         {
             staged.ScrollU = scrollU;
             changed        = true;
         }
 
+        ImUtf8.HoverTooltip("Sideways drift of the pattern. Negative reverses, 0 freezes."u8);
+
         ImGui.SameLine();
         ImGui.SetNextItemWidth(150 * ImUtf8.GlobalScale);
         var scrollV = staged.ScrollV;
-        if (ImUtf8.Slider("Scroll Speed U/V"u8, ref scrollV, "%.2f"u8, -1f, 1f))
+        if (ImUtf8.Slider("Scroll Speed"u8, ref scrollV, "Along: %.2f"u8, -1f, 1f))
         {
             staged.ScrollV = scrollV;
             changed        = true;
         }
 
-        ImUtf8.HoverTooltip("How fast the effect pattern drifts across the hair, in pattern-repeats per second for each texture direction. Negative reverses the direction; 0/0 freezes it."u8);
+        ImUtf8.HoverTooltip("Drift along the strands. Negative reverses, 0 freezes."u8);
 
         ImGui.SetNextItemWidth(150 * ImUtf8.GlobalScale);
         var tilingU = staged.TilingU;
-        if (ImUtf8.Slider("##tilingU"u8, ref tilingU, "%.2f"u8, 0.05f, 8f))
+        if (ImUtf8.Slider("##tilingU"u8, ref tilingU, "Across: %.2f"u8, 0.05f, 8f))
         {
             staged.TilingU = Math.Clamp(tilingU, 0.01f, 16f);
             changed        = true;
         }
 
+        ImUtf8.HoverTooltip("Pattern repeats across the strands — low = broad, high = fine."u8);
+
         ImGui.SameLine();
         ImGui.SetNextItemWidth(150 * ImUtf8.GlobalScale);
         var tilingV = staged.TilingV;
-        if (ImUtf8.Slider("Pattern Tiling U/V"u8, ref tilingV, "%.2f"u8, 0.05f, 8f))
+        if (ImUtf8.Slider("Pattern Tiling"u8, ref tilingV, "Along: %.2f"u8, 0.05f, 8f))
         {
             staged.TilingV = Math.Clamp(tilingV, 0.01f, 16f);
             changed        = true;
         }
 
-        ImUtf8.HoverTooltip("How often the effect pattern repeats across the hair in each texture direction — low = broad shapes, high = fine ripples."u8);
+        ImUtf8.HoverTooltip("Pattern repeats along the strands — low = broad, high = fine."u8);
 
         var pattern    = (AnimatedHairBuilder.HairEffectPattern)staged.Pattern;
         var libraryEntry = staged.EffectLibraryId != Guid.Empty ? decals.GetEffect(staged.EffectLibraryId) : null;
