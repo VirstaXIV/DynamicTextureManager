@@ -133,7 +133,10 @@ public sealed class DecalViewport(ITextureProvider textureProvider) : IDisposabl
             _mesh        = mesh;
             _renderDirty = true;
             if (dTextureChanged || subjectChanged)
+            {
                 FrameCamera();
+                _lastInteractiveCost = 0;
+            }
         }
 
         _open = true;
@@ -311,13 +314,16 @@ public sealed class DecalViewport(ITextureProvider textureProvider) : IDisposabl
         var size  = MathF.Max(200f, MathF.Min(avail.X, avail.Y));
 
         // Camera interaction degrades gracefully instead of re-rasterizing 768² every frame
-        // (which tanked game fps): while orbiting/panning/zooming, render at HALF resolution
-        // and at most 30 times a second; a final full-resolution render lands on release.
+        // (which tanked game fps): while orbiting/panning/zooming, render at reduced
+        // resolution, paced by the previous render's own measured cost — a fixed 30fps
+        // cadence let a dense modded hairstyle (high triangle count + card overdraw) eat
+        // the whole frame budget. A final full-resolution render lands on release.
         var now         = ImGui.GetTime();
         var interacting = now - _lastCameraChange < 0.15;
         if (_renderDirty || _wrap == null)
         {
-            if (_wrap == null || !interacting || now - _lastRenderTime >= 1.0 / 30)
+            var interval = Math.Max(1.0 / 30, _lastInteractiveCost * 3);
+            if (_wrap == null || !interacting || now - _lastRenderTime >= interval)
             {
                 Render(interacting ? RenderSize / 2 : RenderSize);
                 _renderDirty    = false;
@@ -678,10 +684,8 @@ public sealed class DecalViewport(ITextureProvider textureProvider) : IDisposabl
                 // customize main color toward the highlight color; the customize colors are
                 // "squared RGB" in the game's constant buffer, so square them here too.
                 albedo = Vector3.Lerp(hair.Main * hair.Main, hair.Highlight * hair.Highlight, diffuse.Rgba[i + 2] / 255f);
-                // The mask's alpha is the strand ambient occlusion — softened so roots never
-                // go pitch black; without this a light hairstyle reads as a flat silhouette.
                 if (hairMask != null)
-                    albedo *= 0.3f + 0.7f * (SampleAlpha(hairMask, uv) / 255f);
+                    albedo *= HairAoFactor(hairMask, uv);
             }
             else
             {
@@ -704,6 +708,34 @@ public sealed class DecalViewport(ITextureProvider textureProvider) : IDisposabl
         }
 
         return shaded ? albedo : new Vector3(190f / 255f);
+    }
+
+    // The BUILT companion mask multiplies the in-game diffuse by the strand AO NORMALIZED
+    // around its own mean (AnimatedHairBuilder.BuildCharMaskRgba): a typical strand keeps
+    // full brightness, only crevices darker than typical shade down. The preview must shade
+    // with the SAME curve — multiplying by absolute AO muted the color across the whole
+    // style (visibly less colored roots than in game). One 256-entry curve per mask
+    // instance; the mask's alpha channel is the AO.
+    private static readonly System.Runtime.CompilerServices.ConditionalWeakTable<DecodedTexture, float[]> AoCurves = new();
+
+    private static float HairAoFactor(DecodedTexture mask, Vector2 uv)
+    {
+        var curve = AoCurves.GetValue(mask, static m =>
+        {
+            long sum = 0;
+            for (var i = 3; i < m.Rgba.Length; i += 4)
+                sum += m.Rgba[i];
+            var mean  = Math.Max(1f, sum / (m.Rgba.Length / 4f)) / 255f;
+            var table = new float[256];
+            for (var a = 0; a < 256; ++a)
+            {
+                var display = MathF.Pow(MathF.Min(1f, a / 255f / mean), 0.75f);
+                table[a] = display * display;
+            }
+
+            return table;
+        });
+        return curve[SampleAlpha(mask, uv)];
     }
 
     private static byte SampleAlpha(DecodedTexture texture, Vector2 uv)
@@ -769,6 +801,7 @@ public sealed class DecalViewport(ITextureProvider textureProvider) : IDisposabl
         if (_mesh == null)
             return;
 
+        var stopwatch = System.Diagnostics.Stopwatch.StartNew();
         _renderedSize = size;
         var rgba  = _renderRgba;
         var depth = _renderDepth;
@@ -1087,14 +1120,20 @@ public sealed class DecalViewport(ITextureProvider textureProvider) : IDisposabl
 
         CollectEffectPixels();
         PresentFrame();
+
+        if (size < RenderSize)
+            _lastInteractiveCost = stopwatch.Elapsed.TotalSeconds;
     }
 
-    // Interactive-degradation state: camera drags render half-resolution at ≤30fps, a final
-    // full-resolution render lands after release.
+    // Interactive-degradation state: camera drags render half-resolution, paced by the
+    // previous render's measured cost — a heavy mesh gets fewer preview updates per second
+    // instead of a blockier image or a tanked game framerate. A final full-resolution
+    // render lands after release.
     private int    _renderedSize = RenderSize;
     private double _lastRenderTime;
     private double _lastCameraChange;
     private bool   _fullResPending;
+    private double _lastInteractiveCost;
 
     // Animated-effect compositing state: the base render is rasterized once; each animation
     // frame only re-adds the scrolling emissive over the recorded highlight pixels.
