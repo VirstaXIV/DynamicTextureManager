@@ -521,9 +521,6 @@ public sealed class SourceTab(
         new(@"^chara/equipment/e\d{4}/model/(c\d{4})e\d{4}_(?:top|dwn|glv|sho)\.mdl$",
             System.Text.RegularExpressions.RegexOptions.IgnoreCase | System.Text.RegularExpressions.RegexOptions.Compiled);
 
-    private bool IsSkinMaterial(ResolvedMaterial material)
-        => SkinInfo(material).IsSkin;
-
     /// <summary> Whether a material is skin, and which diffuse texture it paints (the tattoo canvas). </summary>
     private (bool IsSkin, string Diffuse) SkinInfo(ResolvedMaterial material)
     {
@@ -543,9 +540,6 @@ public sealed class SourceTab(
     private void AddGroup(DTexture dTexture, ResolvedModelGroup group)
     {
         var source = dTexture.Data.Source;
-        source.Type = SourceType.GamePath;
-        if (source.DisplayName.Length == 0)
-            source.DisplayName = "Worn Gear";
 
         string? select = null;
         foreach (var material in group.Materials)

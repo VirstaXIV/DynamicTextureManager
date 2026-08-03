@@ -22,9 +22,6 @@ public sealed class EditPreviewer : IService, IDisposable
 
     private string _activeGamePath = string.Empty;
 
-    public bool Active
-        => _activeGamePath.Length > 0;
-
     public EditPreviewer(PenumbraService penumbra, FilenameService filenames)
     {
         _penumbra         = penumbra;

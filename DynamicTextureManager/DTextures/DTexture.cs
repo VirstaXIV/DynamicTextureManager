@@ -14,18 +14,14 @@ public sealed class DTexture : DTextureBase, ISavable
     internal DTexture()
         : base()
     { }
-    
-    internal DTexture(DTextureBase other)
-        : base(other)
-    { }
-    
+
     internal DTexture(DTexture other)
         : base(other)
     {
         Description            = other.Description;
     }
-    
-    public new const int FileVersion = 2;
+
+    public const int FileVersion = 2;
 
     public Guid                         Identifier             { get; internal init; }
     public DateTimeOffset               CreationDate           { get; internal init; }
@@ -41,7 +37,7 @@ public sealed class DTexture : DTextureBase, ISavable
     
     #region Serialization
 
-    public new JObject JsonSerialize()
+    public JObject JsonSerialize()
     {
         var ret = new JObject
         {

@@ -12,9 +12,6 @@ public abstract class ShaderHandlerBase : IShaderHandler
 {
     public abstract bool Matches(string shpkName);
 
-    public virtual bool SupportsColorSet(MtrlFile material)
-        => material.Table is ColorTable or LegacyColorTable;
-
     public virtual bool SupportsColorsetDecals(MtrlFile material)
         => false;
 
@@ -99,9 +96,6 @@ public sealed class SkinShaderHandler : ShaderHandlerBase
     public override bool Matches(string shpkName)
         => string.Equals(shpkName, "skin.shpk", StringComparison.OrdinalIgnoreCase);
 
-    public override bool SupportsColorSet(MtrlFile material)
-        => false;
-
     public override MaterialKind Kind(MtrlFile material)
         => MaterialKind.Skin;
 }
@@ -123,9 +117,6 @@ public sealed class HairShaderHandler : ShaderHandlerBase
     public override bool Matches(string shpkName)
         => string.Equals(shpkName, "hair.shpk", StringComparison.OrdinalIgnoreCase);
 
-    public override bool SupportsColorSet(MtrlFile material)
-        => false;
-
     /// <summary> An absent GetSubColor key means the default Hair variant; only an explicit Face value gates off. </summary>
     public static bool IsFaceVariant(MtrlFile material)
         => material.ShaderPackage.ShaderKeys.Any(k => k.Key == SubColorKey && k.Value == SubColorFace);
@@ -139,9 +130,6 @@ public sealed class FallbackShaderHandler : ShaderHandlerBase
 {
     public override bool Matches(string shpkName)
         => true;
-
-    public override bool SupportsColorSet(MtrlFile material)
-        => false;
 }
 
 /// <summary> Picks the handler for a material; first match wins, the fallback always matches. </summary>

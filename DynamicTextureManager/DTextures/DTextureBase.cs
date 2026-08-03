@@ -1,11 +1,7 @@
-using Newtonsoft.Json.Linq;
-
 namespace DynamicTextureManager.DTextures;
 
 public class DTextureBase
 {
-    public const int FileVersion = 1;
-    
     private DTextureData _dTextureData = new();
 
     /// <summary> The payload of this dTexture. </summary>
@@ -41,19 +37,6 @@ public class DTextureBase
         _writeProtected = value;
         return true;
     }
-    
-    #endregion
-    
-    #region Serialization
 
-    public JObject JsonSerialize()
-    {
-        var ret = new JObject
-        {
-            ["FileVersion"] = FileVersion
-        };
-        return ret;
-    }
-    
     #endregion
 }
