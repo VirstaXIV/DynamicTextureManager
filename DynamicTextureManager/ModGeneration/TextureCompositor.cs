@@ -124,10 +124,10 @@ public sealed class TextureCompositor(DecalLibrary decals) : IService
 
     private void ApplyDecal(Image<Rgba32> target, DecalLayer layer, MaterialMesh? mesh, TextureSlot? effectSlot = null)
     {
-        var path = decals.FilePath(layer.DecalId);
+        var path = decals.LayerImagePath(layer);
         if (!File.Exists(path))
         {
-            DynamicTextureManager.Log.Warning($"Decal {layer.DecalId} is missing from the library, layer skipped.");
+            DynamicTextureManager.Log.Warning($"Decal image {path} is missing, layer skipped.");
             return;
         }
 
@@ -236,7 +236,7 @@ public sealed class TextureCompositor(DecalLibrary decals) : IService
     {
         if (!File.Exists(stampPath))
         {
-            DynamicTextureManager.Log.Warning($"Extracted decal {layer.DecalId} is missing from the library — its original footprint stays in place.");
+            DynamicTextureManager.Log.Warning($"Extracted decal stamp {stampPath} is missing — its original footprint stays in place.");
             return;
         }
 
@@ -249,8 +249,7 @@ public sealed class TextureCompositor(DecalLibrary decals) : IService
         if (stamp.Width != w || stamp.Height != h)
             stamp.Mutate(c => c.Resize(w, h, KnownResamplers.NearestNeighbor));
 
-        var threshold = layer.AlphaThresholdByte;
-        var fillR     = IdMapTexel.PairByte(layer.FillPair);
+        var fillR = IdMapTexel.PairByte(layer.FillPair);
 
         for (var dy = 0; dy < h; ++dy)
         {
@@ -261,7 +260,10 @@ public sealed class TextureCompositor(DecalLibrary decals) : IService
             for (var dx = 0; dx < w; ++dx)
             {
                 var tx = x0 + dx;
-                if (tx < 0 || tx >= target.Width || stamp[dx, dy].A < threshold)
+                // Every marked texel was decal (content OR the alpha-1 erase halo) — the
+                // layer's threshold only shapes the RESTAMP; erasing less than the whole
+                // footprint leaves the original decal's fringe speckled across the map.
+                if (tx < 0 || tx >= target.Width || stamp[dx, dy].A == 0)
                     continue;
 
                 var pixel = target[tx, ty];
