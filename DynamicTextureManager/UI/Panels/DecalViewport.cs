@@ -71,6 +71,12 @@ public sealed class DecalViewport(ITextureProvider textureProvider) : IDisposabl
     private uint          _visibleAttributes = uint.MaxValue;
     private Action?       _onChanged;
 
+    // Flow-anchor placement (procedural surface layers): click sets the anchor, dragging
+    // combs its direction along the surface. Mutually exclusive with decal placement.
+    private ProceduralSurfaceLayer? _flowLayer;
+    private int                     _flowAnchor = -1;
+    private Vector3?                _flowDragOrigin;
+
     private ViewportShading? _shading;
     private bool             _highlightDecal;
 
@@ -114,12 +120,14 @@ public sealed class DecalViewport(ITextureProvider textureProvider) : IDisposabl
             _renderDirty = true;
         _visibleAttributes = visibleAttributes;
 
-        if (dTextureChanged && _layer != null)
+        if (dTextureChanged && (_layer != null || _flowLayer != null))
         {
             // A different project: the placement binding belongs to its layers, drop it.
             DynamicTextureManager.Log.Debug("Viewport placement unbound — the selected dTexture changed.");
-            _layer     = null;
-            _onChanged = null;
+            _layer      = null;
+            _flowLayer  = null;
+            _flowAnchor = -1;
+            _onChanged  = null;
         }
 
         if (meshChanged)
@@ -146,11 +154,34 @@ public sealed class DecalViewport(ITextureProvider textureProvider) : IDisposabl
     /// <summary> Bind a decal layer for interactive placement on the currently shown mesh. </summary>
     public void BeginPlacement(DecalLayer layer, string decalPath, Action onChanged)
     {
+        _flowLayer   = null;
+        _flowAnchor  = -1;
         _layer       = layer;
         _onChanged   = onChanged;
         _renderDirty = true;
         LoadDecal(decalPath);
     }
+
+    /// <summary>
+    /// Bind one flow anchor of a procedural surface layer: clicking the mesh sets the anchor,
+    /// dragging combs its direction along the surface.
+    /// </summary>
+    public void BeginFlowPlacement(ProceduralSurfaceLayer layer, int anchorIndex, Action onChanged)
+    {
+        _layer          = null;
+        _flowLayer      = layer;
+        _flowAnchor     = anchorIndex;
+        _flowDragOrigin = null;
+        _onChanged      = onChanged;
+        _renderDirty    = true;
+    }
+
+    public bool IsOpenForFlow(ProceduralSurfaceLayer layer)
+        => _open && ReferenceEquals(_flowLayer, layer);
+
+    /// <summary> The anchor index currently bound for flow placement, -1 when none. </summary>
+    public int FlowAnchorIndex(ProceduralSurfaceLayer layer)
+        => IsOpenForFlow(layer) ? _flowAnchor : -1;
 
     /// <summary> Return to view mode, committing any pending placement edit. </summary>
     public void EndPlacement()
@@ -161,9 +192,12 @@ public sealed class DecalViewport(ITextureProvider textureProvider) : IDisposabl
             _onChanged?.Invoke();
         }
 
-        _layer       = null;
-        _onChanged   = null;
-        _renderDirty = true;
+        _layer          = null;
+        _flowLayer      = null;
+        _flowAnchor     = -1;
+        _flowDragOrigin = null;
+        _onChanged      = null;
+        _renderDirty    = true;
     }
 
     /// <summary> Swap in new shading buffers; re-renders only when something actually changed. </summary>
@@ -313,6 +347,8 @@ public sealed class DecalViewport(ITextureProvider textureProvider) : IDisposabl
 
         if (_layer != null)
             DrawPlacementControls(_layer);
+        else if (_flowLayer != null)
+            DrawFlowPlacementControls();
 
         var avail = Im.ContentRegion.Available;
         var size  = MathF.Max(200f, MathF.Min(avail.X, avail.Y));
@@ -376,7 +412,9 @@ public sealed class DecalViewport(ITextureProvider textureProvider) : IDisposabl
                 (keyControl ? "Ctrl+Wheel: resizing decal" : "Ctrl+Wheel: resize decal", keyControl ? hotColor : dimColor),
                 (keyShift ? "Shift+Wheel: rotating decal" : "Shift+Wheel: rotate decal", keyShift ? hotColor : dimColor),
             ]
-            : [("RMB orbit · MMB pan · Wheel zoom", dimColor)];
+            : _flowLayer != null
+                ? [("LMB drag: place anchor + comb direction · RMB orbit · Wheel zoom", dimColor)]
+                : [("RMB orbit · MMB pan · Wheel zoom", dimColor)];
 
         var pad       = 6f * Im.Style.GlobalScale;
         var lineStep  = Im.Style.TextHeight + 2f;
@@ -412,6 +450,74 @@ public sealed class DecalViewport(ITextureProvider textureProvider) : IDisposabl
         Axis(Vector3.UnitX, 0xFF4040E0, "X");
         Axis(Vector3.UnitY, 0xFF40C040, "Y");
         Axis(Vector3.UnitZ, 0xFFE07050, "Z");
+
+        DrawFlowAnchors(draw, start, size);
+    }
+
+    /// <summary>
+    /// The bound procedural layer's anchors projected into the canvas: steering anchors as
+    /// arrows along their combed direction, exclusion anchors as circles. The anchor being
+    /// placed is highlighted.
+    /// </summary>
+    private void DrawFlowAnchors(Im.DrawList draw, Vector2 start, float size)
+    {
+        if (_flowLayer == null)
+            return;
+
+        Vector2? Project(Vector3 world)
+        {
+            var v = Vector4.Transform(new Vector4(world, 1f), _lastViewProjection);
+            if (v.W <= 1e-6f)
+                return null;
+
+            var ndc = new Vector2(v.X, v.Y) / v.W;
+            return start + new Vector2((ndc.X + 1f) * 0.5f, (1f - ndc.Y) * 0.5f) * size;
+        }
+
+        for (var i = 0; i < _flowLayer.Anchors.Count; ++i)
+        {
+            var anchor = _flowLayer.Anchors[i];
+            var pos    = new Vector3(anchor.PosX, anchor.PosY, anchor.PosZ);
+            if (pos == Vector3.Zero)
+                continue; // not placed yet
+
+            var screen = Project(pos);
+            if (screen == null)
+                continue;
+
+            var active = i == _flowAnchor;
+            var color  = anchor.Exclude
+                ? active ? 0xFF5050FFu : 0xB04040C0u
+                : active ? 0xFF53D7FFu : 0xB0C0A040u;
+
+            if (anchor.Exclude)
+            {
+                // Geodesic radius approximated as a screen circle through a point offset
+                // along the surface — cosmetic only.
+                var rim       = Project(pos + new Vector3(anchor.NormalZ, anchor.NormalX, anchor.NormalY) * anchor.Radius);
+                var radiusPx  = rim != null ? MathF.Max(4f, (rim.Value - screen.Value).Length()) : 10f;
+                draw.Shape.Circle(screen.Value, radiusPx, color, thickness: 2f);
+                draw.Shape.CircleFilled(screen.Value, 3f, color);
+                continue;
+            }
+
+            var dir = new Vector3(anchor.DirX, anchor.DirY, anchor.DirZ);
+            var tip = Project(pos + (dir.LengthSquared() > 1e-8f ? Vector3.Normalize(dir) : Vector3.UnitY) * 0.06f);
+            draw.Shape.CircleFilled(screen.Value, active ? 5f : 4f, color);
+            if (tip == null)
+                continue;
+
+            draw.Shape.Line(screen.Value, tip.Value, color, active ? 3f : 2f);
+            // Arrowhead: two short strokes back from the tip.
+            var along = tip.Value - screen.Value;
+            if (along.LengthSquared() > 1f)
+            {
+                along = Vector2.Normalize(along);
+                var side = new Vector2(-along.Y, along.X);
+                draw.Shape.Line(tip.Value, tip.Value - along * 7f + side * 4f, color, 2f);
+                draw.Shape.Line(tip.Value, tip.Value - along * 7f - side * 4f, color, 2f);
+            }
+        }
     }
 
     private void DrawPlacementControls(DecalLayer layer)
@@ -469,6 +575,21 @@ public sealed class DecalViewport(ITextureProvider textureProvider) : IDisposabl
         if (Im.SmallButton("Done"u8))
             EndPlacement();
         Im.Tooltip.OnHover("Finish placing this decal and return the preview to view mode."u8);
+    }
+
+    private void DrawFlowPlacementControls()
+    {
+        var anchor = _flowLayer != null && _flowAnchor >= 0 && _flowAnchor < _flowLayer.Anchors.Count
+            ? _flowLayer.Anchors[_flowAnchor]
+            : null;
+        Im.Text(anchor is { Exclude: true }
+            ? "Click where the pattern should fade out."u8
+            : "Click the body, then drag the way the pattern should flow."u8);
+
+        Im.Line.Same();
+        if (Im.SmallButton("Done"u8))
+            EndPlacement();
+        Im.Tooltip.OnHover("Finish placing this anchor and return the preview to view mode."u8);
     }
 
     private void MarkEdited()
@@ -571,6 +692,61 @@ public sealed class DecalViewport(ITextureProvider textureProvider) : IDisposabl
                 MarkEdited();
             }
         }
+
+        HandleFlowInput(start, size, hovered);
+    }
+
+    /// <summary>
+    /// Flow-anchor interaction: pressing on the mesh drops the bound anchor there; dragging
+    /// combs its direction — the vector from the press point to the current surface point,
+    /// projected into the anchor's tangent plane. Commit rides the shared edit-dirty flow.
+    /// </summary>
+    private void HandleFlowInput(Vector2 start, float size, bool hovered)
+    {
+        if (_flowLayer == null || _flowAnchor < 0 || _flowAnchor >= _flowLayer.Anchors.Count)
+            return;
+
+        if (!Im.Mouse.IsDown(MouseButton.Left))
+        {
+            _flowDragOrigin = null;
+            return;
+        }
+
+        if (!hovered && _flowDragOrigin == null)
+            return;
+
+        var local = (Im.Mouse.Position - start) / size;
+        if (local is not { X: >= 0f and <= 1f, Y: >= 0f and <= 1f }
+         || !TryPick(local, out var position, out var normal, out _))
+            return;
+
+        var anchor = _flowLayer.Anchors[_flowAnchor];
+        if (_flowDragOrigin == null)
+        {
+            // Press: the anchor lands here; its direction keeps its previous value until a drag.
+            _flowDragOrigin = position;
+            anchor.PosX     = position.X;
+            anchor.PosY     = position.Y;
+            anchor.PosZ     = position.Z;
+            anchor.NormalX  = normal.X;
+            anchor.NormalY  = normal.Y;
+            anchor.NormalZ  = normal.Z;
+            _flowLayer.SurfaceAttributes = _visibleAttributes;
+            MarkEdited();
+            return;
+        }
+
+        var drag = position - _flowDragOrigin.Value;
+        var anchorNormal = new Vector3(anchor.NormalX, anchor.NormalY, anchor.NormalZ);
+        drag -= anchorNormal * Vector3.Dot(drag, anchorNormal);
+        if (drag.Length() < 0.005f)
+            return; // half a centimeter of dead zone before the comb takes over
+
+        drag = Vector3.Normalize(drag);
+        anchor.DirX = drag.X;
+        anchor.DirY = drag.Y;
+        anchor.DirZ = drag.Z;
+        MarkEdited();
     }
 
     private Vector3 CameraOffset()
