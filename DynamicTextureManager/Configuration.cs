@@ -20,7 +20,6 @@ public class Configuration: IPluginConfiguration, ISavable
     public int OverlayPriority { get; set; } = 999;
     public bool DeleteModWithDTexture { get; set; } = true;
     public int DefaultDecalMaxColors { get; set; } = 6;
-    public bool ShowUvSeams { get; set; } = true;
     public DoubleModifier DeleteDTextureModifier { get; set; } = new(ModifierHotkey.Control, ModifierHotkey.Shift);
 
     /// <summary> Folder decal images are stored in; empty uses the default inside the plugin config directory. </summary>

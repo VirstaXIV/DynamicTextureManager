@@ -7,7 +7,18 @@ plugin-managed persistent mod in Penumbra.
 
 ## Status
 
-Early work in progress. Nothing here is stable yet.
+In active development. Stable releases go out on the default channel; a rolling beta is
+available by enabling testing builds for the plugin in the installer. Expect rough edges —
+feedback and bug reports are welcome on the issue tracker.
+
+## AI usage disclosure
+
+This plugin is developed as a human-directed AI collaboration, at what the
+[Dalamud AI usage policy](https://dalamud.dev/plugin-publishing/ai-policy) calls the
+**Copilot** level: a large share of the implementation is written by an AI assistant
+(Claude), while a human plans the features, directs the work, reviews the changes, and
+tests the results in game before release. The commit history reflects this openly
+(AI-assisted commits carry a `Co-Authored-By` trailer).
 
 ## Installing
 
@@ -79,10 +90,10 @@ Under **Material Effects** on each layer:
   print, so it stays matte even on metal armor.
 - **Effect Scale** grows or shrinks the affected footprint relative to the decal.
 
-### The Decal Library
+### The Resource Library
 
-Open it with the **Images** button on the main window's title bar. The library is shared
-across all dTextures:
+Open it with the **Images** button on the main window's title bar. It holds decals and
+Animated Effect patterns, shared across all dTextures:
 
 - Grid of thumbnails with **search**, **sort** (name/date), and free-form **tags** — click
   tag chips to filter (all selected tags must match).
@@ -105,14 +116,26 @@ On colorset gear, the Decals tab's **Manage Colorset** section gives you slot-le
 - A list of all 16 slots showing what is free, claimed by decals, or used by the gear —
   with a **Usable** override for slots the scanner blocks over a few stray pixels.
 - **Extraction**: decals that gear authors baked into the ID map can be lifted out into
-  their own layers (and into the decal library as images). An extracted decal can be moved,
-  recolored, and disabled independently of the garment; removing it restores the original.
+  their own layers. An extracted decal can be moved, recolored, and disabled independently
+  of the garment; removing it restores the original. **Add to Library** on the layer stores
+  the extracted image for reuse on other gear.
 
-### Textures tab
+### Hair, tails & the Animated Effect
 
-A view-only inspector: every texture of the selected material as source vs. generated,
-with zoom/pan, a UV-seam overlay, and a "Colorize" mode that renders ID maps through the
-live colorset colors.
+**Add Hair / Tail...** lists the hair-family pieces on your character — hairstyle, tail
+(furred races), Viera ears. Hair materials get **Shine** controls, and an **Animated
+Effect** that converts the piece to the game's scrolling-effect shader: highlight areas
+become an animated glow with adjustable color, intensity, scroll speed and pattern tiling.
+Hair and highlight colors follow your character (including Glamourer advanced dyes) unless
+overridden. Effect patterns come from the Resource Library — built-in patterns, one read
+from the game's own files, or your imported images.
+
+### Texture previews
+
+Every texture of the selected material shows as a clickable thumbnail above one zoomable
+main view (wheel zooms at the cursor, drag pans, double-click resets). Hold the compare
+button to flash the unedited source; with the Animated Effect enabled, a Generated row
+shows the actual files a build ships.
 
 ### Settings
 
