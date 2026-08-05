@@ -13,12 +13,14 @@ feedback and bug reports are welcome on the issue tracker.
 
 ## AI usage disclosure
 
-This plugin is developed as a human-directed AI collaboration, at what the
+This plugin is developed as a human-directed AI collaboration, between what the
 [Dalamud AI usage policy](https://dalamud.dev/plugin-publishing/ai-policy) calls the
-**Copilot** level: a large share of the implementation is written by an AI assistant
-(Claude), while a human plans the features, directs the work, reviews the changes, and
-tests the results in game before release. The commit history reflects this openly
-(AI-assisted commits carry a `Co-Authored-By` trailer).
+**Pair** and **Copilot** levels: a large share of the implementation is written by an AI
+assistant (Claude), while a human plans the features, directs the work, reviews the
+changes, and tests the results in game with each release. The commit history reflects
+this openly (AI-assisted commits carry a `Co-Authored-By` trailer).
+
+The plugin icon is AI-generated.
 
 ## Installing
 
