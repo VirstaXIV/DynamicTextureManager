@@ -101,13 +101,13 @@ public sealed class SourceTab(
         var source = dTexture.Data.Source;
         if (source.IsEmpty)
         {
-            ImUtf8.Text("Nothing here yet. Load your worn gear, skin or hair below and add pieces — each becomes a canvas in this group."u8);
+            ImUtf8.Text("Nothing here yet. Load your worn gear, skin or hair below and add a source — it becomes a canvas in this group."u8);
             return;
         }
 
         var units = _units;
 
-        ImUtf8.TextWrapped($"Canvases ({units.Count}) — each piece is a canvas; edits always rebuild from the captured source files, so changes to the base mod carry over on the next build.");
+        ImUtf8.TextWrapped($"Canvases ({units.Count}) — every canvas rebuilds from its captured source, so changes to the base mod carry over on the next build.");
 
         string? remove = null;
         using (var table = ImUtf8.Table("##sourceUnits"u8, 4, ImGuiTableFlags.SizingStretchProp | ImGuiTableFlags.RowBg))
@@ -116,7 +116,7 @@ public sealed class SourceTab(
                 return;
 
             ImUtf8.TableSetupColumn("Canvas"u8);
-            ImUtf8.TableSetupColumn("Based On"u8);
+            ImUtf8.TableSetupColumn("Source"u8);
             ImUtf8.TableSetupColumn("Materials"u8);
             ImUtf8.TableSetupColumn(""u8, ImGuiTableColumnFlags.WidthFixed);
             ImGui.TableHeadersRow();
