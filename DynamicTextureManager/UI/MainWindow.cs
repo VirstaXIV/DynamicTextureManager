@@ -1,6 +1,5 @@
 ﻿using System;
 using System.Numerics;
-using Dalamud.Bindings.ImGui;
 using Dalamud.Interface;
 using Dalamud.Interface.Windowing;
 using DynamicTextureManager.ModGeneration;
@@ -57,9 +56,11 @@ public class MainWindow : Window, IDisposable
                 IconOffset = new(2, 1),
                 ShowTooltip = () =>
                 {
-                    ImGui.BeginTooltip();
-                    ImGui.Text("Show Config");
-                    ImGui.EndTooltip();
+                    if (!ImSharp.ImSharpConfiguration.IsInitialized)
+                        return;
+
+                    using var tooltip = Im.Tooltip.Begin();
+                    Im.Text("Show Config"u8);
                 }
             },
             new TitleBarButton()
@@ -69,9 +70,11 @@ public class MainWindow : Window, IDisposable
                 IconOffset = new(2, 1),
                 ShowTooltip = () =>
                 {
-                    ImGui.BeginTooltip();
-                    ImGui.Text("Decal Library");
-                    ImGui.EndTooltip();
+                    if (!ImSharp.ImSharpConfiguration.IsInitialized)
+                        return;
+
+                    using var tooltip = Im.Tooltip.Begin();
+                    Im.Text("Decal Library"u8);
                 }
             }
         };
@@ -89,8 +92,8 @@ public class MainWindow : Window, IDisposable
         if (!ImSharp.ImSharpConfiguration.IsInitialized)
             return;
 
-        _position.Size = ImGui.GetWindowSize();
-        _position.Position = ImGui.GetWindowPos();
+        _position.Size = Im.Window.Size;
+        _position.Position = Im.Window.Position;
 
         _layout.Draw();
     }
