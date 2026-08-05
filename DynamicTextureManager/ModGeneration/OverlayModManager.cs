@@ -1081,7 +1081,7 @@ public sealed class OverlayModManager : IService, IDisposable
             return (PenumbraApiEc.Success, " — could not determine your collection, enable it in Penumbra manually");
 
         var enableEc   = penumbra.TrySetMod(collection.Id, dirName, true);
-        var priorityEc = penumbra.TrySetModPriority(collection.Id, dirName, config.OverlayPriority);
+        var priorityEc = penumbra.TrySetModPriority(collection.Id, dirName, EffectivePriority(dTexture));
         if (enableEc is not PenumbraApiEc.Success and not PenumbraApiEc.NothingChanged)
         {
             DynamicTextureManager.Log.Warning($"Could not enable mod {dirName} in collection {collection.Name}: {enableEc}.");
@@ -1091,7 +1091,39 @@ public sealed class OverlayModManager : IService, IDisposable
         if (priorityEc is not PenumbraApiEc.Success and not PenumbraApiEc.NothingChanged)
             DynamicTextureManager.Log.Warning($"Could not set priority of mod {dirName}: {priorityEc}.");
 
-        return (PenumbraApiEc.Success, $" — enabled in collection \"{collection.Name}\" (priority {config.OverlayPriority})");
+        return (PenumbraApiEc.Success, $" — enabled in collection \"{collection.Name}\" (priority {EffectivePriority(dTexture)})");
+    }
+
+    /// <summary> The generated mod's Penumbra priority: the group's own value, else the global default. </summary>
+    public int EffectivePriority(DTexture dTexture)
+        => dTexture.Data.ModPriority ?? config.OverlayPriority;
+
+    /// <summary> Store a new priority for the group's mod and push it to Penumbra when built. </summary>
+    public void SetModPriority(DTexture dTexture, int? priority)
+    {
+        dTexture.Data.ModPriority = priority;
+        saveService.QueueSave(dTexture);
+
+        var dir = dTexture.Data.OutputModDirectory;
+        if (!penumbra.Available || dir.Length == 0)
+            return;
+
+        try
+        {
+            var (valid, _, collection) = penumbra.GetCollectionForObject(0);
+            if (!valid)
+                return;
+
+            var ec = penumbra.TrySetModPriority(collection.Id, dir, EffectivePriority(dTexture));
+            if (ec is not PenumbraApiEc.Success and not PenumbraApiEc.NothingChanged)
+                DynamicTextureManager.Log.Warning($"Could not set priority of mod {dir}: {ec}.");
+            else
+                penumbra.RedrawObject(0);
+        }
+        catch (Exception ex)
+        {
+            DynamicTextureManager.Log.Warning($"Could not set priority of mod {dir}: {ex.Message}");
+        }
     }
 
     private static string ModName(DTexture dTexture)
