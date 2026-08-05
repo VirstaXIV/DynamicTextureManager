@@ -96,6 +96,8 @@ public sealed class DecalsTab(
 
     private readonly DecalViewport _viewport = new(textureProvider);
 
+    private readonly ProceduralSurfaceSection _procSection = new();
+
     private string                             _statsTexture = string.Empty;
     private readonly HashSet<int>              _usedRowPairs = [];
     private readonly Dictionary<int, int>      _rowUsageCounts = [];
@@ -311,6 +313,7 @@ public sealed class DecalsTab(
 
             Im.Separator();
             DrawDecalLibrary(dTexture);
+            DrawProceduralAdd(dTexture);
             Im.Separator();
             DrawLayers(dTexture);
         }
@@ -554,6 +557,32 @@ public sealed class DecalsTab(
         Im.Tooltip.OnHover("Import an image into the decal library and stamp it onto the selected material right away.\nTo import without stamping, use the Decal Library window (title-bar button)."u8);
     }
 
+    /// <summary>
+    /// Procedural surface layers cover the whole skin canvas (fur, scales, patterns) instead
+    /// of stamping one image — offered on skin materials only, whose bodies/faces are uniquely
+    /// unwrapped (card hair shares texels between strands and stays excluded).
+    /// </summary>
+    private void DrawProceduralAdd(DTexture dTexture)
+    {
+        if (SelectedKind() is not MaterialKind.Skin || DiffuseOption() is not { } target)
+            return;
+
+        if (Im.Button("Add Fur / Scales / Pattern"u8))
+        {
+            if (!dTexture.Data.Textures.TryGetValue(target.GamePath, out var layers))
+            {
+                layers                                  = [];
+                dTexture.Data.Textures[target.GamePath] = layers;
+            }
+
+            CaptureTextureSource(dTexture, target.GamePath);
+            layers.Add(new ProceduralSurfaceLayer());
+            Save(dTexture);
+        }
+
+        Im.Tooltip.OnHover("Generates a full-body surface texture — fur, scales or a skin pattern — following the shape of the body."u8);
+    }
+
     private void AddLayer(DTexture dTexture, Guid decalId, DecalPreset? preset)
     {
         // The colorset id map is the preferred target: the decal is quantized and each of
@@ -733,6 +762,12 @@ public sealed class DecalsTab(
         foreach (var (idx, layer) in layers.Index())
         {
             using var id = Im.Id.Push(idx);
+            if (layer is ProceduralSurfaceLayer proc)
+            {
+                DrawProceduralEntry(dTexture, proc, idx, layers.Count, ref remove, ref swap);
+                continue;
+            }
+
             if (layer is not DecalLayer decal)
                 continue;
 
@@ -830,6 +865,36 @@ public sealed class DecalsTab(
             (layers[swap.Item1], layers[swap.Item2]) = (layers[swap.Item2], layers[swap.Item1]);
             Save(dTexture);
         }
+    }
+
+    /// <summary> One procedural surface layer in the layer list: header row plus its settings. </summary>
+    private void DrawProceduralEntry(DTexture dTexture, ProceduralSurfaceLayer proc, int idx, int count,
+        ref int remove, ref (int, int) swap)
+    {
+        var enabled = proc.Enabled;
+        if (Im.Checkbox("##enabled"u8, ref enabled))
+        {
+            proc.Enabled = enabled;
+            Save(dTexture);
+        }
+
+        Im.Line.Same();
+        if (!Im.Tree.Header($"{idx + 1}: {ProceduralSurfaceSection.KindLabel(proc.Kind)}###layer{idx}"))
+            return;
+
+        using var indent = Im.Indent();
+
+        if (_procSection.Draw(proc))
+            Save(dTexture);
+
+        if (Im.SmallButton("Remove"u8))
+            remove = idx;
+        Im.Line.Same();
+        if (Im.SmallButton("Up"u8) && idx > 0)
+            swap = (idx, idx - 1);
+        Im.Line.Same();
+        if (Im.SmallButton("Down"u8) && idx < count - 1)
+            swap = (idx, idx + 1);
     }
 
     /// <summary>
