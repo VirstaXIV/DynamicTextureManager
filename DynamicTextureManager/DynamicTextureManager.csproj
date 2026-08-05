@@ -4,7 +4,7 @@
     <Author>Virsta</Author>
     <Name>Dynamic Texture Manager</Name>
     <MinimumDalamudVersion>14.0.0</MinimumDalamudVersion>
-    <Version>0.7.0</Version>
+    <Version>0.8.10</Version>
     <ApplicableVersion>any</ApplicableVersion>
     <Punchline>Manager for dynamically adjusting textures</Punchline>
     <Description>Helps set up custom textures to add custom decals / images on models by generating override textures.</Description>
@@ -18,7 +18,6 @@
   <ItemGroup>
     <ProjectReference Include="..\OtterGui\OtterGui.csproj" />
     <ProjectReference Include="..\Penumbra.Api\Penumbra.Api.csproj" />
-    <ProjectReference Include="..\Penumbra.String\Penumbra.String.csproj" />
     <ProjectReference Include="..\Penumbra.GameData\Penumbra.GameData.csproj" />
   </ItemGroup>
   <ItemGroup>

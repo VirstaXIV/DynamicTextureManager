@@ -20,6 +20,9 @@ public sealed unsafe class CharacterModelState(IObjectTable objects) : IService
     /// </summary>
     public uint CurrentAttributeMask(string mdlGamePath)
     {
+        // Human draw-object slot layout: 0-4 equipment (met/top/glv/dwn/sho), 5-9 accessories,
+        // 10 hair, 11 face, 12 tail/ears. The SlotCount guard below keeps an unexpected layout
+        // from ever reading out of bounds — it falls back to everything-visible instead.
         var slot = Path.GetFileNameWithoutExtension(mdlGamePath) switch
         {
             var n when n.EndsWith("_met", StringComparison.OrdinalIgnoreCase) => 0,
@@ -27,6 +30,7 @@ public sealed unsafe class CharacterModelState(IObjectTable objects) : IService
             var n when n.EndsWith("_glv", StringComparison.OrdinalIgnoreCase) => 2,
             var n when n.EndsWith("_dwn", StringComparison.OrdinalIgnoreCase) => 3,
             var n when n.EndsWith("_sho", StringComparison.OrdinalIgnoreCase) => 4,
+            var n when n.EndsWith("_hir", StringComparison.OrdinalIgnoreCase) => 10,
             _                                                                 => -1,
         };
         if (slot < 0)

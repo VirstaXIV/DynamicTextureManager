@@ -1,4 +1,5 @@
 using System;
+using System.Numerics;
 using Dalamud.Bindings.ImGui;
 using Dalamud.Interface;
 using DynamicTextureManager.Interop;
@@ -16,22 +17,20 @@ public class DTMPanel : IDisposable
     private readonly EditPreviewer _previewer;
     private readonly SourceTab _sourceTab;
     private readonly DecalsTab _decalsTab;
-    private readonly TextureViewerTab _textureViewerTab;
     private readonly HeaderDrawer.Button[] _leftButtons;
     private readonly HeaderDrawer.Button[] _rightButtons;
 
     public DTMPanel(DTMFileSystemSelector selector, OverlayModManager overlayMods, PenumbraService penumbra, EditPreviewer previewer,
-        SourceTab sourceTab, DecalsTab decalsTab, TextureViewerTab textureViewerTab)
+        SourceTab sourceTab, DecalsTab decalsTab)
     {
-        _selector         = selector;
-        _overlayMods      = overlayMods;
-        _penumbra         = penumbra;
-        _previewer        = previewer;
-        _sourceTab        = sourceTab;
-        _decalsTab        = decalsTab;
-        _textureViewerTab = textureViewerTab;
-        _leftButtons      = [new ApplyButton(this)];
-        _rightButtons     = [new DeleteModButton(this)];
+        _selector     = selector;
+        _overlayMods  = overlayMods;
+        _penumbra     = penumbra;
+        _previewer    = previewer;
+        _sourceTab    = sourceTab;
+        _decalsTab    = decalsTab;
+        _leftButtons  = [new ApplyButton(this)];
+        _rightButtons = [new DeleteModButton(this)];
     }
 
     private sealed class ApplyButton(DTMPanel panel) : HeaderDrawer.Button
@@ -97,6 +96,12 @@ public class DTMPanel : IDisposable
             _overlayMods.DeleteMod(_selector.Selected);
     }
 
+    /// <summary>
+    /// One consolidated view instead of Source/Decals/Textures tabs: the left column holds a
+    /// collapsible Source section (pick + set the active material) above the editing controls,
+    /// the right column shows the active material's composited texture directly above the 3D
+    /// preview — every edit is visible on both at once.
+    /// </summary>
     private void DrawPanel()
     {
         using var child = ImUtf8.Child("##Panel"u8, ImGui.GetContentRegionAvail(), true);
@@ -108,45 +113,45 @@ public class DTMPanel : IDisposable
         if (_overlayMods.LastResult.Length > 0)
             ImUtf8.Text(_overlayMods.LastResult);
         DrawGeneratedModLine(selected);
+        ImGui.Separator();
 
-        var decalsDrawn = false;
-        using (var tabBar = ImUtf8.TabBar("##tabs"u8))
+        var avail = ImGui.GetContentRegionAvail();
+        var leftWidth = MathF.Min(MathF.Max(avail.X * 0.48f, 380f * ImUtf8.GlobalScale),
+            MathF.Max(avail.X - 340f * ImUtf8.GlobalScale, 260f * ImUtf8.GlobalScale));
+        using (var left = ImUtf8.Child("##controls"u8, new Vector2(leftWidth, avail.Y), false))
         {
-            if (tabBar)
+            if (left)
             {
-                using (var tab = ImUtf8.TabItem("Source"u8))
+                if (ImUtf8.CollapsingHeader("Source"u8,
+                        selected.Data.Source.IsEmpty ? ImGuiTreeNodeFlags.DefaultOpen : ImGuiTreeNodeFlags.None))
                 {
-                    if (tab)
-                        _sourceTab.Draw(selected);
+                    _sourceTab.Draw(selected);
+                    ImGui.Separator();
                 }
 
-                using (var tab = ImUtf8.TabItem("Decals"u8))
-                {
-                    if (tab)
-                    {
-                        decalsDrawn = true;
-                        _decalsTab.Draw(selected);
-                    }
-                }
-
-                using (var tab = ImUtf8.TabItem("Textures"u8))
-                {
-                    if (tab)
-                        _textureViewerTab.Draw(selected);
-                }
+                _decalsTab.DrawControls(selected);
             }
         }
 
-        // The live preview must not linger while the user is not editing — a stale
-        // temporary mod overrides everything and makes Penumbra toggles look broken.
-        if (!decalsDrawn)
-            _previewer.Clear();
+        ImGui.SameLine();
+        using (var right = ImUtf8.Child("##visuals"u8, ImGui.GetContentRegionAvail(), false))
+        {
+            if (right)
+                _decalsTab.DrawVisuals(selected);
+        }
     }
 
     private void DrawGeneratedModLine(DTextures.DTexture selected)
     {
         if (selected.Data.OutputModDirectory.Length == 0)
+        {
+            // Until the first explicit Build, slider changes only affect the preview — the
+            // auto-apply path deliberately never creates the mod on its own.
+            if (selected.Data.HasEdits)
+                ImUtf8.TextWrapped(
+                    "Not built yet — edits show only in the preview. Press the hammer button above to build the Penumbra mod and see them in-game; afterwards edits re-apply automatically."u8);
             return;
+        }
 
         ImUtf8.Text($"Generated Mod: {selected.Data.OutputModDirectory}");
         if (!_penumbra.Available)

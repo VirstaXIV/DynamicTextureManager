@@ -25,6 +25,7 @@ public enum MaterialKind
     ModernColorset,
     LegacyDiffuse,
     Skin,
+    Hair,
     Unknown,
 }
 
@@ -35,8 +36,6 @@ public enum MaterialKind
 public interface IShaderHandler
 {
     bool Matches(string shpkName);
-
-    bool SupportsColorSet(MtrlFile material);
 
     /// <summary>
     /// Whether ID-map colorset decals (multi-color row remapping) work on this material.
