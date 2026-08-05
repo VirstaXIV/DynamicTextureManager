@@ -2,10 +2,11 @@ using System.Collections.Generic;
 using System.IO;
 using Dalamud.Plugin;
 using DynamicTextureManager.DTextures;
+using Luna;
 
 namespace DynamicTextureManager.Services;
 
-public class FilenameService
+public class FilenameService : BaseFilePathProvider
 {
     public readonly string ConfigDirectory;
     public readonly string ConfigFile;
@@ -16,6 +17,7 @@ public class FilenameService
     public readonly string ExtractedDirectory;
 
     public FilenameService(IDalamudPluginInterface pi)
+        : base(pi)
     {
         ConfigDirectory        = pi.ConfigDirectory.FullName;
         ConfigFile             = pi.ConfigFile.FullName;
@@ -25,6 +27,9 @@ public class FilenameService
         DecalIndexFile           = Path.Combine(ConfigDirectory, "decals.json");
         ExtractedDirectory       = Path.Combine(ConfigDirectory, "extracted");
     }
+
+    public override List<IBackupFile> GetBackupFiles()
+        => [];
 
     /// <summary> The cleaned source copy of a texture whose baked decals were extracted, one per dTexture and game path. </summary>
     public string ExtractedSourceFile(System.Guid dTexture, string gamePath)

@@ -7,7 +7,7 @@ using Dalamud.Interface.ImGuiNotification;
 using DynamicTextureManager.DTextures.History;
 using DynamicTextureManager.Events;
 using DynamicTextureManager.Services;
-using OtterGui.Classes;
+using Luna;
 using OtterGui.Filesystem;
 
 namespace DynamicTextureManager.DTextures;
@@ -89,8 +89,9 @@ public class DTextureFileSystem : FileSystem<DTexture>, IDisposable, ISavable
             => f.GetSubFolders().Cast<IPath>().Concat(f.GetLeaves().OrderByDescending(l => l.Value.LastEdit));
     }
     
-    private void OnDTextureChange(DTextureChanged.Type type, DTexture dTexture, ITransaction? data)
+    private void OnDTextureChange(in DTextureChanged.Arguments args)
     {
+        var (type, dTexture, data) = args;
         switch (type)
         {
             case DTextureChanged.Type.Created:
@@ -120,7 +121,7 @@ public class DTextureFileSystem : FileSystem<DTexture>, IDisposable, ISavable
         => dTexture.Identifier.ToString();
 
     private static string DTextureToName(DTexture dTexture)
-        => dTexture.Name.Text.FixName();
+        => OtterGui.Filesystem.Extensions.FixName(dTexture.Name.Text);
     
     private static bool DesignHasDefaultPath(DTexture dTexture, string fullPath)
     {
@@ -134,11 +135,12 @@ public class DTextureFileSystem : FileSystem<DTexture>, IDisposable, ISavable
             ? (string.Empty, false)
             : (DTextureToIdentifier(dTexture), true);
     
-    public string ToFilename(FilenameService fileNames)
+    public string ToFilePath(FilenameService fileNames)
         => fileNames.DTextureFileSystem;
 
-    public void Save(StreamWriter writer)
+    public void Save(Stream stream)
     {
+        using var writer = new StreamWriter(stream, System.Text.Encoding.UTF8, leaveOpen: true);
         SaveToFile(writer, SaveDTexture, true);
     }
 }

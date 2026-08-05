@@ -16,7 +16,7 @@ using DynamicTextureManager.ModGeneration.Shaders;
 using DynamicTextureManager.Services;
 using OtterGui.Extensions;
 using OtterGui.Raii;
-using OtterGui.Services;
+using IService = Luna.IService;
 using OtterGui.Text;
 using Penumbra.GameData.Files;
 using Penumbra.GameData.Files.MaterialStructs;

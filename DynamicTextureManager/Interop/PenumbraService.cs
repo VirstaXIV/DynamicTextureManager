@@ -3,7 +3,7 @@ using System.Collections.Generic;
 using System.Threading.Tasks;
 using Dalamud.Plugin;
 using OtterGui.Log;
-using OtterGui.Services;
+using IService = Luna.IService;
 using Penumbra.Api.Enums;
 using Penumbra.Api.Helpers;
 using Penumbra.Api.IpcSubscribers;

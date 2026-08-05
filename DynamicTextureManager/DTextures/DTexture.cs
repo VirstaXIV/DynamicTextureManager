@@ -75,12 +75,14 @@ public sealed class DTexture : DTextureBase, ISavable
     #endregion
     
     #region ISavable
-    
-    public string ToFilename(FilenameService fileNames)
+
+    public string ToFilePath(FilenameService fileNames)
         => fileNames.DTextureFile(this);
 
-    public void Save(StreamWriter writer)
+    public void Save(Stream stream)
     {
+        // UTF-8 with BOM keeps the on-disk format identical to earlier versions.
+        using var writer = new StreamWriter(stream, System.Text.Encoding.UTF8, leaveOpen: true);
         using var j = new JsonTextWriter(writer)
         {
             Formatting = Formatting.Indented,

@@ -2,7 +2,7 @@ using System;
 using System.Collections.Generic;
 using System.Diagnostics.CodeAnalysis;
 using System.Linq;
-using OtterGui.Services;
+using IService = Luna.IService;
 
 namespace DynamicTextureManager.DTextures;
 

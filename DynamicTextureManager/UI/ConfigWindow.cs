@@ -8,7 +8,7 @@ using DynamicTextureManager.ModGeneration;
 using DynamicTextureManager.Services;
 using OtterGui.Extensions;
 using OtterGui.Raii;
-using OtterGui.Services;
+using IService = Luna.IService;
 using OtterGui.Text;
 
 namespace DynamicTextureManager.UI;
