@@ -83,6 +83,16 @@ public sealed class DecalLayer : TextureLayer
     /// <summary> Id of the decal image in the decal library. </summary>
     public Guid DecalId;
 
+    /// <summary>
+    /// File name of a temp image in the extracted folder this layer renders from instead of
+    /// a library entry (extracted decals belong to their dTexture; the library is opt-in).
+    /// The file is deleted with the layer.
+    /// </summary>
+    public string LocalImageFile = string.Empty;
+
+    /// <summary> The library entry "Add to Library" created from this layer's temp image, if any. </summary>
+    public Guid LibraryCopyId;
+
     /// <summary> Center position in normalized UV space (0..1). </summary>
     public float PosU = 0.5f;
 
@@ -257,6 +267,10 @@ public sealed class DecalLayer : TextureLayer
     protected override void SerializeInto(JObject json)
     {
         json["DecalId"]        = DecalId;
+        if (LocalImageFile.Length > 0)
+            json["LocalImageFile"] = LocalImageFile;
+        if (LibraryCopyId != Guid.Empty)
+            json["LibraryCopyId"] = LibraryCopyId;
         json["PosU"]           = PosU;
         json["PosV"]           = PosV;
         json["ScaleX"]         = ScaleX;
@@ -307,6 +321,8 @@ public sealed class DecalLayer : TextureLayer
         => new()
         {
             DecalId        = json["DecalId"]?.ToObject<Guid>() ?? Guid.Empty,
+            LocalImageFile = json["LocalImageFile"]?.ToObject<string>() ?? string.Empty,
+            LibraryCopyId  = json["LibraryCopyId"]?.ToObject<Guid>() ?? Guid.Empty,
             PosU           = json["PosU"]?.ToObject<float>() ?? 0.5f,
             PosV           = json["PosV"]?.ToObject<float>() ?? 0.5f,
             ScaleX         = json["ScaleX"]?.ToObject<float>() ?? 0.25f,

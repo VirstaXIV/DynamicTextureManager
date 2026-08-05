@@ -144,6 +144,16 @@ public sealed class DecalLibrary : IService
     public string FilePath(Guid id)
         => Path.Combine(StorageDirectory, $"{id}.png");
 
+    /// <summary>
+    /// The image a decal layer renders from: its own temp file in the extracted folder
+    /// (extracted decals belong to their dTexture until explicitly added to the library),
+    /// or its library entry.
+    /// </summary>
+    public string LayerImagePath(DecalLayer layer)
+        => layer.LocalImageFile.Length > 0
+            ? Path.Combine(_filenames.ExtractedDirectory, layer.LocalImageFile)
+            : FilePath(layer.DecalId);
+
     /// <summary> Effect patterns share the decal storage folder — ids keep the files apart. </summary>
     public string EffectFilePath(Guid id)
         => Path.Combine(StorageDirectory, $"{id}.png");

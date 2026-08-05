@@ -17,7 +17,7 @@ namespace DynamicTextureManager.ModGeneration;
 /// </summary>
 public static class ColorsetDecalExtractor
 {
-    /// <param name="Stamp"> The lifted footprint: row-coded colors, alpha = blend weight of the selected half (128-255). </param>
+    /// <param name="Stamp"> The lifted footprint: row-coded colors, alpha = blend weight of the selected half (128-255). Alpha 1 marks erase-only halo texels — cleared by the erase, never restamped. </param>
     /// <param name="X"> Footprint bounding box in id-map texels. </param>
     /// <param name="FillPair"> Dominant pair of the surrounding texels — what the erase fills R with. </param>
     /// <param name="FillBlend"> Median G of those surrounding texels — what the erase fills G with. </param>
@@ -63,11 +63,55 @@ public static class ColorsetDecalExtractor
         if (largestComponentOnly)
             mask = LargestComponent(mask, width, height);
 
-        // Bounding box of the footprint.
+        var (fillPair, fillBlend) = FillValues(idMap, mask, width, height);
+
+        // Texels the erase must ALSO clear even though they are not decal content: the
+        // blend/compression halo around the footprint. Without this the cleaned map keeps a
+        // speckle residue — partial-blend texels dominance-classified onto the garment's
+        // half, and stray in-between pair values from AA/BC compression that land on filler
+        // rows (rendering black). Encoded in the stamp as alpha 1 (content is always ≥128),
+        // so the erase clears them but the restamp never draws them.
+        var selectedPairs = selected.Select(r => r / 2).ToHashSet();
+        var eraseOnly     = new bool[width * height];
+        for (var y = 0; y < height; ++y)
+            for (var x = 0; x < width; ++x)
+            {
+                var i = y * width + x;
+                if (mask[i])
+                    continue;
+
+                var near1 = false;
+                var near2 = false;
+                for (var dy = -2; dy <= 2 && !near1; ++dy)
+                    for (var dx = -2; dx <= 2 && !near1; ++dx)
+                    {
+                        var nx = x + dx;
+                        var ny = y + dy;
+                        if (nx < 0 || nx >= width || ny < 0 || ny >= height || !mask[ny * width + nx])
+                            continue;
+
+                        near2 = true;
+                        if (dx is >= -1 and <= 1 && dy is >= -1 and <= 1)
+                            near1 = true;
+                    }
+
+                if (!near2)
+                    continue;
+
+                var pair = texRows[i] / 2;
+                // Within 2 texels: anything on the decal's own pairs (partial blends that
+                // dominance-classified onto the other half, or pruned dither of the same
+                // rows). Directly adjacent: any non-garment pair — in-between AA/compression
+                // values hugging the footprint.
+                if (selectedPairs.Contains(pair) || (near1 && pair != fillPair))
+                    eraseOnly[i] = true;
+            }
+
+        // Bounding box of the footprint including the erase halo.
         int minX = width, minY = height, maxX = -1, maxY = -1;
         for (var y = 0; y < height; ++y)
             for (var x = 0; x < width; ++x)
-                if (mask[y * width + x])
+                if (mask[y * width + x] || eraseOnly[y * width + x])
                 {
                     minX = Math.Min(minX, x);
                     minY = Math.Min(minY, y);
@@ -125,13 +169,12 @@ public static class ColorsetDecalExtractor
                     }
                     else
                     {
-                        row[x] = new Rgba32(0, 0, 0, 0);
+                        row[x] = new Rgba32(0, 0, 0, eraseOnly[i] ? (byte)1 : (byte)0);
                     }
                 }
             }
         });
 
-        var (fillPair, fillBlend) = FillValues(idMap, mask, width, height);
         return new Extraction(stamp, minX, minY, w, h, width, height, fillPair, fillBlend, presentRows, rowColors);
     }
 
