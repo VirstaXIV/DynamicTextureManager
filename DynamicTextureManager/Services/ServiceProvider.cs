@@ -26,7 +26,8 @@ public static class ServiceProvider
     }
 
     private static ServiceManager AddMeta(this ServiceManager services)
-        => services.AddSingleton<MessageService>()
+        => services.AddSingleton<ImSharpDalamudContext>()
+                    .AddSingleton<MessageService>()
                     .AddSingleton<FilenameService>()
                     .AddSingleton<FrameworkManager>()
                     .AddSingleton<SaveService>()

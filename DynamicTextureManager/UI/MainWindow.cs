@@ -84,6 +84,11 @@ public class MainWindow : Window, IDisposable
 
     public override void Draw()
     {
+        // The shared ImSharp context attaches on a framework tick after service
+        // construction — Im.* calls before that dereference an empty context.
+        if (!ImSharp.ImSharpConfiguration.IsInitialized)
+            return;
+
         _position.Size = ImGui.GetWindowSize();
         _position.Position = ImGui.GetWindowPos();
 
