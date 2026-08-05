@@ -22,21 +22,4 @@ public class DTextureBase
     {
         _dTextureData = other;
     }
-    
-    #region Application Data
-    
-    private bool _writeProtected;
-    public bool WriteProtected()
-        => _writeProtected;
-    
-    public bool SetWriteProtected(bool value)
-    {
-        if (value == _writeProtected)
-            return false;
-
-        _writeProtected = value;
-        return true;
-    }
-
-    #endregion
 }

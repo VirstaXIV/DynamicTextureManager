@@ -41,6 +41,11 @@ public sealed class CompositePreviewCache : IService, IDisposable
         internal long LastUsedMs;
         internal int  WrapVersion = -1;
 
+        // What Pristine was decoded from, so an unchanged source skips the BC decode on
+        // rebuilds — during slider editing only the composite actually changes.
+        internal string? PristineDiskPath;
+        internal long    PristineStampTicks = -1;
+
         public IDalamudTextureWrap? PristineWrap   { get; internal set; }
         public IDalamudTextureWrap? CompositedWrap { get; internal set; }
 
@@ -63,8 +68,19 @@ public sealed class CompositePreviewCache : IService, IDisposable
     private readonly ITextureProvider      _textureProvider;
     private readonly DTextureChanged       _dTextureChanged;
 
-    /// <summary> Exclude compares by reference — a layer's identity, not its (mutable) values. </summary>
-    private readonly record struct Key(Guid Id, string Path, DTextures.Data.DecalLayer? Exclude);
+    /// <summary>
+    /// Exclude compares by reference — a layer's identity, not its (mutable) values. Path
+    /// compares case-insensitively so callers never need to allocate a lowered copy.
+    /// </summary>
+    private readonly record struct Key(Guid Id, string Path, DTextures.Data.DecalLayer? Exclude)
+    {
+        public bool Equals(Key other)
+            => Id == other.Id && ReferenceEquals(Exclude, other.Exclude)
+             && string.Equals(Path, other.Path, StringComparison.OrdinalIgnoreCase);
+
+        public override int GetHashCode()
+            => HashCode.Combine(Id, StringComparer.OrdinalIgnoreCase.GetHashCode(Path), Exclude);
+    }
 
     private readonly Dictionary<Key, Entry> _entries = [];
 
@@ -108,7 +124,7 @@ public sealed class CompositePreviewCache : IService, IDisposable
     public Entry Get(DTexture dTexture, string gamePath, DTextures.Data.DecalLayer? excludeLayer = null)
     {
         var now = Environment.TickCount64;
-        var key = new Key(dTexture.Identifier, gamePath.ToLowerInvariant(), excludeLayer);
+        var key = new Key(dTexture.Identifier, gamePath, excludeLayer);
         if (!_entries.TryGetValue(key, out var entry))
         {
             EvictIfFull();
@@ -152,10 +168,9 @@ public sealed class CompositePreviewCache : IService, IDisposable
     /// <summary> Mark one cached texture of a dTexture stale (all variants, including exclude-layer bases). </summary>
     public void Invalidate(Guid dTextureId, string gamePath)
     {
-        var now  = Environment.TickCount64;
-        var path = gamePath.ToLowerInvariant();
+        var now = Environment.TickCount64;
         foreach (var (key, entry) in _entries)
-            if (key.Id == dTextureId && key.Path == path)
+            if (key.Id == dTextureId && string.Equals(key.Path, gamePath, StringComparison.OrdinalIgnoreCase))
                 entry.StaleSinceMs = now;
     }
 
@@ -251,14 +266,25 @@ public sealed class CompositePreviewCache : IService, IDisposable
         {
             try
             {
-                var decoded = _textureIO.Load(gamePath, diskPath, null);
-                if (decoded == null)
+                // An unchanged source file keeps the previous decode — only the composite is redone.
+                var stamp = diskPath is { Length: > 0 } && System.IO.File.Exists(diskPath)
+                    ? System.IO.File.GetLastWriteTimeUtc(diskPath).Ticks
+                    : 0L;
+                var decoded = entry.Pristine;
+                if (decoded == null || entry.PristineDiskPath != diskPath || entry.PristineStampTicks != stamp)
                 {
-                    entry.Building = false;
-                    return;
+                    decoded = _textureIO.Load(gamePath, diskPath, null);
+                    if (decoded == null)
+                    {
+                        entry.Building = false;
+                        return;
+                    }
+
+                    entry.Pristine           = decoded;
+                    entry.PristineDiskPath   = diskPath;
+                    entry.PristineStampTicks = stamp;
                 }
 
-                entry.Pristine   = decoded;
                 entry.Composited = _compositor.CompositeFull(decoded, layers, effectLayers, effectSlot, mesh);
                 ++entry.Version;
             }

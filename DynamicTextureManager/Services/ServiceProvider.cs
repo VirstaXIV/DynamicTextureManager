@@ -99,6 +99,5 @@ public static class ServiceProvider
                     .AddSingleton<DTMFileSystemSelector>()
                     .AddSingleton<UI.Panels.SourceTab>()
                     .AddSingleton<UI.Panels.DecalsTab>()
-                    .AddSingleton<UI.Panels.TextureViewerTab>()
                     .AddSingleton<DTMPanel>();
 }

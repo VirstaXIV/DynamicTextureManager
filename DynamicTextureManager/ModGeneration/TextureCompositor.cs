@@ -20,8 +20,11 @@ public sealed class TextureCompositor(DecalLibrary decals) : IService
     /// Apply all enabled layers onto the base texture. Returns the composited RGBA buffer.
     /// Surface-projected layers need the material's mesh geometry; without it they are skipped.
     /// </summary>
-    public byte[] Composite(DecodedTexture baseTexture, IEnumerable<TextureLayer> layers, MaterialMesh? mesh = null)
+    private byte[] Composite(DecodedTexture baseTexture, IEnumerable<TextureLayer> layers, MaterialMesh? mesh)
     {
+        if (!layers.Any(l => l.Enabled))
+            return (byte[])baseTexture.Rgba.Clone();
+
         using var image = Image.LoadPixelData<Rgba32>(baseTexture.Rgba, baseTexture.Width, baseTexture.Height);
 
         foreach (var layer in layers)
@@ -68,9 +71,12 @@ public sealed class TextureCompositor(DecalLibrary decals) : IService
     /// map), applying each layer's material effect instead of its colors. Placement is fully
     /// UV-normalized, so resolution differences between the siblings do not matter.
     /// </summary>
-    public byte[] CompositeSiblingEffects(DecodedTexture baseTexture, IEnumerable<TextureLayer> layers, TextureSlot slot,
-        MaterialMesh? mesh = null)
+    private byte[] CompositeSiblingEffects(DecodedTexture baseTexture, IEnumerable<TextureLayer> layers, TextureSlot slot,
+        MaterialMesh? mesh)
     {
+        if (!layers.OfType<DecalLayer>().Any(l => l.Enabled && l.HasMaterialEffects))
+            return baseTexture.Rgba;
+
         using var image = Image.LoadPixelData<Rgba32>(baseTexture.Rgba, baseTexture.Width, baseTexture.Height);
 
         foreach (var layer in layers.OfType<DecalLayer>())
@@ -122,6 +128,39 @@ public sealed class TextureCompositor(DecalLibrary decals) : IService
     private static byte LerpByte(byte from, byte to, float t)
         => (byte)Math.Clamp((int)Math.Round(from + (to - from) * t), 0, 255);
 
+    private sealed record CachedDecal(long Stamp, Rgba32[] Pixels, int Width, int Height);
+
+    private readonly Dictionary<string, CachedDecal> _decalCache = new(StringComparer.OrdinalIgnoreCase);
+
+    /// <summary>
+    /// Decal image decode, cached by file stamp — every composite stamps the same few PNGs,
+    /// and effect replays load each one a second time per pass. The cached pixels are copied
+    /// into a fresh image, so callers can keep mutating (flip/resize/rotate) their copy.
+    /// </summary>
+    private Image<Rgba32> LoadDecal(string path)
+    {
+        var stamp = File.GetLastWriteTimeUtc(path).Ticks;
+        CachedDecal? cached;
+        lock (_decalCache)
+            _decalCache.TryGetValue(path, out cached);
+
+        if (cached == null || cached.Stamp != stamp)
+        {
+            using var image = Image.Load<Rgba32>(path);
+            var pixels = new Rgba32[image.Width * image.Height];
+            image.CopyPixelDataTo(pixels);
+            cached = new CachedDecal(stamp, pixels, image.Width, image.Height);
+            lock (_decalCache)
+            {
+                if (_decalCache.Count >= 8 && !_decalCache.ContainsKey(path))
+                    _decalCache.Clear();
+                _decalCache[path] = cached;
+            }
+        }
+
+        return Image.LoadPixelData<Rgba32>(cached.Pixels, cached.Width, cached.Height);
+    }
+
     private void ApplyDecal(Image<Rgba32> target, DecalLayer layer, MaterialMesh? mesh, TextureSlot? effectSlot = null)
     {
         var path = decals.LayerImagePath(layer);
@@ -139,7 +178,7 @@ public sealed class TextureCompositor(DecalLibrary decals) : IService
                 return;
             }
 
-            using var source = Image.Load<Rgba32>(path);
+            using var source = LoadDecal(path);
             ApplyFlips(source, layer);
             SurfaceDecalBaker.Bake(target, source, mesh, layer, effectSlot);
             return;
@@ -150,7 +189,7 @@ public sealed class TextureCompositor(DecalLibrary decals) : IService
         var width  = Math.Max(1, (int)Math.Round(layer.ScaleX * scale * target.Width));
         var height = Math.Max(1, (int)Math.Round(layer.ScaleY * scale * target.Height));
 
-        using var decal = Image.Load<Rgba32>(path);
+        using var decal = LoadDecal(path);
         ApplyFlips(decal, layer);
         var sourceWidth = decal.Width;
         // Bilinear resampling invents blend colors at edges; keep colorset decals crisp so
@@ -199,6 +238,8 @@ public sealed class TextureCompositor(DecalLibrary decals) : IService
     private static void ApplyColorDecal(Image<Rgba32> target, Image<Rgba32> decal, DecalLayer layer, int offsetX, int offsetY)
     {
         var opacity = Math.Clamp(layer.Opacity, 0f, 1f);
+        if (opacity <= 0f)
+            return;
 
         for (var dy = 0; dy < decal.Height; ++dy)
         {
@@ -212,7 +253,11 @@ public sealed class TextureCompositor(DecalLibrary decals) : IService
                 if (tx < 0 || tx >= target.Width)
                     continue;
 
-                var sample = DecalQuantizer.ApplyTint(decal[dx, dy], layer);
+                var source = decal[dx, dy];
+                if (source.A == 0)
+                    continue;
+
+                var sample = DecalQuantizer.ApplyTint(source, layer);
                 var alpha  = sample.A / 255f * opacity;
                 if (alpha <= 0f)
                     continue;

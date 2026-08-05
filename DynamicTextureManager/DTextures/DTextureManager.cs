@@ -203,22 +203,4 @@ public sealed class DTextureManager : DTextureEditor
     }
     
     #endregion
-
-    #region Edit Information
-    
-    /// <summary> Rename a dTexture. </summary>
-    public void Rename(DTexture dTexture, string newName)
-    {
-        var oldName = dTexture.Name.Text;
-        if (oldName == newName)
-            return;
-
-        dTexture.Name     = newName;
-        dTexture.LastEdit = DateTimeOffset.UtcNow;
-        SaveService.QueueSave(dTexture);
-        DynamicTextureManager.Log.Debug($"Renamed dTexture {dTexture.Identifier}.");
-        DTextureChanged.Invoke(DTextureChanged.Type.Renamed, dTexture, new RenameTransaction(oldName, newName));
-    }
-    
-    #endregion
 }
