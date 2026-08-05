@@ -71,7 +71,62 @@ public sealed class ProceduralSurfaceSection
             changed       = true;
         }
 
+        if (layer.Kind == SurfaceGeneratorKind.Pattern)
+            changed |= DrawPatternSettings(layer);
+
+        changed |= DrawSliderClamped("Color Variation"u8, ref layer.ColorVariation, 0f, 1f);
+        changed |= DrawSliderClamped("Contrast"u8, ref layer.Contrast, 0f, 1f);
+        changed |= DrawSliderClamped("Shading"u8, ref layer.CavityAmount, 0f, 1f);
+        Im.Tooltip.OnHover("Darkens the crevices of the pattern."u8);
+
         return changed;
+    }
+
+    private static readonly SurfacePatternStyle[] PatternStyles =
+        [SurfacePatternStyle.Spots, SurfacePatternStyle.Stripes, SurfacePatternStyle.Marbling];
+
+    private static string PatternLabel(SurfacePatternStyle style)
+        => style switch
+        {
+            SurfacePatternStyle.Stripes  => "Stripes",
+            SurfacePatternStyle.Marbling => "Marbling",
+            _                            => "Spots",
+        };
+
+    private static bool DrawPatternSettings(ProceduralSurfaceLayer layer)
+    {
+        var changed = false;
+
+        Im.Item.SetNextWidthScaled(220);
+        using (var combo = Im.Combo.Begin("Style"u8, PatternLabel(layer.PatternStyle)))
+        {
+            if (combo)
+                foreach (var style in PatternStyles)
+                {
+                    if (!Im.Selectable(PatternLabel(style), style == layer.PatternStyle) || style == layer.PatternStyle)
+                        continue;
+
+                    layer.PatternStyle = style;
+                    changed            = true;
+                }
+        }
+
+        changed |= DrawSliderClamped("Irregularity"u8, ref layer.WarpStrength, 0f, 1f);
+        changed |= DrawSliderClamped("Amount"u8, ref layer.Threshold, 0.1f, 0.9f);
+        Im.Tooltip.OnHover("How much of the skin the pattern covers."u8);
+
+        return changed;
+    }
+
+    private static bool DrawSliderClamped(ReadOnlySpan<byte> label, ref float value, float min, float max)
+    {
+        Im.Item.SetNextWidthScaled(220);
+        var v = value;
+        if (!Im.Slider(label, ref v, "%.2f"u8, min, max))
+            return false;
+
+        value = Math.Clamp(v, min, max);
+        return true;
     }
 
     private static bool DrawPackedColor(ReadOnlySpan<byte> label, ref uint packed)
