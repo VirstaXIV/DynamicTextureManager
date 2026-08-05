@@ -364,13 +364,13 @@ public sealed class DecalViewport(ITextureProvider textureProvider) : IDisposabl
         // wheel mode is always visible at a glance.
         const uint dimColor = 0xAAB4B4B4;
         const uint hotColor = 0xFF53D7FF;
-        var lines = _layer != null
-            ? new (string Text, uint Color)[]
-            {
+        Span<(string Text, uint Color)> lines = _layer != null
+            ?
+            [
                 ("LMB place · RMB orbit · MMB pan · Wheel zoom", dimColor),
                 (io.KeyCtrl ? "Ctrl+Wheel: resizing decal" : "Ctrl+Wheel: resize decal", io.KeyCtrl ? hotColor : dimColor),
                 (io.KeyShift ? "Shift+Wheel: rotating decal" : "Shift+Wheel: rotate decal", io.KeyShift ? hotColor : dimColor),
-            }
+            ]
             : [("RMB orbit · MMB pan · Wheel zoom", dimColor)];
 
         var pad       = 6f * ImUtf8.GlobalScale;
@@ -669,7 +669,7 @@ public sealed class DecalViewport(ITextureProvider textureProvider) : IDisposabl
     /// stand-in for the customize skin color the game applies in-shader.
     /// </summary>
     private static Vector3 SampleAlbedo(DecodedTexture? diffuse, DecodedTexture? idMap, Vector3[]? rows, Vector3? skinTone,
-        (Vector3 Main, Vector3 Highlight)? hairColors, DecodedTexture? hairMask, Vector2 uv)
+        (Vector3 Main, Vector3 Highlight)? hairColors, DecodedTexture? hairMask, float[]? hairAoCurve, Vector2 uv)
     {
         var albedo = Vector3.One;
         var shaded = false;
@@ -684,8 +684,8 @@ public sealed class DecalViewport(ITextureProvider textureProvider) : IDisposabl
                 // customize main color toward the highlight color; the customize colors are
                 // "squared RGB" in the game's constant buffer, so square them here too.
                 albedo = Vector3.Lerp(hair.Main * hair.Main, hair.Highlight * hair.Highlight, diffuse.Rgba[i + 2] / 255f);
-                if (hairMask != null)
-                    albedo *= HairAoFactor(hairMask, uv);
+                if (hairMask != null && hairAoCurve != null)
+                    albedo *= hairAoCurve[SampleAlpha(hairMask, uv)];
             }
             else
             {
@@ -718,9 +718,8 @@ public sealed class DecalViewport(ITextureProvider textureProvider) : IDisposabl
     // instance; the mask's alpha channel is the AO.
     private static readonly System.Runtime.CompilerServices.ConditionalWeakTable<DecodedTexture, float[]> AoCurves = new();
 
-    private static float HairAoFactor(DecodedTexture mask, Vector2 uv)
-    {
-        var curve = AoCurves.GetValue(mask, static m =>
+    private static float[] HairAoCurve(DecodedTexture mask)
+        => AoCurves.GetValue(mask, static m =>
         {
             long sum = 0;
             for (var i = 3; i < m.Rgba.Length; i += 4)
@@ -735,8 +734,6 @@ public sealed class DecalViewport(ITextureProvider textureProvider) : IDisposabl
 
             return table;
         });
-        return curve[SampleAlpha(mask, uv)];
-    }
 
     private static byte SampleAlpha(DecodedTexture texture, Vector2 uv)
     {
@@ -859,6 +856,7 @@ public sealed class DecalViewport(ITextureProvider textureProvider) : IDisposabl
             // card would occlude the cards behind it. Only editable geometry can be tested —
             // dimmed context belongs to a foreign material whose texture was never loaded.
             var alphaTest = meshHairColors != null && meshDiffuse != null;
+            var hairAoCurve = meshHairColors != null && meshHairMask != null ? HairAoCurve(meshHairMask) : null;
             // Curvature-following per-vertex decal-space coordinates — the same computation the
             // bake uses (SurfaceDecalBaker.ComputeSurfaceProjection), so the live preview always
             // matches the built texture, including how it wraps/warps on curved surfaces, and
@@ -1008,7 +1006,7 @@ public sealed class DecalViewport(ITextureProvider textureProvider) : IDisposabl
                             else
                             {
                                 uv    = mesh.Uvs[i0] * w0 + mesh.Uvs[i1] * w1 + mesh.Uvs[i2] * w2;
-                                color = SampleAlbedo(meshDiffuse, meshIdMap, rows, meshSkinTone, meshHairColors, meshHairMask, uv) * 255f;
+                                color = SampleAlbedo(meshDiffuse, meshIdMap, rows, meshSkinTone, meshHairColors, meshHairMask, hairAoCurve, uv) * 255f;
                             }
 
                             if (triProjected)

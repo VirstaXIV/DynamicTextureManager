@@ -41,10 +41,36 @@ public sealed class DecalLibraryPanel(DecalLibrary decals, ITextureProvider text
     /// <summary> Called by the picker flow after an in-panel import, so a fresh decal can be picked immediately. </summary>
     public DecalEntry? LastImported { get; private set; }
 
+    // Filtering, sorting and tag aggregation over the whole library are cached and redone
+    // only when the library or the filter inputs actually change, not per frame.
+    private int      _viewRevision = -1;
+    private int      _viewTagStamp = -1;
+    private int      _tagStamp;
+    private string   _viewSearch   = string.Empty;
+    private SortMode _viewSort     = SortMode.DateDesc;
+
+    private List<(DecalEntry Entry, string Path)> _viewEntries = [];
+    private List<string>                          _viewTags    = [];
+
+    private void EnsureView()
+    {
+        if (_viewRevision == decals.Revision && _viewTagStamp == _tagStamp
+         && _viewSort == _sort && string.Equals(_viewSearch, _search, StringComparison.Ordinal))
+            return;
+
+        _viewRevision = decals.Revision;
+        _viewTagStamp = _tagStamp;
+        _viewSort     = _sort;
+        _viewSearch   = _search;
+        _viewEntries  = Filtered().Select(e => (e, decals.FilePath(e.Id))).ToList();
+        _viewTags     = decals.AllTags();
+    }
+
     public void Draw(Action<DecalEntry>? onPick = null)
     {
         _fileDialog.Draw();
 
+        EnsureView();
         DrawTopBar();
         DrawTagFilter();
         ImGui.Separator();
@@ -90,12 +116,11 @@ public sealed class DecalLibraryPanel(DecalLibrary decals, ITextureProvider text
 
     private void DrawTagFilter()
     {
-        var allTags = decals.AllTags();
-        if (allTags.Count == 0)
+        if (_viewTags.Count == 0)
             return;
 
         ImUtf8.Text("Tags:"u8);
-        foreach (var (tag, idx) in allTags.Select((t, i) => (t, i)))
+        foreach (var (tag, idx) in _viewTags.Select((t, i) => (t, i)))
         {
             ImGui.SameLine();
             using var id     = ImUtf8.PushId(idx);
@@ -105,6 +130,7 @@ public sealed class DecalLibraryPanel(DecalLibrary decals, ITextureProvider text
             {
                 if (!_tagFilter.Add(tag))
                     _tagFilter.Remove(tag);
+                ++_tagStamp;
             }
         }
 
@@ -112,7 +138,10 @@ public sealed class DecalLibraryPanel(DecalLibrary decals, ITextureProvider text
         {
             ImGui.SameLine();
             if (ImUtf8.SmallButton("Clear Filter"u8))
+            {
                 _tagFilter.Clear();
+                ++_tagStamp;
+            }
         }
     }
 
@@ -135,7 +164,7 @@ public sealed class DecalLibraryPanel(DecalLibrary decals, ITextureProvider text
 
     private void DrawGrid(Action<DecalEntry>? onPick)
     {
-        var entries = Filtered().ToList();
+        var entries = _viewEntries;
         if (entries.Count == 0)
         {
             ImUtf8.Text(decals.Decals.Count == 0 ? "No decals imported yet."u8 : "No decals match the current filter."u8);
@@ -147,7 +176,7 @@ public sealed class DecalLibraryPanel(DecalLibrary decals, ITextureProvider text
         var availX    = ImGui.GetContentRegionAvail().X;
         var perRow    = Math.Max(1, (int)((availX + spacing) / (cellSize + spacing)));
 
-        foreach (var (entry, idx) in entries.Select((e, i) => (e, i)))
+        foreach (var ((entry, path), idx) in entries.Select((e, i) => (e, i)))
         {
             if (idx % perRow != 0)
                 ImGui.SameLine();
@@ -155,7 +184,7 @@ public sealed class DecalLibraryPanel(DecalLibrary decals, ITextureProvider text
             using var id    = ImUtf8.PushId(idx);
             using var group = ImUtf8.Group();
 
-            var wrap     = textureProvider.GetFromFile(decals.FilePath(entry.Id)).GetWrapOrDefault();
+            var wrap     = textureProvider.GetFromFile(path).GetWrapOrDefault();
             var selected = entry.Id == _selected;
             using (var border = ImRaii.PushColor(ImGuiCol.Button, 0xFF885522u, selected))
             {

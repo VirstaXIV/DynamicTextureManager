@@ -215,6 +215,30 @@ public static class SurfaceDecalBaker
     public static SurfaceProjection ComputeSurfaceProjection(MaterialMesh mesh, Vector3 anchor, Vector3 normal,
         Vector3 tangent, Vector3 bitangent, float maxWalkDistance)
     {
+        var box    = ProjectionCache.GetOrCreateValue(mesh);
+        var cached = box.Value;
+        if (cached != null && cached.Anchor == anchor && cached.Normal == normal && cached.Tangent == tangent
+         && cached.Bitangent == bitangent && cached.WalkDistance == maxWalkDistance)
+            return cached.Projection;
+
+        var projection = ComputeSurfaceProjectionUncached(mesh, anchor, normal, tangent, bitangent, maxWalkDistance);
+        box.Value = new CachedProjection(anchor, normal, tangent, bitangent, maxWalkDistance, projection);
+        return projection;
+    }
+
+    // The walk is O(vertices) in allocations and work, and the viewport re-renders every
+    // camera-drag tick with unchanged placement — one remembered projection per mesh turns
+    // those into pure lookups. The record swap is atomic, so the render thread and a
+    // background build can share the table safely; a mesh's entry dies with the mesh.
+    private sealed record CachedProjection(Vector3 Anchor, Vector3 Normal, Vector3 Tangent, Vector3 Bitangent,
+        float WalkDistance, SurfaceProjection Projection);
+
+    private static readonly System.Runtime.CompilerServices.ConditionalWeakTable<MaterialMesh,
+        System.Runtime.CompilerServices.StrongBox<CachedProjection?>> ProjectionCache = new();
+
+    private static SurfaceProjection ComputeSurfaceProjectionUncached(MaterialMesh mesh, Vector3 anchor, Vector3 normal,
+        Vector3 tangent, Vector3 bitangent, float maxWalkDistance)
+    {
         var local   = new Vector2[mesh.VertexCount];
         var reached = new bool[mesh.VertexCount];
         var (canonical, neighbors) = mesh.GetOrBuildAdjacency();
@@ -537,13 +561,16 @@ public static class SurfaceDecalBaker
         var c01 = pixels[y1 * width + x0];
         var c11 = pixels[y1 * width + x1];
 
-        float Lerp2(float a, float b, float t)
-            => a + (b - a) * t;
+        var top    = new Vector4(c10.R - c00.R, c10.G - c00.G, c10.B - c00.B, c10.A - c00.A) * tx
+            + new Vector4(c00.R, c00.G, c00.B, c00.A);
+        var bottom = new Vector4(c11.R - c01.R, c11.G - c01.G, c11.B - c01.B, c11.A - c01.A) * tx
+            + new Vector4(c01.R, c01.G, c01.B, c01.A);
+        var blended = top + (bottom - top) * ty;
 
-        byte Channel(Func<Rgba32, byte> select)
-            => (byte)Math.Clamp((int)Math.Round(
-                Lerp2(Lerp2(select(c00), select(c10), tx), Lerp2(select(c01), select(c11), tx), ty)), 0, 255);
-
-        return new Rgba32(Channel(p => p.R), Channel(p => p.G), Channel(p => p.B), Channel(p => p.A));
+        return new Rgba32(
+            (byte)Math.Clamp((int)MathF.Round(blended.X), 0, 255),
+            (byte)Math.Clamp((int)MathF.Round(blended.Y), 0, 255),
+            (byte)Math.Clamp((int)MathF.Round(blended.Z), 0, 255),
+            (byte)Math.Clamp((int)MathF.Round(blended.W), 0, 255));
     }
 }

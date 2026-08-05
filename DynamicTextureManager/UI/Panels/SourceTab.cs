@@ -40,6 +40,15 @@ public sealed class SourceTab(
     private string                            _error       = string.Empty;
     private Guid                              _groupsOwner = Guid.Empty;
 
+    // Conflict map and unit grouping walk every stored dTexture's materials — refreshed on a
+    // short interval (and immediately after this tab's own edits) instead of every frame.
+    private const long ViewRefreshMs = 500;
+
+    private long                               _viewBuiltMs = -1;
+    private Guid                               _viewOwner   = Guid.Empty;
+    private Dictionary<string, List<string>>   _conflicts   = new(StringComparer.OrdinalIgnoreCase);
+    private List<IGrouping<string, SourcePath>> _units      = [];
+
     public void Draw(DTexture dTexture)
     {
         // The loaded picker candidates belong to the dTexture they were loaded for —
@@ -52,10 +61,22 @@ public sealed class SourceTab(
             _error       = string.Empty;
         }
 
-        var conflicts = BuildConflictMap(dTexture);
-        DrawCurrentSource(dTexture, conflicts);
+        var now = Environment.TickCount64;
+        if (_viewOwner != dTexture.Identifier || _viewBuiltMs < 0 || now - _viewBuiltMs >= ViewRefreshMs)
+        {
+            _viewOwner   = dTexture.Identifier;
+            _viewBuiltMs = now;
+            _conflicts   = BuildConflictMap(dTexture);
+            // Sources are MODEL units: one row per piece, its materials (hidden companions
+            // included) travel with it. Entries without a recorded model (older saves) stand alone.
+            _units = dTexture.Data.Source.Materials
+                .GroupBy(m => m.MdlGamePath.Length > 0 ? m.MdlGamePath : m.GamePath, StringComparer.OrdinalIgnoreCase)
+                .ToList();
+        }
+
+        DrawCurrentSource(dTexture, _conflicts);
         ImGui.Separator();
-        DrawPlayerPicker(dTexture, conflicts);
+        DrawPlayerPicker(dTexture, _conflicts);
     }
 
     /// <summary> Game paths other dTextures also target — both generated mods would override the same file. </summary>
@@ -84,11 +105,7 @@ public sealed class SourceTab(
             return;
         }
 
-        // Sources are MODEL units: one row per piece, its materials (hidden companions
-        // included) travel with it. Entries without a recorded model (older saves) stand alone.
-        var units = source.Materials
-            .GroupBy(m => m.MdlGamePath.Length > 0 ? m.MdlGamePath : m.GamePath, StringComparer.OrdinalIgnoreCase)
-            .ToList();
+        var units = _units;
 
         ImUtf8.TextWrapped($"Selected Sources ({units.Count}) — edits always rebuild from the captured source files, so changes to the base mod carry over on the next build.");
 
@@ -130,7 +147,8 @@ public sealed class SourceTab(
                 DrawModCell(primary.ModDirectory, primary.ModName, primary.ActualPath);
 
                 ImGui.TableNextColumn();
-                ImUtf8.Text(unit.Count() == 1 ? primary.GamePath : $"{unit.Count()} materials");
+                var materialCount = unit.Count();
+                ImUtf8.Text(materialCount == 1 ? primary.GamePath : $"{materialCount} materials");
                 if (ImGui.IsItemHovered())
                     ImUtf8.HoverTooltip(string.Join("\n", unit.Select(m => $"{m.Label}: {m.GamePath}")));
 
@@ -632,6 +650,7 @@ public sealed class SourceTab(
     private void Save(DTexture dTexture)
     {
         dTexture.LastEdit = DateTimeOffset.UtcNow;
+        _viewBuiltMs      = -1;
         saveService.QueueSave(dTexture);
         // Adding/removing a source material never publishes DTextureChanged (that event is
         // only for whole-dTexture create/delete/rename) and this tab never used to have the
