@@ -3,15 +3,17 @@ using System.Collections.Generic;
 using System.IO;
 using System.Linq;
 using System.Numerics;
-using Dalamud.Bindings.ImGui;
 using Dalamud.Interface.Textures;
 using Dalamud.Interface.Textures.TextureWraps;
 using Dalamud.Plugin.Services;
 using DynamicTextureManager.DTextures;
 using DynamicTextureManager.DTextures.Data;
 using DynamicTextureManager.ModGeneration;
-using OtterGui.Text;
+using ImSharp;
+using Luna;
 using SixLabors.ImageSharp.PixelFormats;
+// Both ImSharp and ImageSharp define an Rgba32; this file's pixel work is ImageSharp's.
+using Rgba32 = SixLabors.ImageSharp.PixelFormats.Rgba32;
 
 namespace DynamicTextureManager.UI.Panels;
 
@@ -259,25 +261,28 @@ public sealed class DecalViewport(ITextureProvider textureProvider) : IDisposabl
 
         if (_poppedOut)
         {
-            ImGui.SetNextWindowSize(new Vector2(820, 900) * ImUtf8.GlobalScale, ImGuiCond.FirstUseEver);
+            Im.Window.SetNextSize(new Vector2(820, 900) * Im.Style.GlobalScale, Condition.FirstUseEver);
             var open = true;
-            if (ImGui.Begin("3D Preview###dtmDecalViewport", ref open))
-                DrawContent();
-            ImGui.End();
+            using (var window = Im.Window.Begin("3D Preview###dtmDecalViewport"u8, ref open))
+            {
+                if (window)
+                    DrawContent();
+            }
+
             if (!open)
                 _poppedOut = false;
         }
         else
         {
-            var avail  = ImGui.GetContentRegionAvail();
-            var height = MathF.Max(340f * ImUtf8.GlobalScale, avail.Y);
-            using var child = ImUtf8.Child("##viewportChild"u8, new Vector2(avail.X, height), true);
+            var avail  = Im.ContentRegion.Available;
+            var height = MathF.Max(340f * Im.Style.GlobalScale, avail.Y);
+            using var child = Im.Child.Begin("##viewportChild"u8, new Vector2(avail.X, height), true);
             if (child)
                 DrawContent();
         }
 
         // Commit once per completed interaction even if the mouse left the canvas.
-        if (_editDirty && !ImGui.IsMouseDown(ImGuiMouseButton.Left) && !ImGui.IsAnyItemActive())
+        if (_editDirty && !Im.Mouse.IsDown(MouseButton.Left) && !Im.Item.AnyActive)
         {
             _editDirty = false;
             _onChanged?.Invoke();
@@ -289,28 +294,28 @@ public sealed class DecalViewport(ITextureProvider textureProvider) : IDisposabl
         if (_mesh == null)
             return;
 
-        if (ImUtf8.SmallButton(_poppedOut ? "Embed"u8 : "Pop Out"u8))
+        if (Im.SmallButton(_poppedOut ? "Embed"u8 : "Pop Out"u8))
             _poppedOut = !_poppedOut;
-        ImUtf8.HoverTooltip("Move the 3D preview between the Decals tab and its own resizable window."u8);
+        Im.Tooltip.OnHover("Move the 3D preview between the Decals tab and its own resizable window."u8);
 
-        ImGui.SameLine();
-        if (ImUtf8.SmallButton("Reset View"u8))
+        Im.Line.Same();
+        if (Im.SmallButton("Reset View"u8))
         {
             FrameCamera();
             _renderDirty = true;
         }
 
-        ImUtf8.HoverTooltip("Re-frame the camera on the whole piece."u8);
+        Im.Tooltip.OnHover("Re-frame the camera on the whole piece."u8);
 
-        ImGui.SameLine();
-        ImUtf8.Text("(?)"u8);
-        ImUtf8.HoverTooltip(
+        Im.Line.Same();
+        Im.Text("(?)"u8);
+        Im.Tooltip.OnHover(
             "Right-drag: orbit.  Middle-drag: pan.  Wheel: zoom.\nWhile placing a decal: left-drag places/moves it, Ctrl+wheel resizes it, Shift+wheel rotates it.\nThe colored corner cross shows the world axes (X red, Y green, Z blue); the live hints inside the canvas light up when a modifier is active."u8);
 
         if (_layer != null)
             DrawPlacementControls(_layer);
 
-        var avail = ImGui.GetContentRegionAvail();
+        var avail = Im.ContentRegion.Available;
         var size  = MathF.Max(200f, MathF.Min(avail.X, avail.Y));
 
         // Camera interaction degrades gracefully instead of re-rasterizing 768² every frame
@@ -318,7 +323,7 @@ public sealed class DecalViewport(ITextureProvider textureProvider) : IDisposabl
         // resolution, paced by the previous render's own measured cost — a fixed 30fps
         // cadence let a dense modded hairstyle (high triangle count + card overdraw) eat
         // the whole frame budget. A final full-resolution render lands on release.
-        var now         = ImGui.GetTime();
+        var now         = Im.State.Time;
         var interacting = now - _lastCameraChange < 0.15;
         if (_renderDirty || _wrap == null)
         {
@@ -342,10 +347,10 @@ public sealed class DecalViewport(ITextureProvider textureProvider) : IDisposabl
             PresentFrame();
         }
 
-        var start = ImGui.GetCursorScreenPos();
-        ImUtf8.InvisibleButton("##viewportCanvas"u8, new Vector2(size));
+        var start = Im.Cursor.ScreenPosition;
+        Im.InvisibleButton("##viewportCanvas"u8, new Vector2(size));
         if (_wrap != null)
-            ImGui.GetWindowDrawList().AddImage(_wrap.Handle, start, start + new Vector2(size));
+            Im.Window.DrawList.Image(_wrap.Id, start, start + new Vector2(size));
 
         DrawCanvasOverlays(start, size);
         HandleInput(start, size);
@@ -357,41 +362,43 @@ public sealed class DecalViewport(ITextureProvider textureProvider) : IDisposabl
     /// </summary>
     private void DrawCanvasOverlays(Vector2 start, float size)
     {
-        var draw = ImGui.GetWindowDrawList();
-        var io   = ImGui.GetIO();
+        var draw = Im.Window.DrawList;
 
         // Control hints, top-left. The active modifier's line lights up so the current
         // wheel mode is always visible at a glance.
         const uint dimColor = 0xAAB4B4B4;
         const uint hotColor = 0xFF53D7FF;
+        var keyControl = Im.Io.KeyControl;
+        var keyShift   = Im.Io.KeyShift;
         Span<(string Text, uint Color)> lines = _layer != null
             ?
             [
                 ("LMB place · RMB orbit · MMB pan · Wheel zoom", dimColor),
-                (io.KeyCtrl ? "Ctrl+Wheel: resizing decal" : "Ctrl+Wheel: resize decal", io.KeyCtrl ? hotColor : dimColor),
-                (io.KeyShift ? "Shift+Wheel: rotating decal" : "Shift+Wheel: rotate decal", io.KeyShift ? hotColor : dimColor),
+                (keyControl ? "Ctrl+Wheel: resizing decal" : "Ctrl+Wheel: resize decal", keyControl ? hotColor : dimColor),
+                (keyShift ? "Shift+Wheel: rotating decal" : "Shift+Wheel: rotate decal", keyShift ? hotColor : dimColor),
             ]
             : [("RMB orbit · MMB pan · Wheel zoom", dimColor)];
 
-        var pad       = 6f * ImUtf8.GlobalScale;
-        var lineStep  = ImGui.GetTextLineHeight() + 2f;
+        var pad       = 6f * Im.Style.GlobalScale;
+        var lineStep  = Im.Style.TextHeight + 2f;
         var maxWidth  = 0f;
         foreach (var (text, _) in lines)
-            maxWidth = MathF.Max(maxWidth, ImGui.CalcTextSize(text).X);
+            maxWidth = MathF.Max(maxWidth, Im.Font.CalculateSize(text).X);
         var boxMin = start + new Vector2(pad, pad);
-        draw.AddRectFilled(boxMin - new Vector2(4f), boxMin + new Vector2(maxWidth + 4f, lines.Length * lineStep + 2f), 0x90101010, 4f);
+        draw.Shape.RectangleFilled(boxMin - new Vector2(4f), boxMin + new Vector2(maxWidth + 4f, lines.Length * lineStep + 2f), 0x90101010u,
+            4f);
         for (var i = 0; i < lines.Length; ++i)
-            draw.AddText(boxMin + new Vector2(0f, i * lineStep), lines[i].Color, lines[i].Text);
+            draw.Text(boxMin + new Vector2(0f, i * lineStep), lines[i].Color, lines[i].Text);
 
         // Orientation gizmo, bottom-left: world axes through the camera's rotation. An axis
         // pointing away from the camera renders dimmed.
-        var gizmoRadius = 20f * ImUtf8.GlobalScale;
+        var gizmoRadius = 20f * Im.Style.GlobalScale;
         var center      = start + new Vector2(gizmoRadius + 10f, size - gizmoRadius - 10f);
         var offset      = CameraOffset();
         var forward     = Vector3.Normalize(-offset);
         var right       = Vector3.Normalize(Vector3.Cross(forward, Vector3.UnitY));
         var up          = Vector3.Cross(right, forward);
-        draw.AddCircleFilled(center, gizmoRadius + 8f, 0x60101010);
+        draw.Shape.CircleFilled(center, gizmoRadius + 8f, 0x60101010u);
 
         void Axis(Vector3 dir, uint color, string label)
         {
@@ -399,8 +406,8 @@ public sealed class DecalViewport(ITextureProvider textureProvider) : IDisposabl
             var away   = Vector3.Dot(dir, forward) > 0f;
             var col    = away ? (color & 0x00FFFFFFu) | 0x50000000u : color;
             var tip    = center + screen * gizmoRadius;
-            draw.AddLine(center, tip, col, 2f);
-            draw.AddText(tip + screen * 3f - new Vector2(3.5f, 7f), col, label);
+            draw.Shape.Line(center, tip, col, 2f);
+            draw.Text(tip + screen * 3f - new Vector2(3.5f, 7f), col, label);
         }
 
         Axis(Vector3.UnitX, 0xFF4040E0, "X");
@@ -411,58 +418,58 @@ public sealed class DecalViewport(ITextureProvider textureProvider) : IDisposabl
     private void DrawPlacementControls(DecalLayer layer)
     {
         var widthCm = layer.WorldWidth * 100f;
-        ImGui.SetNextItemWidth(130 * ImUtf8.GlobalScale);
-        if (ImUtf8.Slider("Width (cm)"u8, ref widthCm, "%.1f"u8, 1f, 100f))
+        Im.Item.SetNextWidthScaled(130);
+        if (Im.Slider("Width (cm)"u8, ref widthCm, "%.1f"u8, 1f, 100f))
         {
             layer.WorldWidth = widthCm / 100f;
             MarkEdited();
         }
 
-        ImGui.SameLine();
+        Im.Line.Same();
         var heightCm = layer.WorldHeight * 100f;
-        ImGui.SetNextItemWidth(130 * ImUtf8.GlobalScale);
-        if (ImUtf8.Slider("Height (cm)"u8, ref heightCm, "%.1f"u8, 1f, 100f))
+        Im.Item.SetNextWidthScaled(130);
+        if (Im.Slider("Height (cm)"u8, ref heightCm, "%.1f"u8, 1f, 100f))
         {
             layer.WorldHeight = heightCm / 100f;
             MarkEdited();
         }
 
-        ImGui.SameLine();
-        ImGui.SetNextItemWidth(130 * ImUtf8.GlobalScale);
+        Im.Line.Same();
+        Im.Item.SetNextWidthScaled(130);
         var rotation = layer.RotationDeg;
-        if (ImUtf8.Slider("Rotation"u8, ref rotation, "%.0f°"u8, -180f, 180f))
+        if (Im.Slider("Rotation"u8, ref rotation, "%.0f°"u8, -180f, 180f))
         {
             layer.RotationDeg = rotation;
             MarkEdited();
         }
 
-        ImGui.SameLine();
-        if (ImUtf8.SmallButton("Flip H"u8))
+        Im.Line.Same();
+        if (Im.SmallButton("Flip H"u8))
         {
             layer.FlipX = !layer.FlipX;
             MarkEdited();
         }
 
-        ImUtf8.HoverTooltip(layer.FlipX ? "Mirror the decal horizontally (currently flipped)."u8 : "Mirror the decal horizontally."u8);
+        Im.Tooltip.OnHover(layer.FlipX ? "Mirror the decal horizontally (currently flipped)."u8 : "Mirror the decal horizontally."u8);
 
-        ImGui.SameLine();
-        if (ImUtf8.SmallButton("Flip V"u8))
+        Im.Line.Same();
+        if (Im.SmallButton("Flip V"u8))
         {
             layer.FlipY = !layer.FlipY;
             MarkEdited();
         }
 
-        ImUtf8.HoverTooltip(layer.FlipY ? "Mirror the decal vertically (currently flipped)."u8 : "Mirror the decal vertically."u8);
+        Im.Tooltip.OnHover(layer.FlipY ? "Mirror the decal vertically (currently flipped)."u8 : "Mirror the decal vertically."u8);
 
-        ImGui.SameLine();
-        if (ImUtf8.Checkbox("Highlight"u8, ref _highlightDecal))
+        Im.Line.Same();
+        if (Im.Checkbox("Highlight"u8, ref _highlightDecal))
             _renderDirty = true;
-        ImUtf8.HoverTooltip("Render the decal as a bright orange footprint instead of its real colors — easier to find on busy textures."u8);
+        Im.Tooltip.OnHover("Render the decal as a bright orange footprint instead of its real colors — easier to find on busy textures."u8);
 
-        ImGui.SameLine();
-        if (ImUtf8.SmallButton("Done"u8))
+        Im.Line.Same();
+        if (Im.SmallButton("Done"u8))
             EndPlacement();
-        ImUtf8.HoverTooltip("Finish placing this decal and return the preview to view mode."u8);
+        Im.Tooltip.OnHover("Finish placing this decal and return the preview to view mode."u8);
     }
 
     private void MarkEdited()
@@ -476,21 +483,21 @@ public sealed class DecalViewport(ITextureProvider textureProvider) : IDisposabl
         if (_mesh == null)
             return;
 
-        var hovered = ImGui.IsItemHovered();
-        var io      = ImGui.GetIO();
+        var hovered = Im.Item.Hovered();
+        var wheel   = Im.Io.MouseWheel;
 
-        if (hovered && io.MouseWheel != 0f)
+        if (hovered && wheel != 0f)
         {
-            if (io.KeyCtrl && _layer != null)
+            if (Im.Io.KeyControl && _layer != null)
             {
-                var factor = 1f + io.MouseWheel * 0.1f;
+                var factor = 1f + wheel * 0.1f;
                 _layer.WorldWidth  = Math.Clamp(_layer.WorldWidth * factor, 0.01f, 2f);
                 _layer.WorldHeight = Math.Clamp(_layer.WorldHeight * factor, 0.01f, 2f);
                 MarkEdited();
             }
-            else if (io.KeyShift && _layer != null)
+            else if (Im.Io.KeyShift && _layer != null)
             {
-                var rotation = _layer.RotationDeg + io.MouseWheel * 5f;
+                var rotation = _layer.RotationDeg + wheel * 5f;
                 _layer.RotationDeg = rotation switch
                 {
                     > 180f  => rotation - 360f,
@@ -501,52 +508,56 @@ public sealed class DecalViewport(ITextureProvider textureProvider) : IDisposabl
             }
             else
             {
-                _distance         = Math.Clamp(_distance * (1f - io.MouseWheel * 0.1f), 0.05f, 20f);
+                _distance         = Math.Clamp(_distance * (1f - wheel * 0.1f), 0.05f, 20f);
                 _renderDirty      = true;
-                _lastCameraChange = ImGui.GetTime();
+                _lastCameraChange = Im.State.Time;
             }
         }
 
-        if (hovered && ImGui.IsMouseDown(ImGuiMouseButton.Right))
+        // Per-frame drag deltas: the drag delta since the last reset stands in for the raw
+        // per-frame mouse delta (ImSharp does not surface io.MouseDelta).
+        if (hovered && Im.Mouse.IsDown(MouseButton.Right))
         {
-            var delta = io.MouseDelta;
+            var delta = Im.Mouse.GetDragDelta(MouseButton.Right, 0f);
             if (delta != Vector2.Zero)
             {
+                Im.Mouse.ResetDragDelta(MouseButton.Right);
                 _yaw   -= delta.X * 0.01f;
                 _pitch  = Math.Clamp(_pitch + delta.Y * 0.01f, -1.5f, 1.5f);
                 _renderDirty      = true;
-                _lastCameraChange = ImGui.GetTime();
+                _lastCameraChange = Im.State.Time;
             }
         }
 
-        if (hovered && ImGui.IsMouseDown(ImGuiMouseButton.Middle))
+        if (hovered && Im.Mouse.IsDown(MouseButton.Middle))
         {
-            var delta = io.MouseDelta;
+            var delta = Im.Mouse.GetDragDelta(MouseButton.Middle, 0f);
             if (delta != Vector2.Zero)
             {
+                Im.Mouse.ResetDragDelta(MouseButton.Middle);
                 var eyeOffset = CameraOffset();
                 var forward   = Vector3.Normalize(-eyeOffset);
                 var right     = Vector3.Normalize(Vector3.Cross(forward, Vector3.UnitY));
                 var up        = Vector3.Cross(right, forward);
                 _target          += (-right * delta.X + up * delta.Y) * _distance * 0.0015f;
                 _renderDirty      = true;
-                _lastCameraChange = ImGui.GetTime();
+                _lastCameraChange = Im.State.Time;
             }
         }
 
         // One diagnostic line per CLICK (not per drag frame): the first thing to check when
         // "clicking does nothing" — distinguishes a lost binding from a missed pick.
-        if (hovered && ImGui.IsMouseClicked(ImGuiMouseButton.Left))
+        if (hovered && Im.Mouse.IsClicked(MouseButton.Left))
         {
-            var probe = (ImGui.GetMousePos() - start) / size;
+            var probe = (Im.Mouse.Position - start) / size;
             DynamicTextureManager.Log.Debug(_layer == null
                 ? $"Viewport click at ({probe.X:F2}, {probe.Y:F2}) — no placement layer bound."
                 : $"Viewport click at ({probe.X:F2}, {probe.Y:F2}) — pick {(TryPick(probe, out _, out _, out _) ? "hit" : "MISSED the mesh")}.");
         }
 
-        if (hovered && _layer != null && ImGui.IsMouseDown(ImGuiMouseButton.Left))
+        if (hovered && _layer != null && Im.Mouse.IsDown(MouseButton.Left))
         {
-            var local = (ImGui.GetMousePos() - start) / size;
+            var local = (Im.Mouse.Position - start) / size;
             if (local is { X: >= 0f and <= 1f, Y: >= 0f and <= 1f } && TryPick(local, out var position, out var normal, out var part))
             {
                 _layer.AnchorX           = position.X;
@@ -1172,7 +1183,7 @@ public sealed class DecalViewport(ITextureProvider textureProvider) : IDisposabl
             // Shader-verified: scroll = time in SECONDS × the scroll constants, no hidden
             // factor. The squared pattern sample times the linear emissive color reduces to
             // a LINEAR sample response in the display domain.
-            var t      = (float)ImGui.GetTime();
+            var t      = (float)Im.State.Time;
             var offset = new Vector2(t * effect.ScrollU, t * effect.ScrollV);
             for (var n = 0; n < _effectPixelCount; ++n)
             {
@@ -1193,7 +1204,7 @@ public sealed class DecalViewport(ITextureProvider textureProvider) : IDisposabl
 
         _wrap?.Dispose();
         _wrap = textureProvider.CreateFromRaw(RawImageSpecification.Rgba32(_renderedSize, _renderedSize), buffer, "DTM Viewport");
-        _lastEffectFrame = ImGui.GetTime();
+        _lastEffectFrame = Im.State.Time;
         _lastRenderTime  = _lastEffectFrame;
     }
 }
