@@ -19,7 +19,6 @@ using IService = Luna.IService;
 using Penumbra.GameData.Files;
 using Penumbra.GameData.Files.MaterialStructs;
 using SixLabors.ImageSharp;
-using SixLabors.ImageSharp.PixelFormats;
 // Both ImSharp and ImageSharp define an Rgba32; this file's pixel work is ImageSharp's.
 using Rgba32 = SixLabors.ImageSharp.PixelFormats.Rgba32;
 

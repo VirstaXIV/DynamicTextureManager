@@ -108,13 +108,10 @@ public class DTextureFileSystem : BaseFileSystem, IDisposable
                 Selection.Select(node, true);
                 return;
             case DTextureChanged.Type.Deleted:
+                // The selection tracks node removal itself — no explicit unselect, which
+                // would wrongly clear an unrelated multi-selection.
                 if (dTexture.Node is { } leaf)
-                {
-                    if (leaf.Selected)
-                        Selection.UnselectAll();
                     Delete(leaf);
-                }
-
                 return;
         }
     }

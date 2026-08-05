@@ -4,7 +4,6 @@ using System.Linq;
 using DynamicTextureManager.DTextures;
 using DynamicTextureManager.ModGeneration;
 using DynamicTextureManager.ModGeneration.Shaders;
-using ImSharp;
 using Penumbra.GameData.Files;
 
 namespace DynamicTextureManager.UI.Panels;
