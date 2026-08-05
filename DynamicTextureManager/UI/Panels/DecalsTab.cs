@@ -725,7 +725,9 @@ public sealed class DecalsTab(
             if (layer is not DecalLayer decal)
                 continue;
 
-            var name = decals.Get(decal.DecalId)?.Name ?? "(missing decal)";
+            var name = decal.LocalImageFile.Length > 0
+                ? "Extracted decal"
+                : decals.Get(decal.DecalId)?.Name ?? "(missing decal)";
 
             var enabled = decal.Enabled;
             if (ImUtf8.Checkbox("##enabled"u8, ref enabled))
@@ -747,7 +749,7 @@ public sealed class DecalsTab(
             var modeTag = decal.Surface
                 ? decal is { AnchorX: 0f, AnchorY: 0f, AnchorZ: 0f } ? "  [3D — not placed!]" : "  [3D]"
                 : string.Empty;
-            var extractedTag = decal.Extracted ? "  [extracted]" : string.Empty;
+            var extractedTag = decal.Extracted && decal.LocalImageFile.Length == 0 ? "  [extracted]" : string.Empty;
             var errorTag     = decal.RowError != null ? "  [auto-disabled]" : string.Empty;
             if (!ImUtf8.CollapsingHeader($"{idx + 1}: {name}{targetTag}{extractedTag}{modeTag}{errorTag}###layer{idx}"))
                 continue;
@@ -774,10 +776,13 @@ public sealed class DecalsTab(
             ImGui.SameLine();
             if (ImUtf8.SmallButton("Down"u8) && idx < layers.Count - 1)
                 swap = (idx, idx + 1);
-            ImGui.SameLine();
-            if (ImUtf8.SmallButton("Save Settings to Library"u8))
-                SaveLayerPreset(dTexture, option, decal);
-            ImUtf8.HoverTooltip("Store this layer's colors, surface finish and size on the library entry.\nFuture attachments of this decal start from these settings — on any gear."u8);
+            if (decal.LocalImageFile.Length == 0)
+            {
+                ImGui.SameLine();
+                if (ImUtf8.SmallButton("Save Settings to Library"u8))
+                    SaveLayerPreset(dTexture, option, decal);
+                ImUtf8.HoverTooltip("Store this layer's colors, surface finish and size on the library entry.\nFuture attachments of this decal start from these settings — on any gear."u8);
+            }
         }
 
         if (remove >= 0)
@@ -795,6 +800,16 @@ public sealed class DecalsTab(
             // regenerates the cleaned copy from the remaining extractions).
             if (removedDecal is { Extracted: true, PreExtractionSource: not null })
                 RestoreOrRegenerateSource(dTexture, option.GamePath, removedDecal);
+            // The temp stamp belongs to the layer — any library copy made from it stays.
+            if (removedDecal is { } local && local.LocalImageFile.Length > 0)
+                try
+                {
+                    File.Delete(decals.LayerImagePath(local));
+                }
+                catch (Exception ex)
+                {
+                    DynamicTextureManager.Log.Warning($"Could not delete extracted stamp {local.LocalImageFile}: {ex.Message}");
+                }
             if (layers.Count == 0)
                 dTexture.Data.Textures.Remove(option.GamePath);
             Save(dTexture);
@@ -842,6 +857,21 @@ public sealed class DecalsTab(
             ImUtf8.TextWrapped("Extracted from this texture's id map — relocated onto its own claimed slots, seeded from the source rows."u8);
             ImUtf8.HoverTooltip(
                 "This decal was lifted out of the id map and moved onto freshly claimed colorset slots that copy the source rows' authored look.\nRecoloring a slot recolors only the decal — the rest of the gear keeps its own rows."u8);
+
+            if (decal.LocalImageFile.Length > 0)
+            {
+                var libraryCopy = decal.LibraryCopyId != Guid.Empty ? decals.Get(decal.LibraryCopyId) : null;
+                if (libraryCopy != null)
+                {
+                    ImUtf8.Text($"In library as \"{libraryCopy.Name}\".");
+                }
+                else
+                {
+                    if (ImUtf8.SmallButton("Add to Library"u8))
+                        AddExtractedToLibrary(dTexture, option, decal);
+                    ImUtf8.HoverTooltip("Keep a copy in the decal library for use on other gear."u8);
+                }
+            }
         }
         else
         {
@@ -1130,7 +1160,7 @@ public sealed class DecalsTab(
     /// <summary> Quantize the decal image into the palette a tint maps against. Returns false when nothing usable was extracted. </summary>
     private bool ExtractTintPalette(DecalLayer decal)
     {
-        var path = decals.FilePath(decal.DecalId);
+        var path = decals.LayerImagePath(decal);
         if (!File.Exists(path))
             return false;
 
@@ -1158,7 +1188,7 @@ public sealed class DecalsTab(
         if (decal.Extracted)
             return false;
 
-        var path = decals.FilePath(decal.DecalId);
+        var path = decals.LayerImagePath(decal);
         if (!File.Exists(path))
             return false;
 
@@ -1874,7 +1904,7 @@ public sealed class DecalsTab(
 
         _placementError = string.Empty;
         _viewport.Open(dTexture, mesh, modelState.CurrentAttributeMask(mesh.GamePath));
-        _viewport.BeginPlacement(decal, decals.FilePath(decal.DecalId), () => Save(dTexture));
+        _viewport.BeginPlacement(decal, decals.LayerImagePath(decal), () => Save(dTexture));
     }
 
     #endregion
@@ -3225,6 +3255,25 @@ public sealed class DecalsTab(
         }
     }
 
+    /// <summary> Copy an extracted layer's temp stamp into the library — the explicit opt-in step. </summary>
+    private void AddExtractedToLibrary(DTexture dTexture, TextureOption option, DecalLayer decal)
+    {
+        try
+        {
+            using var image = Image.Load<Rgba32>(decals.LayerImagePath(decal));
+            var entry = decals.ImportGenerated(image, $"{option.MaterialLabel} — extracted decal");
+            if (entry == null)
+                return;
+
+            decal.LibraryCopyId = entry.Id;
+            Save(dTexture);
+        }
+        catch (Exception ex)
+        {
+            DynamicTextureManager.Log.Error($"Could not add the extracted decal to the library:\n{ex}");
+        }
+    }
+
     private void ExtractDecal(DTexture dTexture, TextureOption option, ColorTable table)
     {
         _extractStatus = string.Empty;
@@ -3259,14 +3308,19 @@ public sealed class DecalsTab(
             return;
         }
 
-        DecalEntry? entry;
-        using (var stamp = extraction.Stamp)
+        // The stamp is a temp file owned by this dTexture, NOT a library entry — re-running
+        // the extraction must never pile up duplicates in the library. "Add to Library" on
+        // the layer is the explicit step that keeps it for reuse.
+        var stampFile = $"{dTexture.Identifier:N}_stamp_{Guid.NewGuid():N}.png";
+        try
         {
-            entry = decals.ImportGenerated(stamp, $"{option.MaterialLabel} — extracted decal");
+            Directory.CreateDirectory(filenames.ExtractedDirectory);
+            using var stamp = extraction.Stamp;
+            stamp.SaveAsPng(Path.Combine(filenames.ExtractedDirectory, stampFile));
         }
-
-        if (entry == null)
+        catch (Exception ex)
         {
+            DynamicTextureManager.Log.Error($"Could not save the extracted stamp image:\n{ex}");
             _extractStatus = "Could not save the extracted stamp image.";
             return;
         }
@@ -3280,7 +3334,7 @@ public sealed class DecalsTab(
 
         var layer = new DecalLayer
         {
-            DecalId             = entry.Id,
+            LocalImageFile      = stampFile,
             IdRemap             = true,
             Extracted           = true,
             WriteBlendFromAlpha = true,
@@ -3329,7 +3383,7 @@ public sealed class DecalsTab(
 
         _extractRows.Clear();
         _extractStatus =
-            $"Extracted {extraction.Rows.Count} row(s) into decal \"{entry.Name}\" ({extraction.W}x{extraction.H} texels), "
+            $"Extracted {extraction.Rows.Count} row(s) into a decal layer ({extraction.W}x{extraction.H} texels), "
           + $"relocated onto slot(s) {string.Join(", ", allocation.Rows.Select(r => r / 2 + 1))}. "
           + "The texture's source is now a cleaned copy with the decal removed — anything left behind shows in the row list above.";
         DynamicTextureManager.Log.Information(
@@ -3363,7 +3417,7 @@ public sealed class DecalsTab(
 
         using var image = SixLabors.ImageSharp.Image.LoadPixelData<Rgba32>(decoded.Rgba, decoded.Width, decoded.Height);
         foreach (var layer in extracted)
-            TextureCompositor.EraseExtractedFootprint(image, layer, decals.FilePath(layer.DecalId));
+            TextureCompositor.EraseExtractedFootprint(image, layer, decals.LayerImagePath(layer));
 
         var file = filenames.ExtractedSourceFile(dTexture.Identifier, gamePath);
         Directory.CreateDirectory(filenames.ExtractedDirectory);

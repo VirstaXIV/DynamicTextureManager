@@ -5,6 +5,7 @@ using System.IO;
 using System.Linq;
 using System.Threading;
 using System.Threading.Tasks;
+using DynamicTextureManager.DTextures.Data;
 using DynamicTextureManager.DTextures.History;
 using DynamicTextureManager.Events;
 using DynamicTextureManager.Services;
@@ -144,12 +145,52 @@ public sealed class DTextureManager : DTextureEditor
         // The clone gets its own generated mod, so do not inherit build state.
         dTexture.Data.OutputModDirectory = string.Empty;
         dTexture.Data.LastBuiltHash      = string.Empty;
+        CopyExtractedFiles(dTexture);
 
         DTextures.Add(dTexture);
         SaveService.ImmediateSave(dTexture);
         DynamicTextureManager.Log.Debug($"Added new dTexture {dTexture.Identifier} by cloning {other.Identifier}.");
         DTextureChanged.Invoke(DTextureChanged.Type.Created, dTexture, new CreationTransaction(name, path));
         return dTexture;
+    }
+
+    /// <summary>
+    /// Files in the extracted folder belong to ONE dTexture — a clone must get its own
+    /// copies of extracted decal stamps and cleaned texture sources, or removing them on
+    /// either side would delete files the other still renders from.
+    /// </summary>
+    private void CopyExtractedFiles(DTexture dTexture)
+    {
+        var directory = SaveService.FileNames.ExtractedDirectory;
+        foreach (var layers in dTexture.Data.Textures.Values)
+            foreach (var layer in layers.OfType<DecalLayer>().Where(l => l.LocalImageFile.Length > 0))
+                try
+                {
+                    var copy = $"{dTexture.Identifier:N}_stamp_{Guid.NewGuid():N}.png";
+                    File.Copy(Path.Combine(directory, layer.LocalImageFile), Path.Combine(directory, copy));
+                    layer.LocalImageFile = copy;
+                }
+                catch (Exception ex)
+                {
+                    DynamicTextureManager.Log.Warning($"Could not copy extracted stamp {layer.LocalImageFile} for the clone: {ex.Message}");
+                }
+
+        foreach (var (gamePath, source) in dTexture.Data.TextureSourcePaths.ToList())
+        {
+            if (!source.StartsWith(directory, StringComparison.OrdinalIgnoreCase) || !File.Exists(source))
+                continue;
+
+            try
+            {
+                var copy = SaveService.FileNames.ExtractedSourceFile(dTexture.Identifier, gamePath);
+                File.Copy(source, copy, true);
+                dTexture.Data.TextureSourcePaths[gamePath] = copy;
+            }
+            catch (Exception ex)
+            {
+                DynamicTextureManager.Log.Warning($"Could not copy cleaned source for {gamePath} for the clone: {ex.Message}");
+            }
+        }
     }
 
     public void Delete(DTexture dTexture)
