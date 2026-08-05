@@ -1,13 +1,26 @@
 # Dynamic Texture Manager
 
 A companion plugin for [Penumbra](https://github.com/xivdev/Penumbra) that manages **overlay
-mods**: pick a target — gear you are wearing, an item, or an installed Penumbra mod's files —
-stamp decals onto it, recolor them, tune the surface finish, and apply the result as a
-plugin-managed persistent mod in Penumbra.
+mods**: pick a target — gear you are wearing, your body, or your hair — stamp decals onto it,
+recolor them, tune the surface finish, convert hair and tails to an animated glowing effect,
+and apply the result as a plugin-managed persistent mod in Penumbra.
 
 ## Status
 
-Early work in progress. Nothing here is stable yet.
+In active development. Stable releases go out on the default channel; a rolling beta is
+available by enabling testing builds for the plugin in the installer. Expect rough edges —
+feedback and bug reports are welcome on the issue tracker.
+
+## AI usage disclosure
+
+This plugin is developed as a human-directed AI collaboration, at what the
+[Dalamud AI usage policy](https://dalamud.dev/plugin-publishing/ai-policy) calls the
+**Copilot** level: a large share of the implementation is written by an AI assistant
+(Claude), while a human plans the features, directs the work, reviews the changes, and
+tests the results in game with each release. The commit history reflects this openly
+(AI-assisted commits carry a `Co-Authored-By` trailer).
+
+The plugin icon is AI-generated.
 
 ## Installing
 
@@ -19,114 +32,40 @@ Add this repository to Dalamud's custom plugin repositories:
 
 Requires [Penumbra](https://github.com/xivdev/Penumbra) to be installed and enabled.
 
-## Guide
+## Concepts
 
-### Concepts
+- **dTexture** — one overlay project: a source (which pieces to edit), its decal layers, and
+  its colorset edits. Each dTexture builds into exactly one Penumbra mod.
+- **Decal** — an image from your library, stamped onto a material. Placed directly on the 3D
+  model, it conforms to the surface and carries per-layer colors, finish, and size.
+- **Generated mod** — pressing **Build** writes a real, self-contained mod into Penumbra.
+  Built mods bake everything in: they keep working with the plugin unloaded.
 
-- **dTexture** — one overlay definition: a source (which gear/materials to edit), its decal
-  layers, and its colorset edits. Each dTexture builds into exactly one Penumbra mod. The
-  main window lists your dTextures in a folder tree on the left (like Glamourer designs).
-- **Decal** — an image from your decal library, stamped onto a material. Decals can be
-  placed directly on the 3D model and carry per-layer settings: position, size, rotation,
-  colors, opacity, and surface finish.
-- **Generated mod** — pressing **Build** (hammer button) writes a real, self-contained mod
-  into Penumbra (under a `DynamicTextureManager/` sort folder). Built mods bake everything
-  in: they keep working with the plugin unloaded and survive game restarts.
+## Documentation
 
-### Quick start
+Full documentation lives in the
+[wiki](https://github.com/VirstaXIV/DynamicTextureManager/wiki).
 
-1. Open the main window and create a new dTexture in the left-hand list.
-2. **Source tab** — pick what to edit: a worn equipment slot, an item, or an installed
-   Penumbra mod's files. This resolves the materials and textures the decals will target.
-3. **Decals tab** — pick the material from the dropdown, then **Add Decal from Library…**
-   (or **Import Decal…** to bring in a new image and attach it in one step). Supported
-   formats: PNG, JPG, DDS, BMP, TGA — everything is normalized to PNG in the library.
-4. Place the decal in the embedded 3D viewport: left-click stamps it onto the model at the
-   cursor, drag moves it, mouse wheel zooms, right-drag orbits, Ctrl+wheel resizes,
-   Shift+wheel rotates. The decal conforms to the surface and follows it across UV seams.
-5. Adjust colors and finish (see below), then press the **hammer** to build the mod.
-   With **Auto Rebuild** enabled (default), later edits rebuild the mod automatically.
+User guide:
 
-### Colorset decals and colors
+- [Getting Started](https://github.com/VirstaXIV/DynamicTextureManager/wiki/Getting-Started) —
+  install, first decal, first build
+- [Sources](https://github.com/VirstaXIV/DynamicTextureManager/wiki/Sources) —
+  picking gear, body and hair pieces
+- [Decals](https://github.com/VirstaXIV/DynamicTextureManager/wiki/Decals) —
+  placement, recoloring, surface finish, extraction, Manage Colorset
+- [Hair and the Animated Effect](https://github.com/VirstaXIV/DynamicTextureManager/wiki/Hair-and-the-Animated-Effect) —
+  Shine and the animated glow for hair and tails
+- [Library, Settings and Troubleshooting](https://github.com/VirstaXIV/DynamicTextureManager/wiki/Library-Settings-and-Troubleshooting)
 
-Most current (Dawntrail) gear has no diffuse texture — its colors come from the material's
-colorset table, indexed by an ID texture. On such gear, decals work through the colorset:
+Technical documentation — full disclosure of how each mechanism works, including the
+formulas and reverse-engineered shader facts the implementation is built on:
 
-- The decal image is quantized to at most **Max Colors** colors (default 6, configurable).
-- Each color claims one free colorset slot; the decal's shape is written into the ID map so
-  those pixels render through the claimed slots. The gear's baked cloth shading stays
-  visible on the decal.
-- Every color gets its own recolor swatch in the layer — recolor parts of the decal without
-  touching the image. The extracted reference swatch stays next to it, and the eye icon
-  highlights on your character exactly what a slot colors.
-- **Dyeable** makes the claimed slots follow the gear's dye channels (the dye template is
-  detected from how the rest of the gear dyes).
-- If not enough free slots exist, the layer disables itself with an error — lower Max
-  Colors, or free slots via **Manage Colorset** (below).
-
-On materials with a diffuse texture, decals blend into the texture directly instead.
-
-### Surface finish and material effects
-
-Under **Material Effects** on each layer:
-
-- **Normal Smoothing** flattens the cloth/skin bump detail under the decal, like a print
-  sitting on top of the fabric.
-- **Surface Finish** — Keep / Matte / Glossy / Custom — controls how the surface responds
-  to light under the decal. Custom exposes raw **Roughness** and **Specular Scale**
-  sliders. On colorset gear this is written into the claimed colorset rows (the actual
-  shine driver), plus the material's mask map; a finished decal is treated as a dielectric
-  print, so it stays matte even on metal armor.
-- **Effect Scale** grows or shrinks the affected footprint relative to the decal.
-
-### The Decal Library
-
-Open it with the **Images** button on the main window's title bar. The library is shared
-across all dTextures:
-
-- Grid of thumbnails with **search**, **sort** (name/date), and free-form **tags** — click
-  tag chips to filter (all selected tags must match).
-- Select a decal to rename it, edit its tags, or delete it (Ctrl+Click). Deleting never
-  breaks already-built mods — they bake the pixels in.
-- **Presets**: on any placed layer, **Save Settings to Library** stores the layer's colors,
-  surface finish, opacity, and default size/rotation on the library entry. The next time
-  that decal is attached — on any gear — it starts from those settings. Everything remains
-  overridable per layer, and the preset can be cleared from the library window.
-- The same window doubles as the picker when adding a decal from the Decals tab, including
-  importing a new image on the spot.
-
-Decal images are stored in the plugin's config directory by default; a different folder can
-be chosen in the settings (existing images are moved over safely).
-
-### Manage Colorset
-
-On colorset gear, the Decals tab's **Manage Colorset** section gives you slot-level control:
-
-- A list of all 16 slots showing what is free, claimed by decals, or used by the gear —
-  with a **Usable** override for slots the scanner blocks over a few stray pixels.
-- **Extraction**: decals that gear authors baked into the ID map can be lifted out into
-  their own layers (and into the decal library as images). An extracted decal can be moved,
-  recolored, and disabled independently of the garment; removing it restores the original.
-
-### Textures tab
-
-A view-only inspector: every texture of the selected material as source vs. generated,
-with zoom/pan, a UV-seam overlay, and a "Colorize" mode that renders ID maps through the
-live colorset colors.
-
-### Settings
-
-The cog button opens the configuration: auto-rebuild, delete-mod-with-dTexture, default
-decal colors, and the decal storage folder.
-
-## Technical notes
-
-- Applying a dTexture builds a real mod folder inside Penumbra's mod directory and
-  registers, enables, and prioritizes it via Penumbra's IPC.
-- Material colorset edits are written directly into the `.mtrl`; texture edits are
-  composited in RGBA and BC-compressed through Penumbra's texture-conversion IPC.
-- Rebuilds always start from the captured pristine source files, so layers never compound
-  onto the plugin's own output.
+- [Colorset Decals and the ID Map](https://github.com/VirstaXIV/DynamicTextureManager/wiki/Colorset-Decals-and-the-ID-Map)
+- [Surface Projection and Decal Baking](https://github.com/VirstaXIV/DynamicTextureManager/wiki/Surface-Projection-and-Decal-Baking)
+- [The Composite and Build Pipeline](https://github.com/VirstaXIV/DynamicTextureManager/wiki/The-Composite-and-Build-Pipeline)
+- [The Animated Effect](https://github.com/VirstaXIV/DynamicTextureManager/wiki/The-Animated-Effect)
+- [The 3D Preview System](https://github.com/VirstaXIV/DynamicTextureManager/wiki/The-3D-Preview-System)
 
 ## Building
 
