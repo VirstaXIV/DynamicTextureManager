@@ -32,6 +32,14 @@ Add this repository to Dalamud's custom plugin repositories:
 
 Requires [Penumbra](https://github.com/xivdev/Penumbra) to be installed and enabled.
 
+## Documentation
+
+Full documentation lives in the
+[wiki](https://github.com/VirstaXIV/DynamicTextureManager/wiki): a step-by-step **user
+guide** per section of the plugin, and **technical documentation** that fully discloses
+how each mechanism works — including the formulas and reverse-engineered shader facts the
+implementation is built on.
+
 ## Guide
 
 ### Concepts
