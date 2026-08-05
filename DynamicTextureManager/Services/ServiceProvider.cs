@@ -12,13 +12,10 @@ namespace DynamicTextureManager.Services;
 public static class ServiceProvider
 {
     public static ServiceManager CreateProvider(IDalamudPluginInterface pluginInterface, MainLogger log,
-        OtterGui.Log.Logger otterLog, DynamicTextureManager dynamicTextureManager)
+        DynamicTextureManager dynamicTextureManager)
     {
-        // The OtterGui logger stays registered for the OtterGui components (file system
-        // selector) until they migrate to Luna; everything else logs through Luna.
         var services = new ServiceManager(log)
                        .AddDalamudServices(pluginInterface)
-                       .AddExistingService(otterLog)
                        .AddMeta()
                        .AddInterop()
                        .AddEvents()
@@ -71,7 +68,7 @@ public static class ServiceProvider
                     .AddSingleton<DecalLibraryPanel>()
                     .AddSingleton<DecalLibraryWindow>()
                     .AddSingleton<DTMWindowSystem>()
-                    .AddSingleton<DTMFileSystemSelector>()
+                    .AddSingleton<DTMFileSystemDrawer>()
                     .AddSingleton<UI.Panels.SourceTab>()
                     .AddSingleton<UI.Panels.DecalsTab>()
                     .AddSingleton<DTMPanel>();
