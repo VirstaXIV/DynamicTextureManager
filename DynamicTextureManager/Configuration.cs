@@ -105,15 +105,16 @@ public class Configuration: IPluginConfiguration, ISavable
     
     public string ToFilePath(FilenameService fileNames) => fileNames.ConfigFile;
 
+    [JsonIgnore] private string? _snapshot;
+
+    /// <summary> Serialize on the calling thread — the save service writes on a background task. </summary>
+    internal void CaptureSnapshot()
+        => _snapshot = JsonConvert.SerializeObject(this, Formatting.Indented);
+
     public void Save(Stream stream)
     {
         using var writer = new StreamWriter(stream, System.Text.Encoding.UTF8, leaveOpen: true);
-        using var jWriter = new JsonTextWriter(writer);
-        jWriter.Formatting = Formatting.Indented;
-        var serializer = new JsonSerializer {
-            Formatting = Formatting.Indented
-        };
-        serializer.Serialize(jWriter, this);
+        writer.Write(_snapshot ?? JsonConvert.SerializeObject(this, Formatting.Indented));
     }
     
 

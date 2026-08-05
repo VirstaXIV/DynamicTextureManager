@@ -25,7 +25,6 @@ public sealed class DTexture : DTextureBase, ISavable, IFileSystemValue<DTexture
     public DateTimeOffset               CreationDate           { get; internal init; }
     public DateTimeOffset               LastEdit               { get; internal set; }
     public string                       Name                   { get; internal set; } = string.Empty;
-    public int                          Index                  { get; internal set; }
 
     public string Incognito
         => Identifier.ToString()[..8];
@@ -101,6 +100,15 @@ public sealed class DTexture : DTextureBase, ISavable, IFileSystemValue<DTexture
     
     #region ISavable
 
+    private JObject? _snapshot;
+
+    /// <summary>
+    /// Serialize on the calling (framework) thread — the save service writes on a
+    /// background task, and the live data must not be enumerated while the UI edits it.
+    /// </summary>
+    internal void CaptureSnapshot()
+        => _snapshot = JsonSerialize();
+
     public string ToFilePath(FilenameService fileNames)
         => fileNames.DTextureFile(this);
 
@@ -112,7 +120,7 @@ public sealed class DTexture : DTextureBase, ISavable, IFileSystemValue<DTexture
         {
             Formatting = Formatting.Indented,
         };
-        var obj = JsonSerialize();
+        var obj = _snapshot ?? JsonSerialize();
         obj.WriteTo(j);
     }
 

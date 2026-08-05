@@ -2,7 +2,6 @@ using System;
 using Dalamud.Game.Command;
 using Dalamud.Plugin.Services;
 using DynamicTextureManager.UI;
-using IService = Luna.IService;
 using IApiService = Luna.IApiService;
 
 namespace DynamicTextureManager.Services;

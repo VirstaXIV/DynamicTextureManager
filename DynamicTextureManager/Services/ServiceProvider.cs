@@ -63,9 +63,7 @@ public static class ServiceProvider
 
     private static ServiceManager AddUi(this ServiceManager services)
         => services.AddSingleton<MainWindow>()
-                    .AddSingleton<MainWindowPosition>()
                     .AddSingleton<ConfigWindow>()
-                    .AddSingleton<ConfigWindowPosition>()
                     .AddSingleton<DecalLibraryPanel>()
                     .AddSingleton<DecalLibraryWindow>()
                     .AddSingleton<DTMWindowSystem>()

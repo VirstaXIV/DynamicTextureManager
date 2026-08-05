@@ -5,23 +5,13 @@ using Dalamud.Interface.Windowing;
 using DynamicTextureManager.ModGeneration;
 using Luna;
 using Im = ImSharp.Im;
-using IService = Luna.IService;
 using TitleBarButton = Dalamud.Interface.Windowing.TitleBarButton;
 using Window = Dalamud.Interface.Windowing.Window;
 
 namespace DynamicTextureManager.UI;
 
-public class MainWindowPosition : IService
-{
-    public bool IsOpen { get; set; }
-    public Vector2 Position { get; set; }
-    public Vector2 Size { get; set; }
-}
-
 public class MainWindow : Window, IDisposable
 {
-    private readonly Configuration _configuration;
-    private readonly MainWindowPosition _position;
     private readonly ConfigWindow _configWindow;
 
     private readonly DTMPanel _panel;
@@ -29,8 +19,8 @@ public class MainWindow : Window, IDisposable
     private readonly EditPreviewer _previewer;
     private readonly RowHighlighter _highlighter;
 
-    public MainWindow(DTMFileSystemDrawer selector, DTMPanel panel, Configuration configuration,
-        MainWindowPosition position, ConfigWindow configWindow, DecalLibraryWindow decalLibraryWindow,
+    public MainWindow(DTMFileSystemDrawer selector, DTMPanel panel,
+        ConfigWindow configWindow, DecalLibraryWindow decalLibraryWindow,
         EditPreviewer previewer, RowHighlighter highlighter)
         : base("Dynamic Texture Manager")
     {
@@ -41,8 +31,6 @@ public class MainWindow : Window, IDisposable
             MinimumSize = new Vector2(800, 400),
             MaximumSize = new Vector2(float.MaxValue, float.MaxValue)
         };
-        _position = position;
-        _configuration = configuration;
         _configWindow = configWindow;
         _panel = panel;
         _layout = new SelectorLayout(selector, panel);
@@ -92,9 +80,6 @@ public class MainWindow : Window, IDisposable
         if (!ImSharp.ImSharpConfiguration.IsInitialized)
             return;
 
-        _position.Size = Im.Window.Size;
-        _position.Position = Im.Window.Position;
-
         _layout.Draw();
     }
 
@@ -136,7 +121,10 @@ public class MainWindow : Window, IDisposable
             => Im.Window.Width * 0.5f;
 
         protected override void SetWidth(float width, ScalingMode mode)
-            => _width = new TwoPanelWidth(width, mode);
+            // The callback delivers the child's actual pixel width, but ComputeWidth
+            // multiplies Absolute widths by the global scale — store unscaled units or
+            // every drag compounds the scale at UI scales other than 1.0.
+            => _width = new TwoPanelWidth(mode is ScalingMode.Absolute ? width / Im.Style.GlobalScale : width, mode);
 
         public void Draw()
             => Draw(_width);

@@ -11,7 +11,6 @@ using DynamicTextureManager.DTextures.Data;
 using DynamicTextureManager.ModGeneration;
 using ImSharp;
 using Luna;
-using SixLabors.ImageSharp.PixelFormats;
 // Both ImSharp and ImageSharp define an Rgba32; this file's pixel work is ImageSharp's.
 using Rgba32 = SixLabors.ImageSharp.PixelFormats.Rgba32;
 
