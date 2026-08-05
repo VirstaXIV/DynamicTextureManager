@@ -21,12 +21,6 @@ public sealed class DTextureChanged() : EventWrapper<DTextureChanged.Type, DText
         
         /// <summary> An existing dTexture was deleted. </summary>
         Deleted,
-        
-        /// <summary> Invoked on full reload. </summary>
-        ReloadedAll,
-
-        /// <summary> An existing dTexture was renamed. </summary>
-        Renamed,
     }
 
     public enum Priority

@@ -17,9 +17,7 @@ public sealed class DTexture : DTextureBase, ISavable
 
     internal DTexture(DTexture other)
         : base(other)
-    {
-        Description            = other.Description;
-    }
+    { }
 
     public const int FileVersion = 2;
 
@@ -27,7 +25,6 @@ public sealed class DTexture : DTextureBase, ISavable
     public DateTimeOffset               CreationDate           { get; internal init; }
     public DateTimeOffset               LastEdit               { get; internal set; }
     public LowerString                  Name                   { get; internal set; } = LowerString.Empty;
-    public string                       Description            { get; internal set; } = string.Empty;
     public int                          Index                  { get; internal set; }
 
     public string Incognito
@@ -46,8 +43,6 @@ public sealed class DTexture : DTextureBase, ISavable
             ["CreationDate"]           = CreationDate,
             ["LastEdit"]               = LastEdit,
             ["Name"]                   = Name.Text,
-            ["Description"]            = Description,
-            ["WriteProtected"]         = WriteProtected(),
             ["Data"]                   = Data.Serialize()
         };
         return ret;
@@ -66,14 +61,12 @@ public sealed class DTexture : DTextureBase, ISavable
             CreationDate = creationDate,
             Identifier   = json["Identifier"]?.ToObject<Guid>() ?? throw new ArgumentNullException("Identifier"),
             Name         = new LowerString(json["Name"]?.ToObject<string>() ?? throw new ArgumentNullException("Name")),
-            Description  = json["Description"]?.ToObject<string>() ?? string.Empty,
             LastEdit     = json["LastEdit"]?.ToObject<DateTimeOffset>() ?? creationDate
         };
         
         if (dTexture.LastEdit < creationDate)
             dTexture.LastEdit = creationDate;
-        
-        dTexture.SetWriteProtected(json["WriteProtected"]?.ToObject<bool>() ?? false);
+
         // Version 1 files carry no payload and load with empty data.
         dTexture.SetDTextureData(DTextureData.Load(json["Data"] as JObject));
         return dTexture;
