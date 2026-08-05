@@ -2,17 +2,14 @@ using System;
 using System.Collections.Generic;
 using System.IO;
 using System.Linq;
-using Dalamud.Bindings.ImGui;
 using DynamicTextureManager.DTextures;
 using DynamicTextureManager.DTextures.Data;
 using DynamicTextureManager.Interop;
 using DynamicTextureManager.ModGeneration;
 using DynamicTextureManager.ModGeneration.Shaders;
 using DynamicTextureManager.Services;
-using OtterGui.Extensions;
-using OtterGui.Raii;
+using ImSharp;
 using IService = Luna.IService;
-using OtterGui.Text;
 
 namespace DynamicTextureManager.UI.Panels;
 
@@ -75,7 +72,7 @@ public sealed class SourceTab(
         }
 
         DrawCurrentSource(dTexture, _conflicts);
-        ImGui.Separator();
+        Im.Separator();
         DrawPlayerPicker(dTexture, _conflicts);
     }
 
@@ -101,62 +98,59 @@ public sealed class SourceTab(
         var source = dTexture.Data.Source;
         if (source.IsEmpty)
         {
-            ImUtf8.Text("Nothing here yet. Load your worn gear, skin or hair below and add a source — it becomes a canvas in this group."u8);
+            Im.Text("Nothing here yet. Load your worn gear, skin or hair below and add a source — it becomes a canvas in this group."u8);
             return;
         }
 
         var units = _units;
 
-        ImUtf8.TextWrapped($"Canvases ({units.Count}) — every canvas rebuilds from its captured source, so changes to the base mod carry over on the next build.");
+        Im.TextWrapped($"Canvases ({units.Count}) — every canvas rebuilds from its captured source, so changes to the base mod carry over on the next build.");
 
         string? remove = null;
-        using (var table = ImUtf8.Table("##sourceUnits"u8, 4, ImGuiTableFlags.SizingStretchProp | ImGuiTableFlags.RowBg))
+        using (var table = Im.Table.Begin("##sourceUnits"u8, 4, TableFlags.SizingStretchProp | TableFlags.RowBackground))
         {
             if (!table)
                 return;
 
-            ImUtf8.TableSetupColumn("Canvas"u8);
-            ImUtf8.TableSetupColumn("Source"u8);
-            ImUtf8.TableSetupColumn("Materials"u8);
-            ImUtf8.TableSetupColumn(""u8, ImGuiTableColumnFlags.WidthFixed);
-            ImGui.TableHeadersRow();
+            table.SetupColumn("Canvas"u8);
+            table.SetupColumn("Source"u8);
+            table.SetupColumn("Materials"u8);
+            table.SetupColumn(""u8, TableColumnFlags.WidthFixed);
+            table.HeaderRow();
 
-            foreach (var (unit, idx) in units.WithIndex())
+            foreach (var (idx, unit) in units.Index())
             {
-                using var id      = ImUtf8.PushId(idx);
+                using var id      = Im.Id.Push(idx);
                 var       primary = unit.FirstOrDefault(m => !m.Overlay) ?? unit.First();
 
-                ImGui.TableNextColumn();
+                table.NextColumn();
                 var label = $"{SourceUnits.UnitLabel(primary.MdlGamePath, primary.GamePath)}: {primary.Label}";
                 if (primary.Overlay)
                 {
-                    ImUtf8.Text(label);
+                    Im.Text(label);
                 }
                 else
                 {
-                    if (ImUtf8.Selectable(label))
+                    if (Im.Selectable(label))
                         decalsTab.SelectMaterial(primary.GamePath);
-                    if (ImGui.IsItemHovered())
-                        ImUtf8.HoverTooltip("Click to edit this piece — its textures and model show in the preview column."u8);
+                    Im.Tooltip.OnHover("Click to edit this piece — its textures and model show in the preview column."u8);
                 }
 
                 foreach (var material in unit)
                     DrawConflictMarker(dTexture, material.GamePath, conflicts);
 
-                ImGui.TableNextColumn();
+                table.NextColumn();
                 DrawModCell(primary.ModDirectory, primary.ModName, primary.ActualPath);
 
-                ImGui.TableNextColumn();
+                table.NextColumn();
                 var materialCount = unit.Count();
-                ImUtf8.Text(materialCount == 1 ? primary.GamePath : $"{materialCount} materials");
-                if (ImGui.IsItemHovered())
-                    ImUtf8.HoverTooltip(string.Join("\n", unit.Select(m => $"{m.Label}: {m.GamePath}")));
+                Im.Text(materialCount == 1 ? primary.GamePath : $"{materialCount} materials");
+                Im.Tooltip.OnHover(HoveredFlags.None, $"{string.Join("\n", unit.Select(m => $"{m.Label}: {m.GamePath}"))}");
 
-                ImGui.TableNextColumn();
-                if (ImUtf8.SmallButton("Remove"u8))
+                table.NextColumn();
+                if (Im.SmallButton("Remove"u8))
                     remove = unit.Key;
-                if (ImGui.IsItemHovered())
-                    ImUtf8.HoverTooltip("Remove this piece and everything belonging to it. Its colorset edits and decals are removed too."u8);
+                Im.Tooltip.OnHover("Remove this piece and everything belonging to it. Its colorset edits and decals are removed too."u8);
             }
         }
 
@@ -170,12 +164,11 @@ public sealed class SourceTab(
         if (!conflicts.TryGetValue(gamePath, out var names))
             return;
 
-        ImGui.SameLine();
-        using (ImRaii.PushColor(ImGuiCol.Text, WarningColor))
-            ImUtf8.Text("[conflict]"u8);
-        if (ImGui.IsItemHovered())
-            ImUtf8.HoverTooltip(
-                $"Also targeted by: {string.Join(", ", names)}.\nBoth canvas groups build mods overriding this material — the enabled one with the higher priority wins.\nThis group's priority is {overlayMods.EffectivePriority(current)}; adjust it on the Generated Mod line.");
+        Im.Line.Same();
+        using (ImGuiColor.Text.Push(new Rgba32(WarningColor)))
+            Im.Text("[conflict]"u8);
+        Im.Tooltip.OnHover(HoveredFlags.None,
+            $"Also targeted by: {string.Join(", ", names)}.\nBoth canvas groups build mods overriding this material — the enabled one with the higher priority wins.\nThis group's priority is {overlayMods.EffectivePriority(current)}; adjust it on the Generated Mod line.");
     }
 
     /// <summary> Shows the owning mod of a file as a clickable link opening it in Penumbra, or "Vanilla". </summary>
@@ -183,51 +176,50 @@ public sealed class SourceTab(
     {
         if (modDirectory.Length == 0)
         {
-            ImUtf8.Text("Vanilla"u8);
-            if (ImGui.IsItemHovered())
-                ImUtf8.HoverTooltip("Unmodified game file."u8);
+            Im.Text("Vanilla"u8);
+            Im.Tooltip.OnHover("Unmodified game file."u8);
             return;
         }
 
-        if (ImUtf8.SmallButton($"{modName}##openMod"))
+        if (Im.SmallButton($"{modName}##openMod"))
             penumbra.OpenModInPenumbra(modDirectory);
-        if (ImGui.IsItemHovered())
-            ImUtf8.HoverTooltip($"Provided by mod \"{modName}\" ({modDirectory}).\nFile: {actualPath}\nClick to open this mod in Penumbra.");
+        Im.Tooltip.OnHover(HoveredFlags.None,
+            $"Provided by mod \"{modName}\" ({modDirectory}).\nFile: {actualPath}\nClick to open this mod in Penumbra.");
     }
 
     private void DrawPlayerPicker(DTexture dTexture, Dictionary<string, List<string>> conflicts)
     {
         if (!penumbra.Available)
         {
-            ImUtf8.Text("Penumbra is not available."u8);
+            Im.Text("Penumbra is not available."u8);
             return;
         }
 
-        if (ImUtf8.Button("Add Worn Gear..."u8))
+        if (Im.Button("Add Worn Gear..."u8))
         {
             LoadPlayer(PickerMode.Gear);
-            ImGui.OpenPopup("##sourcePicker"u8);
+            Im.Popup.Open("##sourcePicker"u8);
         }
 
-        ImUtf8.HoverTooltip("Pick one of the worn equipment pieces to add — read live from your character through Penumbra."u8);
+        Im.Tooltip.OnHover("Pick one of the worn equipment pieces to add — read live from your character through Penumbra."u8);
 
-        ImGui.SameLine();
-        if (ImUtf8.Button("Add Skin..."u8))
+        Im.Line.Same();
+        if (Im.Button("Add Skin..."u8))
         {
             LoadPlayer(PickerMode.Skin);
-            ImGui.OpenPopup("##sourcePicker"u8);
+            Im.Popup.Open("##sourcePicker"u8);
         }
 
-        ImUtf8.HoverTooltip("Add your character's bare body (or face).\nDecals on skin bake into the skin texture like tattoos and conform to the body."u8);
+        Im.Tooltip.OnHover("Add your character's bare body (or face).\nDecals on skin bake into the skin texture like tattoos and conform to the body."u8);
 
-        ImGui.SameLine();
-        if (ImUtf8.Button("Add Hair / Tail..."u8))
+        Im.Line.Same();
+        if (Im.Button("Add Hair / Tail..."u8))
         {
             LoadPlayer(PickerMode.Hair);
-            ImGui.OpenPopup("##sourcePicker"u8);
+            Im.Popup.Open("##sourcePicker"u8);
         }
 
-        ImUtf8.HoverTooltip(
+        Im.Tooltip.OnHover(
             "Add your character's current hairstyle, tail or ears — the pieces the game colors with your hair and highlight colors.\nThey have no color texture — the game blends your colors by the normal map, so edits adjust shine or animate highlights.\nFurred tails (Miqo'te, Hrothgar) qualify; scale tails (Au Ra) are skin-shaded and cannot be edited here. Miqo'te ears are part of the hairstyle and come with it."u8);
 
         DrawPickerPopup(dTexture, conflicts);
@@ -241,28 +233,28 @@ public sealed class SourceTab(
     {
         // Without a floor the popup sizes to its longest unwrappable word and error text
         // wraps into a one-word-per-line column.
-        ImGui.SetNextWindowSizeConstraints(new System.Numerics.Vector2(360, 0) * ImUtf8.GlobalScale,
-            new System.Numerics.Vector2(700, 600) * ImUtf8.GlobalScale);
-        using var popup = ImUtf8.Popup("##sourcePicker"u8);
+        Im.Window.SetNextSizeConstraints(new System.Numerics.Vector2(360, 0) * Im.Style.GlobalScale,
+            new System.Numerics.Vector2(700, 600) * Im.Style.GlobalScale);
+        using var popup = Im.Popup.Begin("##sourcePicker"u8);
         if (!popup)
             return;
 
         if (_error.Length > 0)
         {
-            ImUtf8.TextWrapped(_error);
+            Im.TextWrapped(_error);
             return;
         }
 
         if (_groups.Count == 0)
         {
-            ImUtf8.Text("Nothing found on your character."u8);
+            Im.Text("Nothing found on your character."u8);
             return;
         }
 
         var sourceMaterials = dTexture.Data.Source.Materials;
-        foreach (var (group, groupIdx) in _groups.WithIndex())
+        foreach (var (groupIdx, group) in _groups.Index())
         {
-            using var id      = ImUtf8.PushId(groupIdx);
+            using var id      = Im.Id.Push(groupIdx);
             var       primary = group.Materials.FirstOrDefault(m => !m.IsOverlayPart) ?? group.Materials[0];
             var added = group.Materials.Any(m => sourceMaterials.Any(s
                 => string.Equals(s.GamePath, m.GamePath, StringComparison.OrdinalIgnoreCase)));
@@ -275,27 +267,27 @@ public sealed class SourceTab(
 
             var mod   = primary.ModName.Length > 0 ? primary.ModName : "Vanilla";
             var label = $"{group.Label}  —  {mod}";
-            using (ImRaii.Disabled(added || fromOverlay))
+            using (Im.Disabled(added || fromOverlay))
             {
-                if (ImUtf8.Selectable(label))
+                if (Im.Selectable(label))
                 {
                     AddGroup(dTexture, group);
-                    ImGui.CloseCurrentPopup();
+                    Im.Popup.CloseCurrent();
                 }
             }
 
-            if (ImGui.IsItemHovered(ImGuiHoveredFlags.AllowWhenDisabled))
-                ImUtf8.HoverTooltip(fromOverlay
+            Im.Tooltip.OnHover(HoveredFlags.AllowWhenDisabled,
+                $"{(fromOverlay
                     ? "A generated overlay currently owns files of this piece — disable it and reload to add it."
                     : added
                         ? "Already part of this mod's source."
-                        : string.Join("\n", group.Materials.Select(m => $"{m.Label}: {m.GamePath}")));
+                        : string.Join("\n", group.Materials.Select(m => $"{m.Label}: {m.GamePath}")))}");
 
             if (added)
             {
-                ImGui.SameLine();
-                using (ImRaii.PushColor(ImGuiCol.Text, 0xFF40C040u))
-                    ImUtf8.Text("(added)"u8);
+                Im.Line.Same();
+                using (ImGuiColor.Text.Push(new Rgba32(0xFF40C040u)))
+                    Im.Text("(added)"u8);
             }
 
             foreach (var material in group.Materials)
