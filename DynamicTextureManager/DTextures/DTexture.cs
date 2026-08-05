@@ -4,7 +4,6 @@ using DynamicTextureManager.Services;
 using Luna;
 using Newtonsoft.Json;
 using Newtonsoft.Json.Linq;
-using OtterGui.Classes;
 
 namespace DynamicTextureManager.DTextures;
 
@@ -25,7 +24,7 @@ public sealed class DTexture : DTextureBase, ISavable, IFileSystemValue<DTexture
     public Guid                         Identifier             { get; internal init; }
     public DateTimeOffset               CreationDate           { get; internal init; }
     public DateTimeOffset               LastEdit               { get; internal set; }
-    public LowerString                  Name                   { get; internal set; } = LowerString.Empty;
+    public string                       Name                   { get; internal set; } = string.Empty;
     public int                          Index                  { get; internal set; }
 
     public string Incognito
@@ -42,7 +41,7 @@ public sealed class DTexture : DTextureBase, ISavable, IFileSystemValue<DTexture
     public DataPath Path { get; } = new();
 
     public string DisplayName
-        => Name.Text;
+        => Name;
 
     /// <summary> The persistent identifier used by the file system files, matching the old sort_order.json keys. </summary>
     string IFileSystemValue.Identifier
@@ -60,7 +59,7 @@ public sealed class DTexture : DTextureBase, ISavable, IFileSystemValue<DTexture
             ["Identifier"]             = Identifier,
             ["CreationDate"]           = CreationDate,
             ["LastEdit"]               = LastEdit,
-            ["Name"]                   = Name.Text,
+            ["Name"]                   = Name,
             ["Data"]                   = Data.Serialize()
         };
         // Folder organization lives on the canvas group itself now; omit the defaults.
@@ -83,7 +82,7 @@ public sealed class DTexture : DTextureBase, ISavable, IFileSystemValue<DTexture
         {
             CreationDate = creationDate,
             Identifier   = json["Identifier"]?.ToObject<Guid>() ?? throw new ArgumentNullException("Identifier"),
-            Name         = new LowerString(json["Name"]?.ToObject<string>() ?? throw new ArgumentNullException("Name")),
+            Name         = json["Name"]?.ToObject<string>() ?? throw new ArgumentNullException("Name"),
             LastEdit     = json["LastEdit"]?.ToObject<DateTimeOffset>() ?? creationDate
         };
         

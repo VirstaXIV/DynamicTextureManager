@@ -86,7 +86,7 @@ public sealed class SourceTab(
             {
                 if (!map.TryGetValue(material.GamePath, out var names))
                     map[material.GamePath] = names = [];
-                names.Add($"{other.Name.Text} (priority {overlayMods.EffectivePriority(other)})");
+                names.Add($"{other.Name} (priority {overlayMods.EffectivePriority(other)})");
             }
         }
 

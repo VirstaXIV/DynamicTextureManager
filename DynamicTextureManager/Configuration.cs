@@ -6,11 +6,11 @@ using Dalamud.Configuration;
 using DynamicTextureManager.DTextures;
 using DynamicTextureManager.Services;
 using DynamicTextureManager.UI;
+using Dalamud.Game.ClientState.Keys;
 using Luna;
 using Newtonsoft.Json;
-using DoubleModifier = OtterGui.Classes.DoubleModifier;
+using Newtonsoft.Json.Linq;
 using ErrorEventArgs = Newtonsoft.Json.Serialization.ErrorEventArgs;
-using ModifierHotkey = OtterGui.Classes.ModifierHotkey;
 
 namespace DynamicTextureManager;
 
@@ -20,6 +20,7 @@ public class Configuration: IPluginConfiguration, ISavable
     public int OverlayPriority { get; set; } = 999;
     public bool DeleteModWithDTexture { get; set; } = true;
     public int DefaultDecalMaxColors { get; set; } = 6;
+    [JsonConverter(typeof(DoubleModifierCompatConverter))]
     public DoubleModifier DeleteDTextureModifier { get; set; } = new(ModifierHotkey.Control, ModifierHotkey.Shift);
 
     /// <summary> Folder decal images are stored in; empty uses the default inside the plugin config directory. </summary>
@@ -143,6 +144,45 @@ public class Configuration: IPluginConfiguration, ISavable
             if (mode == null && name.EndsWith('T'))
                 mode = ValidSortModes.FirstOrDefault(s => s.GetType().Name == name[..^1]);
             return mode;
+        }
+    }
+
+    /// <summary>
+    /// Reads both Luna's flat modifier shape and OtterGui's old nested one
+    /// ({"Modifier1": {"Modifier": 17}, ...}), so customized delete modifiers survive
+    /// the migration; writes Luna's flat shape.
+    /// </summary>
+    private class DoubleModifierCompatConverter : JsonConverter<DoubleModifier>
+    {
+        public override void WriteJson(JsonWriter writer, DoubleModifier value, JsonSerializer serializer)
+        {
+            writer.WriteStartObject();
+            writer.WritePropertyName("Modifier1");
+            writer.WriteValue((ushort)value.Modifier1.Modifier);
+            if (value.Modifier2.Modifier != ModifierHotkey.NoKey)
+            {
+                writer.WritePropertyName("Modifier2");
+                writer.WriteValue((ushort)value.Modifier2.Modifier);
+            }
+
+            writer.WriteEndObject();
+        }
+
+        public override DoubleModifier ReadJson(JsonReader reader, Type objectType, DoubleModifier existingValue, bool hasExistingValue,
+            JsonSerializer serializer)
+        {
+            var token = JToken.ReadFrom(reader);
+            var m1    = ReadKey(token["Modifier1"]);
+            var m2    = ReadKey(token["Modifier2"]);
+            return new DoubleModifier(new ModifierHotkey(m1), new ModifierHotkey(m2));
+
+            static VirtualKey ReadKey(JToken? value)
+                => value switch
+                {
+                    JObject nested => (VirtualKey)(nested["Modifier"]?.ToObject<ushort>() ?? 0),
+                    JValue         => (VirtualKey)(value.ToObject<ushort?>() ?? 0),
+                    _              => VirtualKey.NO_KEY,
+                };
         }
     }
 
