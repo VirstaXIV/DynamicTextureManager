@@ -887,6 +887,8 @@ public sealed class DecalsTab(
         if (_procSection.Draw(proc))
             Save(dTexture);
 
+        DrawFlowAnchorList(dTexture, proc);
+
         if (Im.SmallButton("Remove"u8))
             remove = idx;
         Im.Line.Same();
@@ -895,6 +897,90 @@ public sealed class DecalsTab(
         Im.Line.Same();
         if (Im.SmallButton("Down"u8) && idx < count - 1)
             swap = (idx, idx + 1);
+    }
+
+    /// <summary>
+    /// The guide anchors steering a procedural layer's flow: place each in the 3D preview
+    /// (click + drag combs the direction), exclusion anchors fade the pattern out instead.
+    /// </summary>
+    private void DrawFlowAnchorList(DTexture dTexture, ProceduralSurfaceLayer proc)
+    {
+        Im.Text("Flow Anchors"u8);
+        Im.Tooltip.OnHover("Points that steer the pattern's direction over the body. The pattern flows down the body where no anchor reaches."u8);
+
+        var removeAnchor = -1;
+        for (var i = 0; i < proc.Anchors.Count; ++i)
+        {
+            using var id = Im.Id.Push(i + 1000);
+            var anchor = proc.Anchors[i];
+
+            var placing = _viewport.FlowAnchorIndex(proc) == i;
+            Im.Text($"{i + 1}:");
+            Im.Line.Same();
+            if (Im.SmallButton(placing ? "Placing..."u8 : "Place"u8) && !placing)
+                _viewport.BeginFlowPlacement(proc, i, () => Save(dTexture));
+
+            Im.Line.Same();
+            var exclude = anchor.Exclude;
+            if (Im.Checkbox("Fade Out"u8, ref exclude))
+            {
+                anchor.Exclude = exclude;
+                Save(dTexture);
+            }
+
+            Im.Tooltip.OnHover("The pattern fades out around this anchor instead of following it."u8);
+
+            Im.Line.Same();
+            if (Im.SmallButton("Remove"u8))
+                removeAnchor = i;
+
+            if (anchor.Exclude)
+            {
+                Im.Item.SetNextWidthScaled(160);
+                var radiusCm = anchor.Radius * 100f;
+                if (Im.Slider("Radius (cm)"u8, ref radiusCm, "%.1f"u8, 1f, 50f))
+                {
+                    anchor.Radius = Math.Clamp(radiusCm, 1f, 50f) / 100f;
+                    Save(dTexture);
+                }
+
+                Im.Line.Same();
+                Im.Item.SetNextWidthScaled(160);
+                var featherCm = anchor.Feather * 100f;
+                if (Im.Slider("Fade (cm)"u8, ref featherCm, "%.1f"u8, 0.5f, 30f))
+                {
+                    anchor.Feather = Math.Clamp(featherCm, 0.5f, 30f) / 100f;
+                    Save(dTexture);
+                }
+            }
+            else
+            {
+                Im.Item.SetNextWidthScaled(160);
+                var strength = anchor.Strength;
+                if (Im.Slider("Strength"u8, ref strength, "%.2f"u8, 0.1f, 3f))
+                {
+                    anchor.Strength = Math.Clamp(strength, 0.1f, 3f);
+                    Save(dTexture);
+                }
+            }
+        }
+
+        if (removeAnchor >= 0)
+        {
+            if (_viewport.FlowAnchorIndex(proc) >= 0)
+                _viewport.EndPlacement();
+            proc.Anchors.RemoveAt(removeAnchor);
+            Save(dTexture);
+        }
+
+        if (Im.SmallButton("Add Anchor"u8))
+        {
+            proc.Anchors.Add(new FlowAnchor());
+            _viewport.BeginFlowPlacement(proc, proc.Anchors.Count - 1, () => Save(dTexture));
+            Save(dTexture);
+        }
+
+        Im.Tooltip.OnHover("Adds an anchor and starts placing it in the 3D preview."u8);
     }
 
     /// <summary>

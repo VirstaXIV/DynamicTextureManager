@@ -107,9 +107,14 @@ public sealed class MaterialMesh
             Connect(c2, c0);
         }
 
+        // Sorted so visit order never depends on hash-set iteration — geodesic walks
+        // tie-break on neighbor order, and builds must be byte-identical across runs.
         var neighbors = new List<int>[Positions.Length];
         for (var v = 0; v < Positions.Length; ++v)
+        {
             neighbors[v] = neighborSets[v] is { } set ? [.. set] : [];
+            neighbors[v].Sort();
+        }
 
         _adjacency = (canonical, neighbors);
         return _adjacency.Value;

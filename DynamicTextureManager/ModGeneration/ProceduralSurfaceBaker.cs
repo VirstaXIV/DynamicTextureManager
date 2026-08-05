@@ -125,8 +125,10 @@ public static class ProceduralSurfaceBaker
         public required Vector3[] Position;
         public required Vector3[] Normal;
         public required Vector3[] Flow;
+        public required float[]   FlowPotential;
         public required float[]   Weight;
         public required float[]   TexelsPerMeter;
+        public required bool      HasAnchorFlow;
     }
 
     /// <summary>
@@ -138,14 +140,17 @@ public static class ProceduralSurfaceBaker
     private static SurfaceFields? RasterizeFields(int width, int height, MaterialMesh mesh, ProceduralSurfaceLayer layer)
     {
         var texels = width * height;
+        var flow   = SurfaceFlowField.ComputeVertexFlow(mesh, layer.Anchors);
         var fields = new SurfaceFields
         {
             Covered        = new bool[texels],
             Position       = new Vector3[texels],
             Normal         = new Vector3[texels],
             Flow           = new Vector3[texels],
+            FlowPotential  = new float[texels],
             Weight         = new float[texels],
             TexelsPerMeter = new float[texels],
+            HasAnchorFlow  = flow != null,
         };
 
         var indices = mesh.Indices;
@@ -199,8 +204,13 @@ public static class ProceduralSurfaceBaker
                     if (w0 < 0f || w1 < 0f || w2 < 0f)
                         continue;
 
-                    var index  = y * width + x;
-                    var weight = 1f;
+                    var index = y * width + x;
+
+                    // The overlap tie-break compares final weights, so exclusion fades are
+                    // part of the weight before the comparison.
+                    var weight = flow != null
+                        ? flow.Exclusion[i0] * w0 + flow.Exclusion[i1] * w1 + flow.Exclusion[i2] * w2
+                        : 1f;
                     if (fields.Covered[index] && fields.Weight[index] >= weight)
                         continue;
 
@@ -210,8 +220,24 @@ public static class ProceduralSurfaceBaker
                     var normal = mesh.Normals[i0] * w0 + mesh.Normals[i1] * w1 + mesh.Normals[i2] * w2;
                     normal = normal.LengthSquared() > 1e-8f ? Vector3.Normalize(normal) : Vector3.UnitY;
                     fields.Normal[index]         = normal;
-                    fields.Flow[index]           = DefaultFlow(normal);
                     fields.TexelsPerMeter[index] = texelsPerMeter;
+
+                    // Anchor-driven flow interpolates across the triangle and re-projects onto
+                    // the sampled normal; vertices no anchor reaches (and layers with no
+                    // anchors) flow down the body by default.
+                    if (flow != null && (flow.HasFlow[i0] || flow.HasFlow[i1] || flow.HasFlow[i2]))
+                    {
+                        var d = flow.Direction[i0] * w0 + flow.Direction[i1] * w1 + flow.Direction[i2] * w2;
+                        d -= normal * Vector3.Dot(d, normal);
+                        fields.Flow[index] = d.LengthSquared() > 1e-8f ? Vector3.Normalize(d) : DefaultFlow(normal);
+                        fields.FlowPotential[index] = flow.Potential[i0] * w0 + flow.Potential[i1] * w1 + flow.Potential[i2] * w2;
+                    }
+                    else
+                    {
+                        fields.Flow[index]          = DefaultFlow(normal);
+                        fields.FlowPotential[index] = fields.Position[index].Y;
+                    }
+
                     any = true;
                 }
             }
@@ -327,11 +353,11 @@ public static class ProceduralSurfaceBaker
             }
             case SurfacePatternStyle.Stripes:
             {
-                // Stripes need the geodesic flow potential — placed with guide anchors in the
-                // flow stage. Until then: world-height bands jittered by noise, so the style
-                // previews sensibly. The amount is the duty cycle.
+                // Bands of the geodesic potential: with guide anchors the stripes wrap the
+                // body perpendicular to the flow (tiger stripes); without anchors the
+                // potential falls back to world height. The amount is the duty cycle.
                 var jitter = (ProceduralFields.Fbm3(layer.Seed + 55, pos * k, 3) - 0.5f) * layer.WarpStrength * 4f;
-                var s      = pos.Y * k * MathF.PI + jitter;
+                var s      = surface.FlowPotential[index] * k * MathF.PI + jitter;
                 var cut    = 1f - layer.Threshold;
                 coverage = ProceduralFields.Smooth(cut - 0.15f, cut + 0.15f, (MathF.Sin(s) + 1f) * 0.5f);
                 break;
