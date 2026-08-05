@@ -18,7 +18,7 @@ public static class CompositePlanner
     {
         /// <summary> Whether any contributing layer is surface-projected and needs mesh geometry. </summary>
         public bool NeedsMesh
-            => Layers.OfType<DecalLayer>().Any(l => l.Surface);
+            => Layers.Any(l => l.NeedsMeshGeometry);
     }
 
     /// <summary> The source material whose shader exposes a given texture game path. </summary>
@@ -50,8 +50,8 @@ public static class CompositePlanner
         var targets = new List<SiblingEffectTarget>();
         foreach (var (gamePath, layers) in data.Textures)
         {
-            var effectLayers = layers.OfType<DecalLayer>()
-                .Where(l => l.Enabled && l.HasMaterialEffects)
+            var effectLayers = layers
+                .Where(l => l.Enabled && l.HasSiblingEffects)
                 .ToList();
             if (effectLayers.Count == 0)
                 continue;
@@ -69,8 +69,7 @@ public static class CompositePlanner
 
                 // Only layers whose effect actually touches this slot.
                 var slotLayers = effectLayers
-                    .Where(d => info.Slot == TextureSlot.Normal ? d.NormalSmooth > 0f : d.WantsMaskEffect)
-                    .Cast<TextureLayer>()
+                    .Where(l => info.Slot == TextureSlot.Normal ? l.WantsNormalEffect : l.WantsMaskEffect)
                     .ToList();
                 if (slotLayers.Count == 0)
                     continue;

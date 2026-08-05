@@ -67,6 +67,7 @@ public sealed class CompositePreviewCache : IService, IDisposable
     private readonly ShaderHandlerRegistry _shaderHandlers;
     private readonly ITextureProvider      _textureProvider;
     private readonly DTextureChanged       _dTextureChanged;
+    private readonly Interop.SkinColorReader _skinColors;
 
     /// <summary>
     /// Exclude compares by reference — a layer's identity, not its (mutable) values. Path
@@ -86,8 +87,9 @@ public sealed class CompositePreviewCache : IService, IDisposable
 
     public CompositePreviewCache(TextureIO textureIO, TextureCompositor compositor, OverlayModManager overlayMods,
         ModelUvReader uvReader, SourceFileProvider sourceFiles, ShaderHandlerRegistry shaderHandlers,
-        ITextureProvider textureProvider, DTextureChanged dTextureChanged)
+        ITextureProvider textureProvider, DTextureChanged dTextureChanged, Interop.SkinColorReader skinColors)
     {
+        _skinColors      = skinColors;
         _textureIO       = textureIO;
         _compositor      = compositor;
         _overlayMods     = overlayMods;
@@ -207,6 +209,7 @@ public sealed class CompositePreviewCache : IService, IDisposable
         List<DTextures.Data.TextureLayer> effectLayers = [];
         var effectSlot = TextureSlot.Unknown;
         MaterialMesh? mesh = null;
+        System.Numerics.Vector3? skinTone = null;
         try
         {
             diskPath = _overlayMods.GetOrCaptureTextureSource(dTexture, gamePath);
@@ -232,7 +235,7 @@ public sealed class CompositePreviewCache : IService, IDisposable
             // Sibling-target discovery parses materials — skip it entirely unless some layer
             // actually carries material effects.
             var anyEffects = dTexture.Data.Textures.Values
-                .Any(ls => ls.Any(l => l is DTextures.Data.DecalLayer { Enabled: true, HasMaterialEffects: true }));
+                .Any(ls => ls.Any(l => l.Enabled && l.HasSiblingEffects));
             var target = anyEffects
                 ? CompositePlanner.SiblingEffectTargets(dTexture.Data, _shaderHandlers, _sourceFiles)
                     .FirstOrDefault(t => string.Equals(t.GamePath, gamePath, StringComparison.OrdinalIgnoreCase))
@@ -243,13 +246,19 @@ public sealed class CompositePreviewCache : IService, IDisposable
                 effectLayers = target.Layers.Where(l => !ReferenceEquals(l, excludeLayer)).ToList();
             }
 
-            var needsMesh = layers.Any(l => l is DTextures.Data.DecalLayer { Surface: true, Enabled: true })
+            var needsMesh = layers.Any(l => l.Enabled && l.NeedsMeshGeometry)
              || (target?.NeedsMesh ?? false);
             if (needsMesh)
             {
                 var owner = target?.Owner ?? CompositePlanner.FindTextureOwner(dTexture.Data, gamePath, _shaderHandlers, _sourceFiles);
                 mesh = owner != null ? _uvReader.GetMesh(owner) : null;
             }
+
+            // Live customize state is framework-thread only; the composite below runs in the
+            // background, so the tone is captured here — matching what a build would bake.
+            if (layers.Concat(effectLayers).Any(l => l is DTextures.Data.ProceduralSurfaceLayer { Enabled: true, TintFromSkin: true })
+             && _skinColors.TryGetLocalPlayerSkin(out var liveSkin))
+                skinTone = liveSkin;
         }
         catch (Exception ex)
         {
@@ -285,7 +294,7 @@ public sealed class CompositePreviewCache : IService, IDisposable
                     entry.PristineStampTicks = stamp;
                 }
 
-                entry.Composited = _compositor.CompositeFull(decoded, layers, effectLayers, effectSlot, mesh);
+                entry.Composited = _compositor.CompositeFull(decoded, layers, effectLayers, effectSlot, mesh, skinTone);
                 ++entry.Version;
             }
             catch (Exception ex)
