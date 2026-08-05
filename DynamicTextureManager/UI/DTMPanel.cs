@@ -11,7 +11,7 @@ namespace DynamicTextureManager.UI;
 
 public class DTMPanel : IDisposable
 {
-    private readonly DTMFileSystemSelector _selector;
+    private readonly DTMFileSystemDrawer _selector;
     private readonly OverlayModManager _overlayMods;
     private readonly PenumbraService _penumbra;
     private readonly EditPreviewer _previewer;
@@ -20,7 +20,7 @@ public class DTMPanel : IDisposable
     private readonly HeaderDrawer.Button[] _leftButtons;
     private readonly HeaderDrawer.Button[] _rightButtons;
 
-    public DTMPanel(DTMFileSystemSelector selector, OverlayModManager overlayMods, PenumbraService penumbra, EditPreviewer previewer,
+    public DTMPanel(DTMFileSystemDrawer selector, OverlayModManager overlayMods, PenumbraService penumbra, EditPreviewer previewer,
         SourceTab sourceTab, DecalsTab decalsTab)
     {
         _selector     = selector;

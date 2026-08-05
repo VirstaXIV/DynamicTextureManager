@@ -15,9 +15,6 @@ public sealed class DynamicTextureManager : IDalamudPlugin
 
     public static readonly MainLogger Log = new("DynamicTextureManager");
 
-    /// <summary> Logger instance for the remaining OtterGui components until they migrate to Luna. </summary>
-    internal static readonly OtterGui.Log.Logger OtterLog = new();
-
     public static MessageService Messager { get; private set; } = null!;
     private readonly ServiceManager _services;
 
@@ -25,7 +22,7 @@ public sealed class DynamicTextureManager : IDalamudPlugin
     {
         try
         {
-            _services = ServiceProvider.CreateProvider(pluginInterface, Log, OtterLog, this);
+            _services = ServiceProvider.CreateProvider(pluginInterface, Log, this);
             _services.EnsureRequiredServices();
             Messager  = _services.GetService<MessageService>();
             Colors.SetColors(_services.GetService<Configuration>());

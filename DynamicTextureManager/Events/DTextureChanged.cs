@@ -27,6 +27,9 @@ public sealed class DTextureChanged(LunaLogger log)
         /// <seealso cref="DTextureFileSystem.OnDTextureChange"/>
         DTextureFileSystem = 0,
 
+        /// <seealso cref="UI.DTMFileSystemCache.OnDTextureChanged"/>
+        DTMFileSystemCache = -1,
+
         /// <seealso cref="ModGeneration.OverlayModManager.OnDTextureChanged"/>
         OverlayModManager = -2,
     }

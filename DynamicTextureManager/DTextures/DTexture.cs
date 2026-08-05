@@ -1,13 +1,14 @@
 using System;
 using System.IO;
 using DynamicTextureManager.Services;
+using Luna;
 using Newtonsoft.Json;
 using Newtonsoft.Json.Linq;
 using OtterGui.Classes;
 
 namespace DynamicTextureManager.DTextures;
 
-public sealed class DTexture : DTextureBase, ISavable
+public sealed class DTexture : DTextureBase, ISavable, IFileSystemValue<DTexture>
 {
     #region Data
     
@@ -29,9 +30,26 @@ public sealed class DTexture : DTextureBase, ISavable
 
     public string Incognito
         => Identifier.ToString()[..8];
-    
+
     #endregion
-    
+
+    #region FileSystem
+
+    /// <summary> The file system node containing this canvas group, if any. </summary>
+    public IFileSystemData<DTexture>? Node { get; set; }
+
+    /// <summary> The file system path data for this canvas group. </summary>
+    public DataPath Path { get; } = new();
+
+    public string DisplayName
+        => Name.Text;
+
+    /// <summary> The persistent identifier used by the file system files, matching the old sort_order.json keys. </summary>
+    string IFileSystemValue.Identifier
+        => Identifier.ToString();
+
+    #endregion
+
     #region Serialization
 
     public JObject JsonSerialize()
@@ -45,6 +63,11 @@ public sealed class DTexture : DTextureBase, ISavable
             ["Name"]                   = Name.Text,
             ["Data"]                   = Data.Serialize()
         };
+        // Folder organization lives on the canvas group itself now; omit the defaults.
+        if (Path.Folder.Length > 0)
+            ret["FileSystemFolder"] = Path.Folder;
+        if (Path.SortName is not null)
+            ret["SortOrderName"] = Path.SortName;
         return ret;
     }
 
@@ -66,6 +89,9 @@ public sealed class DTexture : DTextureBase, ISavable
         
         if (dTexture.LastEdit < creationDate)
             dTexture.LastEdit = creationDate;
+
+        dTexture.Path.Folder   = json["FileSystemFolder"]?.Value<string>() ?? string.Empty;
+        dTexture.Path.SortName = json["SortOrderName"]?.Value<string>()?.FixName();
 
         // Version 1 files carry no payload and load with empty data.
         dTexture.SetDTextureData(DTextureData.Load(json["Data"] as JObject));
@@ -92,7 +118,7 @@ public sealed class DTexture : DTextureBase, ISavable
     }
 
     public string LogName(string fileName)
-        => Path.GetFileNameWithoutExtension(fileName);
+        => System.IO.Path.GetFileNameWithoutExtension(fileName);
     
     #endregion
 }

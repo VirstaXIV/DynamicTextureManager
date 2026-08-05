@@ -10,22 +10,31 @@ public class FilenameService : BaseFilePathProvider
 {
     public readonly string ConfigDirectory;
     public readonly string ConfigFile;
-    public readonly string DTextureFileSystem;
     public readonly string DTextureDirectory;
     public readonly string DecalDirectory;
     public readonly string DecalIndexFile;
     public readonly string ExtractedDirectory;
+    public readonly string FileSystemOrganization;
+    public readonly string FileSystemExpandedFolders;
+    public readonly string FileSystemLockedNodes;
+    public readonly string FileSystemSelectedNodes;
+    public readonly string MigrationDTextureFileSystem;
 
     public FilenameService(IDalamudPluginInterface pi)
         : base(pi)
     {
         ConfigDirectory        = pi.ConfigDirectory.FullName;
         ConfigFile             = pi.ConfigFile.FullName;
-        DTextureFileSystem       = Path.Combine(ConfigDirectory, "sort_order.json");
         DTextureDirectory        = Path.Combine(ConfigDirectory, "textures");
         DecalDirectory           = Path.Combine(ConfigDirectory, "decals");
         DecalIndexFile           = Path.Combine(ConfigDirectory, "decals.json");
         ExtractedDirectory       = Path.Combine(ConfigDirectory, "extracted");
+        FileSystemOrganization    = Path.Combine(ConfigDirectory, "filesystem", "organization.json");
+        FileSystemExpandedFolders = Path.Combine(ConfigDirectory, "filesystem", "expanded_folders.json");
+        FileSystemLockedNodes     = Path.Combine(ConfigDirectory, "filesystem", "locked_nodes.json");
+        FileSystemSelectedNodes   = Path.Combine(ConfigDirectory, "filesystem", "selected_nodes.json");
+        // The old OtterGui file system save; kept as the migration source for existing folder organization.
+        MigrationDTextureFileSystem = Path.Combine(ConfigDirectory, "sort_order.json");
     }
 
     public override List<IBackupFile> GetBackupFiles()

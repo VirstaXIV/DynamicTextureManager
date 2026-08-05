@@ -6,11 +6,11 @@ using Dalamud.Configuration;
 using DynamicTextureManager.DTextures;
 using DynamicTextureManager.Services;
 using DynamicTextureManager.UI;
+using Luna;
 using Newtonsoft.Json;
-using OtterGui.Classes;
-using OtterGui.Extensions;
-using OtterGui.Filesystem;
+using DoubleModifier = OtterGui.Classes.DoubleModifier;
 using ErrorEventArgs = Newtonsoft.Json.Serialization.ErrorEventArgs;
+using ModifierHotkey = OtterGui.Classes.ModifierHotkey;
 
 namespace DynamicTextureManager;
 
@@ -55,7 +55,7 @@ public class Configuration: IPluginConfiguration, ISavable
     
     [JsonConverter(typeof(SortModeConverter))]
     [JsonProperty(Order = int.MaxValue)]
-    public ISortMode<DTexture> SortMode { get; set; } = ISortMode<DTexture>.FoldersFirst;
+    public ISortMode SortMode { get; set; } = ISortMode.FoldersFirst;
     
 #if DEBUG
     public bool DebugMode { get; set; } = true;
@@ -119,41 +119,50 @@ public class Configuration: IPluginConfiguration, ISavable
     public static class Constants
     {
         public const int CurrentVersion = 1;
-        
-        public static readonly ISortMode<DTexture>[] ValidSortModes =
+
+        public static readonly ISortMode[] ValidSortModes =
         [
-            ISortMode<DTexture>.FoldersFirst,
-            ISortMode<DTexture>.Lexicographical,
+            ISortMode.FoldersFirst,
+            ISortMode.Lexicographical,
             new DTextureFileSystem.CreationDate(),
             new DTextureFileSystem.InverseCreationDate(),
             new DTextureFileSystem.UpdateDate(),
             new DTextureFileSystem.InverseUpdateDate(),
-            ISortMode<DTexture>.InverseFoldersFirst,
-            ISortMode<DTexture>.InverseLexicographical,
-            ISortMode<DTexture>.FoldersLast,
-            ISortMode<DTexture>.InverseFoldersLast,
-            ISortMode<DTexture>.InternalOrder,
-            ISortMode<DTexture>.InverseInternalOrder,
+            ISortMode.InverseFoldersFirst,
+            ISortMode.InverseLexicographical,
+            ISortMode.FoldersLast,
+            ISortMode.InverseFoldersLast,
+            ISortMode.InternalOrder,
+            ISortMode.InverseInternalOrder,
         ];
-    }
-    
-    private class SortModeConverter : JsonConverter<ISortMode<DTexture>>
-    {
-        public override void WriteJson(JsonWriter writer, ISortMode<DTexture>? value, JsonSerializer serializer)
+
+        /// <summary> Find a sort mode by its stored type name, also accepting the old OtterGui names with their trailing 'T'. </summary>
+        public static ISortMode? ParseSortMode(string name)
         {
-            value ??= ISortMode<DTexture>.FoldersFirst;
+            var mode = ValidSortModes.FirstOrDefault(s => s.GetType().Name == name);
+            if (mode == null && name.EndsWith('T'))
+                mode = ValidSortModes.FirstOrDefault(s => s.GetType().Name == name[..^1]);
+            return mode;
+        }
+    }
+
+    private class SortModeConverter : JsonConverter<ISortMode>
+    {
+        public override void WriteJson(JsonWriter writer, ISortMode? value, JsonSerializer serializer)
+        {
+            value ??= ISortMode.FoldersFirst;
             serializer.Serialize(writer, value.GetType().Name);
         }
 
-        public override ISortMode<DTexture> ReadJson(JsonReader reader, Type objectType, ISortMode<DTexture>? existingValue,
+        public override ISortMode ReadJson(JsonReader reader, Type objectType, ISortMode? existingValue,
             bool hasExistingValue,
             JsonSerializer serializer)
         {
             var name = serializer.Deserialize<string>(reader);
-            if (name == null || !Constants.ValidSortModes.FindFirst(s => s.GetType().Name == name, out var mode))
-                return existingValue ?? ISortMode<DTexture>.FoldersFirst;
+            if (name == null)
+                return existingValue ?? ISortMode.FoldersFirst;
 
-            return mode;
+            return Constants.ParseSortMode(name) ?? existingValue ?? ISortMode.FoldersFirst;
         }
     }
 }
