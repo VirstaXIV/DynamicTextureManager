@@ -104,7 +104,7 @@ public class DTextureFileSystem : BaseFileSystem, IDisposable
                             NotificationType.Error);
                     }
 
-                var (node, _) = CreateDuplicateDataNode(parent, dTexture.Path.SortName ?? dTexture.Name.Text, dTexture);
+                var (node, _) = CreateDuplicateDataNode(parent, dTexture.Path.SortName ?? dTexture.Name, dTexture);
                 Selection.Select(node, true);
                 return;
             case DTextureChanged.Type.Deleted:

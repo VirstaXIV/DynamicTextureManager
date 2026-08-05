@@ -117,7 +117,7 @@ public class DTMPanel : IDisposable
         => DrawPanel();
 
     private string SelectionName
-        => _selector.Selected == null ? "No Selection" : _selector.Selected.Name.Text;
+        => _selector.Selected == null ? "No Selection" : _selector.Selected.Name;
 
     private void Apply()
     {

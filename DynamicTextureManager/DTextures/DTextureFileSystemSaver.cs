@@ -52,7 +52,7 @@ public sealed class DTextureFileSystemSaver(LunaLogger log, BaseFileSystem fileS
             try
             {
                 var folder = dTexture.Path.Folder.Length is 0 ? FileSystem.Root : FileSystem.FindOrCreateAllFolders(dTexture.Path.Folder);
-                FileSystem.CreateDuplicateDataNode(folder, dTexture.Path.SortName ?? dTexture.Name.Text, dTexture);
+                FileSystem.CreateDuplicateDataNode(folder, dTexture.Path.SortName ?? dTexture.Name, dTexture);
             }
             catch (Exception ex)
             {

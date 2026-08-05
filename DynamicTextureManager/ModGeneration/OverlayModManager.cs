@@ -1128,7 +1128,7 @@ public sealed class OverlayModManager : IService, IDisposable
     }
 
     private static string ModName(DTexture dTexture)
-        => $"DTM - {dTexture.Name.Text}";
+        => $"DTM - {dTexture.Name}";
 
     private bool Fail(string message)
     {

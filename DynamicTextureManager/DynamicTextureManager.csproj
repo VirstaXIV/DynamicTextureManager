@@ -15,8 +15,11 @@
     <PackageLicenseExpression>AGPL-3.0-or-later</PackageLicenseExpression>
     <IsPackable>false</IsPackable>
   </PropertyGroup>
+  <!-- Dalamud's ImGui bindings stay referenced (not Use_Dalamud_ImGui=false) because the
+       windows still subclass Dalamud.Interface.Windowing.Window, whose API surfaces the
+       binding types. No plugin code calls ImGui directly — flip this when the window
+       system moves to Luna's. -->
   <ItemGroup>
-    <ProjectReference Include="..\OtterGui\OtterGui.csproj" />
     <ProjectReference Include="..\Luna\Luna\Luna.csproj" />
     <ProjectReference Include="..\Luna\Luna.Generators\Luna.Generators.csproj" OutputItemType="Analyzer" ReferenceOutputAssembly="false" />
     <ProjectReference Include="..\Penumbra.Api\Penumbra.Api.csproj" />
