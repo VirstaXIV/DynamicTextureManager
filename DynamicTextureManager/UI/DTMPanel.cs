@@ -1,26 +1,25 @@
 using System;
 using System.Numerics;
-using Dalamud.Bindings.ImGui;
 using Dalamud.Interface;
 using DynamicTextureManager.Interop;
 using DynamicTextureManager.ModGeneration;
 using DynamicTextureManager.UI.Panels;
-using OtterGui.Text;
+using ImSharp;
+using Luna;
 
 namespace DynamicTextureManager.UI;
 
 public class DTMPanel : IDisposable
 {
-    private readonly DTMFileSystemSelector _selector;
+    private readonly DTMFileSystemDrawer _selector;
     private readonly OverlayModManager _overlayMods;
     private readonly PenumbraService _penumbra;
     private readonly EditPreviewer _previewer;
     private readonly SourceTab _sourceTab;
     private readonly DecalsTab _decalsTab;
-    private readonly HeaderDrawer.Button[] _leftButtons;
-    private readonly HeaderDrawer.Button[] _rightButtons;
+    private readonly PanelHeader _header;
 
-    public DTMPanel(DTMFileSystemSelector selector, OverlayModManager overlayMods, PenumbraService penumbra, EditPreviewer previewer,
+    public DTMPanel(DTMFileSystemDrawer selector, OverlayModManager overlayMods, PenumbraService penumbra, EditPreviewer previewer,
         SourceTab sourceTab, DecalsTab decalsTab)
     {
         _selector     = selector;
@@ -29,55 +28,96 @@ public class DTMPanel : IDisposable
         _previewer    = previewer;
         _sourceTab    = sourceTab;
         _decalsTab    = decalsTab;
-        _leftButtons  = [new ApplyButton(this)];
-        _rightButtons = [new DeleteModButton(this)];
+        _header       = new PanelHeader(this);
     }
 
-    private sealed class ApplyButton(DTMPanel panel) : HeaderDrawer.Button
+    /// <summary> The split-button header over the panel: build on the left, delete on the right, selection name in the middle. </summary>
+    private sealed class PanelHeader : SplitButtonHeader
     {
-        protected override FontAwesomeIcon Icon
+        private readonly DTMPanel _panel;
+        private string           _lastName = string.Empty;
+        private StringU8         _text     = StringU8.Empty;
+
+        public PanelHeader(DTMPanel panel)
+        {
+            _panel = panel;
+            LeftButtons.AddButton(new ApplyButton(panel), 100);
+            RightButtons.AddButton(new DeleteModButton(panel), 100);
+        }
+
+        public override ReadOnlySpan<byte> Text
+            => _text;
+
+        public override void Draw(Vector2 size)
+        {
+            var name = _panel.SelectionName;
+            if (!ReferenceEquals(name, _lastName))
+            {
+                _lastName = name;
+                _text     = new StringU8(name);
+            }
+
+            var color = new Rgba32(ColorId.HeaderButtons.Value());
+            using var _ = ImGuiColor.Text.Push(color).Push(ImGuiColor.Border, color);
+            base.Draw(size with { Y = Im.Style.FrameHeight });
+        }
+    }
+
+    private sealed class ApplyButton(DTMPanel panel) : BaseIconButton<AwesomeIcon>
+    {
+        public override ReadOnlySpan<byte> Label
+            => "##apply"u8;
+
+        public override AwesomeIcon Icon
             => FontAwesomeIcon.Hammer;
 
-        protected override string Description
-            => "Build: bake the current edits into the generated Penumbra mod (and enable it).\nUse the \"Enabled\" checkbox below to toggle the mod on or off.";
+        public override bool HasTooltip
+            => true;
 
-        protected override bool Disabled
-            => panel._selector.Selected == null || panel._overlayMods.Busy;
+        public override void DrawTooltip()
+            => Im.Text(
+                "Build: bake the current edits into the generated Penumbra mod (and enable it).\nUse the \"Enabled\" checkbox below to toggle the mod on or off."u8);
 
-        protected override void OnClick()
+        public override bool Enabled
+            => panel._selector.Selected != null && !panel._overlayMods.Busy;
+
+        public override void OnClick()
             => panel.Apply();
     }
 
-    private sealed class DeleteModButton(DTMPanel panel) : HeaderDrawer.Button
+    private sealed class DeleteModButton(DTMPanel panel) : BaseIconButton<AwesomeIcon>
     {
-        protected override FontAwesomeIcon Icon
+        public override ReadOnlySpan<byte> Label
+            => "##deleteMod"u8;
+
+        public override AwesomeIcon Icon
             => FontAwesomeIcon.Trash;
 
-        protected override string Description
-            => "Delete the generated Penumbra mod of this canvas group (keeps the canvas group itself).";
+        public override bool HasTooltip
+            => true;
 
-        protected override bool Disabled
-            => panel._selector.Selected == null || panel._selector.Selected.Data.OutputModDirectory.Length == 0;
+        public override void DrawTooltip()
+            => Im.Text("Delete the generated Penumbra mod of this canvas group (keeps the canvas group itself)."u8);
 
-        protected override void OnClick()
+        public override bool Enabled
+            => panel._selector.Selected != null && panel._selector.Selected.Data.OutputModDirectory.Length > 0;
+
+        public override void OnClick()
             => panel.DeleteMod();
     }
 
     public void Dispose()
     { }
 
-    public void Draw()
-    {
-        using var group = ImUtf8.Group();
-        DrawHeader();
-        DrawPanel();
-    }
+    /// <summary> The header is mounted as the layout's RightHeader so it sits flush above the panel child. </summary>
+    public IHeader Header
+        => _header;
 
-    private void DrawHeader()
-        => HeaderDrawer.Draw(SelectionName, 0, ImGui.GetColorU32(ImGuiCol.FrameBg), _leftButtons, _rightButtons);
+    public void Draw()
+        => DrawPanel();
 
     private string SelectionName
-        => _selector.Selected == null ? "No Selection" : _selector.Selected.Name.Text;
+        => _selector.Selected == null ? "No Selection" : _selector.Selected.Name;
 
     private void Apply()
     {
@@ -104,37 +144,38 @@ public class DTMPanel : IDisposable
     /// </summary>
     private void DrawPanel()
     {
-        using var child = ImUtf8.Child("##Panel"u8, ImGui.GetContentRegionAvail(), true);
-        if (!child || _selector.Selected == null)
+        // The layout's right panel child already provides the border and padding —
+        // draw straight into it, or the content floats inside a second inset box.
+        if (_selector.Selected == null)
             return;
 
         var selected = _selector.Selected;
 
         if (_overlayMods.LastResult.Length > 0)
-            ImUtf8.Text(_overlayMods.LastResult);
+            Im.Text(_overlayMods.LastResult);
         DrawGeneratedModLine(selected);
-        ImGui.Separator();
+        Im.Separator();
 
-        var avail = ImGui.GetContentRegionAvail();
-        var leftWidth = MathF.Min(MathF.Max(avail.X * 0.48f, 380f * ImUtf8.GlobalScale),
-            MathF.Max(avail.X - 340f * ImUtf8.GlobalScale, 260f * ImUtf8.GlobalScale));
-        using (var left = ImUtf8.Child("##controls"u8, new Vector2(leftWidth, avail.Y), false))
+        var avail = Im.ContentRegion.Available;
+        var leftWidth = MathF.Min(MathF.Max(avail.X * 0.48f, 380f * Im.Style.GlobalScale),
+            MathF.Max(avail.X - 340f * Im.Style.GlobalScale, 260f * Im.Style.GlobalScale));
+        using (var left = Im.Child.Begin("##controls"u8, new Vector2(leftWidth, avail.Y), false))
         {
             if (left)
             {
-                if (ImUtf8.CollapsingHeader("Canvases"u8,
-                        selected.Data.Source.IsEmpty ? ImGuiTreeNodeFlags.DefaultOpen : ImGuiTreeNodeFlags.None))
+                if (Im.Tree.Header("Sources"u8,
+                        selected.Data.Source.IsEmpty ? TreeNodeFlags.DefaultOpen : TreeNodeFlags.None))
                 {
                     _sourceTab.Draw(selected);
-                    ImGui.Separator();
+                    Im.Separator();
                 }
 
                 _decalsTab.DrawControls(selected);
             }
         }
 
-        ImGui.SameLine();
-        using (var right = ImUtf8.Child("##visuals"u8, ImGui.GetContentRegionAvail(), false))
+        Im.Line.Same();
+        using (var right = Im.Child.Begin("##visuals"u8, Im.ContentRegion.Available, false))
         {
             if (right)
                 _decalsTab.DrawVisuals(selected);
@@ -148,31 +189,30 @@ public class DTMPanel : IDisposable
             // Until the first explicit Build, slider changes only affect the preview — the
             // auto-apply path deliberately never creates the mod on its own.
             if (selected.Data.HasEdits)
-                ImUtf8.TextWrapped(
+                Im.TextWrapped(
                     "Not built yet — edits show only in the preview. Press the hammer button above to build the Penumbra mod and see them in-game; afterwards edits re-apply automatically."u8);
             return;
         }
 
-        ImUtf8.Text($"Generated Mod: {selected.Data.OutputModDirectory}");
+        Im.Text($"Generated Mod: {selected.Data.OutputModDirectory}");
         if (!_penumbra.Available)
             return;
 
         var state = _overlayMods.QueryModState(selected);
         if (state != null)
         {
-            ImGui.SameLine();
+            Im.Line.Same();
             var enabled = state.Value.Enabled;
-            if (ImUtf8.Checkbox("Enabled"u8, ref enabled))
+            if (Im.Checkbox("Enabled"u8, ref enabled))
                 _overlayMods.SetModEnabled(selected, enabled);
-            if (ImGui.IsItemHovered())
-                ImUtf8.HoverTooltip($"Enable or disable the generated mod in collection \"{state.Value.CollectionName}\".");
+            Im.Tooltip.OnHover(HoveredFlags.None,
+                $"Enable or disable the generated mod in collection \"{state.Value.CollectionName}\".");
         }
 
-        ImGui.SameLine();
-        if (ImUtf8.SmallButton("Open in Penumbra"u8))
+        Im.Line.Same();
+        if (Im.SmallButton("Open in Penumbra"u8))
             _penumbra.OpenModInPenumbra(selected.Data.OutputModDirectory);
-        if (ImGui.IsItemHovered())
-            ImUtf8.HoverTooltip("Open the generated mod in Penumbra's mod tab."u8);
+        Im.Tooltip.OnHover("Open the generated mod in Penumbra's mod tab."u8);
 
         DrawPriority(selected);
     }
@@ -187,32 +227,30 @@ public class DTMPanel : IDisposable
         if (_priorityEdit is { } pending && pending.Owner != selected.Identifier)
             _priorityEdit = null;
 
-        ImGui.SameLine();
+        Im.Line.Same();
         var priority = _priorityEdit?.Value ?? _overlayMods.EffectivePriority(selected);
-        ImGui.SetNextItemWidth(90 * ImUtf8.GlobalScale);
-        if (ImGui.InputInt("Priority", ref priority))
+        Im.Item.SetNextWidthScaled(90);
+        if (Im.Input.Scalar("Priority"u8, ref priority, 1, 100))
             _priorityEdit = (selected.Identifier, priority);
-        if (ImGui.IsItemDeactivatedAfterEdit())
+        if (Im.Item.DeactivatedAfterEdit)
         {
             if (_priorityEdit is { } edit && edit.Owner == selected.Identifier)
                 _overlayMods.SetModPriority(selected, edit.Value);
             _priorityEdit = null;
         }
-        else if (ImGui.IsItemDeactivated())
+        else if (Im.Item.Deactivated)
         {
             _priorityEdit = null;
         }
 
-        if (ImGui.IsItemHovered())
-            ImUtf8.HoverTooltip("When two canvas groups override the same file, the enabled one with the higher priority wins."u8);
+        Im.Tooltip.OnHover("When two canvas groups override the same file, the enabled one with the higher priority wins."u8);
 
         if (selected.Data.ModPriority != null)
         {
-            ImGui.SameLine();
-            if (ImUtf8.SmallButton("Default"u8))
+            Im.Line.Same();
+            if (Im.SmallButton("Default"u8))
                 _overlayMods.SetModPriority(selected, null);
-            if (ImGui.IsItemHovered())
-                ImUtf8.HoverTooltip("Return to the default priority from the settings."u8);
+            Im.Tooltip.OnHover("Return to the default priority from the settings."u8);
         }
     }
 }

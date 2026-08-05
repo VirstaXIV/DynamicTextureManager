@@ -8,7 +8,7 @@ using DynamicTextureManager.DTextures;
 using DynamicTextureManager.Events;
 using DynamicTextureManager.Interop;
 using DynamicTextureManager.Services;
-using OtterGui.Services;
+using IService = Luna.IService;
 using Penumbra.Api.Enums;
 using Penumbra.GameData.Files.MaterialStructs;
 
@@ -139,8 +139,9 @@ public sealed class OverlayModManager : IService, IDisposable
     }
 
     /// <summary> On dTexture deletion, optionally delete its generated mod. Never resaves the deleted dTexture. </summary>
-    private void OnDTextureChanged(DTextureChanged.Type type, DTexture dTexture, DTextures.History.ITransaction? _)
+    private void OnDTextureChanged(in DTextureChanged.Arguments args)
     {
+        var (type, dTexture, _) = args;
         if (type is not DTextureChanged.Type.Deleted || !config.DeleteModWithDTexture)
             return;
 
@@ -1127,7 +1128,7 @@ public sealed class OverlayModManager : IService, IDisposable
     }
 
     private static string ModName(DTexture dTexture)
-        => $"DTM - {dTexture.Name.Text}";
+        => $"DTM - {dTexture.Name}";
 
     private bool Fail(string message)
     {

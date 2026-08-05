@@ -7,7 +7,7 @@ using System.Text.RegularExpressions;
 using Dalamud.Plugin.Services;
 using DynamicTextureManager.DTextures.Data;
 using DynamicTextureManager.Interop;
-using OtterGui.Services;
+using IService = Luna.IService;
 using Penumbra.GameData.Files;
 
 namespace DynamicTextureManager.ModGeneration;

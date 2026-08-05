@@ -6,7 +6,7 @@ using System.Numerics;
 using DynamicTextureManager.DTextures.Data;
 using DynamicTextureManager.ModGeneration.Shaders;
 using DynamicTextureManager.Services;
-using OtterGui.Services;
+using IService = Luna.IService;
 using SixLabors.ImageSharp;
 using SixLabors.ImageSharp.PixelFormats;
 using SixLabors.ImageSharp.Processing;

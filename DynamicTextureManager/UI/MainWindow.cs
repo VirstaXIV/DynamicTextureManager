@@ -1,10 +1,13 @@
 ﻿using System;
 using System.Numerics;
-using Dalamud.Bindings.ImGui;
 using Dalamud.Interface;
 using Dalamud.Interface.Windowing;
 using DynamicTextureManager.ModGeneration;
-using OtterGui.Services;
+using Luna;
+using Im = ImSharp.Im;
+using IService = Luna.IService;
+using TitleBarButton = Dalamud.Interface.Windowing.TitleBarButton;
+using Window = Dalamud.Interface.Windowing.Window;
 
 namespace DynamicTextureManager.UI;
 
@@ -21,12 +24,12 @@ public class MainWindow : Window, IDisposable
     private readonly MainWindowPosition _position;
     private readonly ConfigWindow _configWindow;
 
-    private readonly DTMFileSystemSelector _selector;
     private readonly DTMPanel _panel;
+    private readonly SelectorLayout _layout;
     private readonly EditPreviewer _previewer;
     private readonly RowHighlighter _highlighter;
 
-    public MainWindow(DTMFileSystemSelector selector, DTMPanel panel, Configuration configuration,
+    public MainWindow(DTMFileSystemDrawer selector, DTMPanel panel, Configuration configuration,
         MainWindowPosition position, ConfigWindow configWindow, DecalLibraryWindow decalLibraryWindow,
         EditPreviewer previewer, RowHighlighter highlighter)
         : base("Dynamic Texture Manager")
@@ -41,8 +44,8 @@ public class MainWindow : Window, IDisposable
         _position = position;
         _configuration = configuration;
         _configWindow = configWindow;
-        _selector = selector;
         _panel = panel;
+        _layout = new SelectorLayout(selector, panel);
 
         TitleBarButtons = new()
         {
@@ -53,9 +56,11 @@ public class MainWindow : Window, IDisposable
                 IconOffset = new(2, 1),
                 ShowTooltip = () =>
                 {
-                    ImGui.BeginTooltip();
-                    ImGui.Text("Show Config");
-                    ImGui.EndTooltip();
+                    if (!ImSharp.ImSharpConfiguration.IsInitialized)
+                        return;
+
+                    using var tooltip = Im.Tooltip.Begin();
+                    Im.Text("Show Config"u8);
                 }
             },
             new TitleBarButton()
@@ -65,9 +70,11 @@ public class MainWindow : Window, IDisposable
                 IconOffset = new(2, 1),
                 ShowTooltip = () =>
                 {
-                    ImGui.BeginTooltip();
-                    ImGui.Text("Decal Library");
-                    ImGui.EndTooltip();
+                    if (!ImSharp.ImSharpConfiguration.IsInitialized)
+                        return;
+
+                    using var tooltip = Im.Tooltip.Begin();
+                    Im.Text("Decal Library"u8);
                 }
             }
         };
@@ -75,18 +82,20 @@ public class MainWindow : Window, IDisposable
 
     public void Dispose()
     {
-        _selector.Dispose();
         _panel.Dispose();
     }
 
     public override void Draw()
     {
-        _position.Size = ImGui.GetWindowSize();
-        _position.Position = ImGui.GetWindowPos();
+        // The shared ImSharp context attaches on a framework tick after service
+        // construction — Im.* calls before that dereference an empty context.
+        if (!ImSharp.ImSharpConfiguration.IsInitialized)
+            return;
 
-        _selector.Draw();
-        ImGui.SameLine();
-        _panel.Draw();
+        _position.Size = Im.Window.Size;
+        _position.Position = Im.Window.Position;
+
+        _layout.Draw();
     }
 
     public override void OnClose()
@@ -100,5 +109,46 @@ public class MainWindow : Window, IDisposable
     public void OpenConfigUi()
     {
         _configWindow.Toggle();
+    }
+
+    /// <summary>
+    /// Hosts the selector (with its filter header and button footer) next to the main panel.
+    /// The selector keeps its old default width of 200 but can now be dragged up to half the window.
+    /// </summary>
+    private sealed class SelectorLayout : TwoPanelLayout
+    {
+        private TwoPanelWidth _width = new(200f, ScalingMode.Absolute);
+
+        public SelectorLayout(DTMFileSystemDrawer selector, DTMPanel panel)
+        {
+            LeftHeader  = selector.Header;
+            LeftPanel   = selector;
+            LeftFooter  = selector.Footer;
+            RightHeader = panel.Header;
+            RightPanel  = new PanelAdapter(panel);
+            RightFooter = NopHeaderFooter.Instance;
+        }
+
+        protected override float MinimumWidth
+            => LeftFooter.MinimumWidth;
+
+        protected override float MaximumWidth
+            => Im.Window.Width * 0.5f;
+
+        protected override void SetWidth(float width, ScalingMode mode)
+            => _width = new TwoPanelWidth(width, mode);
+
+        public void Draw()
+            => Draw(_width);
+    }
+
+    /// <summary> The main panel draws its own header and children; it only needs wrapping into a layout panel. </summary>
+    private sealed class PanelAdapter(DTMPanel panel) : IPanel
+    {
+        public ReadOnlySpan<byte> Id
+            => "##dtmPanel"u8;
+
+        public void Draw()
+            => panel.Draw();
     }
 }

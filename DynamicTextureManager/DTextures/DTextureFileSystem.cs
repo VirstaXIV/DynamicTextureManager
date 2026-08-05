@@ -1,47 +1,37 @@
 using System;
 using System.Collections.Generic;
-using System.IO;
 using System.Linq;
-using System.Text.RegularExpressions;
 using Dalamud.Interface.ImGuiNotification;
 using DynamicTextureManager.DTextures.History;
 using DynamicTextureManager.Events;
 using DynamicTextureManager.Services;
-using OtterGui.Classes;
-using OtterGui.Filesystem;
+using Luna;
 
 namespace DynamicTextureManager.DTextures;
 
-public class DTextureFileSystem : FileSystem<DTexture>, IDisposable, ISavable
+public class DTextureFileSystem : BaseFileSystem, IDisposable
 {
-    private readonly DTextureChanged _dTextureChanged;
-    
-    private readonly SaveService   _saveService;
-    private readonly DTextureManager _dTextureManager;
+    private readonly DTextureFileSystemSaver _saver;
+    private readonly DTextureChanged         _dTextureChanged;
 
-    public DTextureFileSystem(DTextureManager dTextureManager, SaveService saveService, DTextureChanged dTextureChanged)
+    public DTextureFileSystem(LunaLogger log, SaveService saveService, DTextureManager dTextureManager, DTextureChanged dTextureChanged)
+        : base("DTextureFileSystem", log, true)
     {
-        _dTextureManager = dTextureManager;
-        _saveService   = saveService;
         _dTextureChanged = dTextureChanged;
-        _dTextureChanged.Subscribe(OnDTextureChange, DTextureChanged.Priority.DTextureFileSystem);
-        Reload();
-    }
-    
-    private void Reload()
-    {
-        if (Load(new FileInfo(_saveService.FileNames.DTextureFileSystem), _dTextureManager.DTextures, DTextureToIdentifier, DTextureToName))
-            _saveService.ImmediateSave(this);
+        _saver           = new DTextureFileSystemSaver(log, this, saveService, dTextureManager.DTextures);
 
+        _saver.Load();
+        _dTextureChanged.Subscribe(OnDTextureChange, DTextureChanged.Priority.DTextureFileSystem);
         DynamicTextureManager.Log.Debug("Reloaded dTexture filesystem.");
     }
-    
+
     public void Dispose()
     {
         _dTextureChanged.Unsubscribe(OnDTextureChange);
+        _saver.Dispose();
     }
-    
-    public struct CreationDate : ISortMode<DTexture>
+
+    public struct CreationDate : ISortMode
     {
         public ReadOnlySpan<byte> Name
             => "Creation Date (Older First)"u8;
@@ -49,11 +39,11 @@ public class DTextureFileSystem : FileSystem<DTexture>, IDisposable, ISavable
         public ReadOnlySpan<byte> Description
             => "In each folder, sort all subfolders lexicographically, then sort all leaves using their creation date."u8;
 
-        public IEnumerable<IPath> GetChildren(Folder f)
-            => f.GetSubFolders().Cast<IPath>().Concat(f.GetLeaves().OrderBy(l => l.Value.CreationDate));
+        public IEnumerable<IFileSystemNode> GetChildren(IFileSystemFolder f)
+            => ISortMode.GetFolderLike(f).Concat(ISortMode.GetLeaveLike(f).OrderBy(CreationDateKey));
     }
 
-    public struct UpdateDate : ISortMode<DTexture>
+    public struct UpdateDate : ISortMode
     {
         public ReadOnlySpan<byte> Name
             => "Update Date (Older First)"u8;
@@ -61,11 +51,11 @@ public class DTextureFileSystem : FileSystem<DTexture>, IDisposable, ISavable
         public ReadOnlySpan<byte> Description
             => "In each folder, sort all subfolders lexicographically, then sort all leaves using their last update date."u8;
 
-        public IEnumerable<IPath> GetChildren(Folder f)
-            => f.GetSubFolders().Cast<IPath>().Concat(f.GetLeaves().OrderBy(l => l.Value.LastEdit));
+        public IEnumerable<IFileSystemNode> GetChildren(IFileSystemFolder f)
+            => ISortMode.GetFolderLike(f).Concat(ISortMode.GetLeaveLike(f).OrderBy(UpdateDateKey));
     }
-    
-    public struct InverseCreationDate : ISortMode<DTexture>
+
+    public struct InverseCreationDate : ISortMode
     {
         public ReadOnlySpan<byte> Name
             => "Creation Date (Newer First)"u8;
@@ -73,11 +63,11 @@ public class DTextureFileSystem : FileSystem<DTexture>, IDisposable, ISavable
         public ReadOnlySpan<byte> Description
             => "In each folder, sort all subfolders lexicographically, then sort all leaves using their inverse creation date."u8;
 
-        public IEnumerable<IPath> GetChildren(Folder f)
-            => f.GetSubFolders().Cast<IPath>().Concat(f.GetLeaves().OrderByDescending(l => l.Value.CreationDate));
+        public IEnumerable<IFileSystemNode> GetChildren(IFileSystemFolder f)
+            => ISortMode.GetFolderLike(f).Concat(ISortMode.GetLeaveLike(f).OrderByDescending(CreationDateKey));
     }
 
-    public struct InverseUpdateDate : ISortMode<DTexture>
+    public struct InverseUpdateDate : ISortMode
     {
         public ReadOnlySpan<byte> Name
             => "Update Date (Newer First)"u8;
@@ -85,60 +75,47 @@ public class DTextureFileSystem : FileSystem<DTexture>, IDisposable, ISavable
         public ReadOnlySpan<byte> Description
             => "In each folder, sort all subfolders lexicographically, then sort all leaves using their inverse last update date."u8;
 
-        public IEnumerable<IPath> GetChildren(Folder f)
-            => f.GetSubFolders().Cast<IPath>().Concat(f.GetLeaves().OrderByDescending(l => l.Value.LastEdit));
+        public IEnumerable<IFileSystemNode> GetChildren(IFileSystemFolder f)
+            => ISortMode.GetFolderLike(f).Concat(ISortMode.GetLeaveLike(f).OrderByDescending(UpdateDateKey));
     }
-    
-    private void OnDTextureChange(DTextureChanged.Type type, DTexture dTexture, ITransaction? data)
+
+    private static DateTimeOffset CreationDateKey(IFileSystemNode node)
+        => (node as IFileSystemData)?.GetValue<DTexture>()?.CreationDate ?? default;
+
+    private static DateTimeOffset UpdateDateKey(IFileSystemNode node)
+        => (node as IFileSystemData)?.GetValue<DTexture>()?.LastEdit ?? default;
+
+    private void OnDTextureChange(in DTextureChanged.Arguments args)
     {
+        var (type, dTexture, data) = args;
         switch (type)
         {
             case DTextureChanged.Type.Created:
                 var parent = Root;
-                if ((data as CreationTransaction?)?.Path is { } path)
+                var folder = (data as CreationTransaction?)?.Path ?? dTexture.Path.Folder;
+                if (folder.Length > 0)
                     try
                     {
-                        parent = FindOrCreateAllFolders(path);
+                        parent = FindOrCreateAllFolders(folder);
                     }
                     catch (Exception ex)
                     {
-                        DynamicTextureManager.Messager.NotificationMessage(ex, $"Could not move canvas group to {path} because the folder could not be created.",
+                        DynamicTextureManager.Messager.NotificationMessage(ex, $"Could not move canvas group to {folder} because the folder could not be created.",
                             NotificationType.Error);
                     }
 
-                CreateDuplicateLeaf(parent, dTexture.Name.Text, dTexture);
-
+                var (node, _) = CreateDuplicateDataNode(parent, dTexture.Path.SortName ?? dTexture.Name, dTexture);
+                Selection.Select(node, true);
                 return;
             case DTextureChanged.Type.Deleted:
-                if (TryGetValue(dTexture, out var leaf1))
-                    Delete(leaf1);
+                if (dTexture.Node is { } leaf)
+                {
+                    if (leaf.Selected)
+                        Selection.UnselectAll();
+                    Delete(leaf);
+                }
+
                 return;
         }
-    }
-    
-    private static string DTextureToIdentifier(DTexture dTexture)
-        => dTexture.Identifier.ToString();
-
-    private static string DTextureToName(DTexture dTexture)
-        => dTexture.Name.Text.FixName();
-    
-    private static bool DesignHasDefaultPath(DTexture dTexture, string fullPath)
-    {
-        var regex = new Regex($@"^{Regex.Escape(DTextureToName(dTexture))}( \(\d+\))?$");
-        return regex.IsMatch(fullPath);
-    }
-    
-    private static (string, bool) SaveDTexture(DTexture dTexture, string fullPath)
-        // Only save pairs with non-default paths.
-        => DesignHasDefaultPath(dTexture, fullPath)
-            ? (string.Empty, false)
-            : (DTextureToIdentifier(dTexture), true);
-    
-    public string ToFilename(FilenameService fileNames)
-        => fileNames.DTextureFileSystem;
-
-    public void Save(StreamWriter writer)
-    {
-        SaveToFile(writer, SaveDTexture, true);
     }
 }
