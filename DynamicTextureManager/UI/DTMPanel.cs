@@ -54,7 +54,7 @@ public class DTMPanel : IDisposable
             => FontAwesomeIcon.Trash;
 
         protected override string Description
-            => "Delete the generated Penumbra mod of this dTexture (keeps the dTexture itself).";
+            => "Delete the generated Penumbra mod of this canvas group (keeps the canvas group itself).";
 
         protected override bool Disabled
             => panel._selector.Selected == null || panel._selector.Selected.Data.OutputModDirectory.Length == 0;
@@ -122,7 +122,7 @@ public class DTMPanel : IDisposable
         {
             if (left)
             {
-                if (ImUtf8.CollapsingHeader("Source"u8,
+                if (ImUtf8.CollapsingHeader("Canvases"u8,
                         selected.Data.Source.IsEmpty ? ImGuiTreeNodeFlags.DefaultOpen : ImGuiTreeNodeFlags.None))
                 {
                     _sourceTab.Draw(selected);
@@ -173,5 +173,46 @@ public class DTMPanel : IDisposable
             _penumbra.OpenModInPenumbra(selected.Data.OutputModDirectory);
         if (ImGui.IsItemHovered())
             ImUtf8.HoverTooltip("Open the generated mod in Penumbra's mod tab."u8);
+
+        DrawPriority(selected);
+    }
+
+    // Commit only when the edit ends — priority pushes straight to Penumbra with a redraw,
+    // which must not fire per keystroke while typing a number. The pending value is owned
+    // by the group it was typed for, so a selection switch mid-edit cannot misapply it.
+    private (Guid Owner, int Value)? _priorityEdit;
+
+    private void DrawPriority(DTextures.DTexture selected)
+    {
+        if (_priorityEdit is { } pending && pending.Owner != selected.Identifier)
+            _priorityEdit = null;
+
+        ImGui.SameLine();
+        var priority = _priorityEdit?.Value ?? _overlayMods.EffectivePriority(selected);
+        ImGui.SetNextItemWidth(90 * ImUtf8.GlobalScale);
+        if (ImGui.InputInt("Priority", ref priority))
+            _priorityEdit = (selected.Identifier, priority);
+        if (ImGui.IsItemDeactivatedAfterEdit())
+        {
+            if (_priorityEdit is { } edit && edit.Owner == selected.Identifier)
+                _overlayMods.SetModPriority(selected, edit.Value);
+            _priorityEdit = null;
+        }
+        else if (ImGui.IsItemDeactivated())
+        {
+            _priorityEdit = null;
+        }
+
+        if (ImGui.IsItemHovered())
+            ImUtf8.HoverTooltip("When two canvas groups override the same file, the enabled one with the higher priority wins."u8);
+
+        if (selected.Data.ModPriority != null)
+        {
+            ImGui.SameLine();
+            if (ImUtf8.SmallButton("Default"u8))
+                _overlayMods.SetModPriority(selected, null);
+            if (ImGui.IsItemHovered())
+                ImUtf8.HoverTooltip("Return to the default priority from the settings."u8);
+        }
     }
 }

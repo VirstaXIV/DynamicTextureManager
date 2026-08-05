@@ -102,7 +102,7 @@ public class DTextureFileSystem : FileSystem<DTexture>, IDisposable, ISavable
                     }
                     catch (Exception ex)
                     {
-                        DynamicTextureManager.Messager.NotificationMessage(ex, $"Could not move dTexture to {path} because the folder could not be created.",
+                        DynamicTextureManager.Messager.NotificationMessage(ex, $"Could not move canvas group to {path} because the folder could not be created.",
                             NotificationType.Error);
                     }
 

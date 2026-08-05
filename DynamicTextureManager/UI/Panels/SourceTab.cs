@@ -79,7 +79,7 @@ public sealed class SourceTab(
         DrawPlayerPicker(dTexture, _conflicts);
     }
 
-    /// <summary> Game paths other dTextures also target — both generated mods would override the same file. </summary>
+    /// <summary> Game paths other canvas groups also target — both generated mods would override the same file. </summary>
     private Dictionary<string, List<string>> BuildConflictMap(DTexture current)
     {
         var map = new Dictionary<string, List<string>>(StringComparer.OrdinalIgnoreCase);
@@ -89,7 +89,7 @@ public sealed class SourceTab(
             {
                 if (!map.TryGetValue(material.GamePath, out var names))
                     map[material.GamePath] = names = [];
-                names.Add(other.Name.Text);
+                names.Add($"{other.Name.Text} (priority {overlayMods.EffectivePriority(other)})");
             }
         }
 
@@ -101,13 +101,13 @@ public sealed class SourceTab(
         var source = dTexture.Data.Source;
         if (source.IsEmpty)
         {
-            ImUtf8.Text("Nothing selected yet. Load your worn gear, skin or hair below and add the pieces to edit."u8);
+            ImUtf8.Text("Nothing here yet. Load your worn gear, skin or hair below and add pieces — each becomes a canvas in this group."u8);
             return;
         }
 
         var units = _units;
 
-        ImUtf8.TextWrapped($"Selected Sources ({units.Count}) — edits always rebuild from the captured source files, so changes to the base mod carry over on the next build.");
+        ImUtf8.TextWrapped($"Canvases ({units.Count}) — each piece is a canvas; edits always rebuild from the captured source files, so changes to the base mod carry over on the next build.");
 
         string? remove = null;
         using (var table = ImUtf8.Table("##sourceUnits"u8, 4, ImGuiTableFlags.SizingStretchProp | ImGuiTableFlags.RowBg))
@@ -115,7 +115,7 @@ public sealed class SourceTab(
             if (!table)
                 return;
 
-            ImUtf8.TableSetupColumn("Source"u8);
+            ImUtf8.TableSetupColumn("Canvas"u8);
             ImUtf8.TableSetupColumn("Based On"u8);
             ImUtf8.TableSetupColumn("Materials"u8);
             ImUtf8.TableSetupColumn(""u8, ImGuiTableColumnFlags.WidthFixed);
@@ -141,7 +141,7 @@ public sealed class SourceTab(
                 }
 
                 foreach (var material in unit)
-                    DrawConflictMarker(material.GamePath, conflicts);
+                    DrawConflictMarker(dTexture, material.GamePath, conflicts);
 
                 ImGui.TableNextColumn();
                 DrawModCell(primary.ModDirectory, primary.ModName, primary.ActualPath);
@@ -164,8 +164,8 @@ public sealed class SourceTab(
             RemoveUnit(dTexture, remove);
     }
 
-    /// <summary> An inline warning when another dTexture also targets this game path. </summary>
-    private static void DrawConflictMarker(string gamePath, Dictionary<string, List<string>> conflicts)
+    /// <summary> An inline warning when another canvas group also targets this game path. </summary>
+    private void DrawConflictMarker(DTexture current, string gamePath, Dictionary<string, List<string>> conflicts)
     {
         if (!conflicts.TryGetValue(gamePath, out var names))
             return;
@@ -175,7 +175,7 @@ public sealed class SourceTab(
             ImUtf8.Text("[conflict]"u8);
         if (ImGui.IsItemHovered())
             ImUtf8.HoverTooltip(
-                $"Also targeted by: {string.Join(", ", names)}.\nBoth generated mods would override this material — only the one with the higher Penumbra priority takes effect.");
+                $"Also targeted by: {string.Join(", ", names)}.\nBoth canvas groups build mods overriding this material — the enabled one with the higher priority wins.\nThis group's priority is {overlayMods.EffectivePriority(current)}; adjust it on the Generated Mod line.");
     }
 
     /// <summary> Shows the owning mod of a file as a clickable link opening it in Penumbra, or "Vanilla". </summary>
@@ -299,7 +299,7 @@ public sealed class SourceTab(
             }
 
             foreach (var material in group.Materials)
-                DrawConflictMarker(material.GamePath, conflicts);
+                DrawConflictMarker(dTexture, material.GamePath, conflicts);
         }
     }
 
