@@ -63,7 +63,9 @@ public static class ServiceProvider
     private static ServiceManager AddInterop(this ServiceManager services)
         => services.AddSingleton<PenumbraService>()
                    .AddSingleton<CharacterModelState>()
+                   .AddSingleton<CmpFileCache>()
                    .AddSingleton<SkinColorReader>()
+                   .AddSingleton<HairColorReader>()
                    .AddSingleton<TargetResolver>()
                    .AddSingleton<ShaderHandlerRegistry>()
                    .AddSingleton<SourceFileProvider>()
@@ -97,6 +99,5 @@ public static class ServiceProvider
                     .AddSingleton<DTMFileSystemSelector>()
                     .AddSingleton<UI.Panels.SourceTab>()
                     .AddSingleton<UI.Panels.DecalsTab>()
-                    .AddSingleton<UI.Panels.TextureViewerTab>()
                     .AddSingleton<DTMPanel>();
 }

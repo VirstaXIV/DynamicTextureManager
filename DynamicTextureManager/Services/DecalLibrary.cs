@@ -98,6 +98,20 @@ public sealed class DecalEntry
 }
 
 /// <summary>
+/// An imported effect-pattern image (the scrolling glow texture of the animated
+/// conversions), referenced by id from AnimatedHairEdit. Managed exactly like decals:
+/// normalized to PNG in the same storage folder, deletable through the library — never a
+/// loose reference to an arbitrary user file.
+/// </summary>
+public sealed class EffectEntry
+{
+    public Guid           Id;
+    public string         Name         = string.Empty;
+    public string         OriginalFile = string.Empty;
+    public DateTimeOffset CreatedDate;
+}
+
+/// <summary>
 /// Shared library of decal images (PNG), referenced by id from dTexture layers. Built mods
 /// bake the pixels in, so generated mods stay self-contained even if a decal is later removed
 /// from the library. Images live in a configurable storage folder (default inside the plugin
@@ -107,10 +121,14 @@ public sealed class DecalLibrary : IService
 {
     private readonly FilenameService _filenames;
     private readonly Configuration   _config;
-    private readonly List<DecalEntry> _decals = [];
+    private readonly List<DecalEntry>  _decals  = [];
+    private readonly List<EffectEntry> _effects = [];
 
     public IReadOnlyList<DecalEntry> Decals
         => _decals;
+
+    public IReadOnlyList<EffectEntry> Effects
+        => _effects;
 
     public DecalLibrary(FilenameService filenames, Configuration config)
     {
@@ -126,8 +144,28 @@ public sealed class DecalLibrary : IService
     public string FilePath(Guid id)
         => Path.Combine(StorageDirectory, $"{id}.png");
 
+    /// <summary>
+    /// The image a decal layer renders from: its own temp file in the extracted folder
+    /// (extracted decals belong to their dTexture until explicitly added to the library),
+    /// or its library entry.
+    /// </summary>
+    public string LayerImagePath(DecalLayer layer)
+        => layer.LocalImageFile.Length > 0
+            ? Path.Combine(_filenames.ExtractedDirectory, layer.LocalImageFile)
+            : FilePath(layer.DecalId);
+
+    /// <summary> Effect patterns share the decal storage folder — ids keep the files apart. </summary>
+    public string EffectFilePath(Guid id)
+        => Path.Combine(StorageDirectory, $"{id}.png");
+
+    /// <summary> Bumped on every library mutation, so UIs can cache views derived from the entry lists. </summary>
+    public int Revision { get; private set; }
+
     public DecalEntry? Get(Guid id)
         => _decals.FirstOrDefault(d => d.Id == id);
+
+    public EffectEntry? GetEffect(Guid id)
+        => _effects.FirstOrDefault(e => e.Id == id);
 
     /// <summary> The distinct tags across all decals, for filter UIs. </summary>
     public List<string> AllTags()
@@ -189,6 +227,62 @@ public sealed class DecalLibrary : IService
         {
             DynamicTextureManager.Log.Error($"Could not import generated decal \"{name}\":\n{ex}");
             return null;
+        }
+    }
+
+    /// <summary> Import an image file as an effect pattern. Returns the new entry or null on failure. </summary>
+    public EffectEntry? ImportEffect(string sourcePath)
+    {
+        try
+        {
+            var id = Guid.NewGuid();
+            Directory.CreateDirectory(StorageDirectory);
+
+            using (var image = Image.Load<SixLabors.ImageSharp.PixelFormats.Rgba32>(sourcePath))
+            {
+                image.SaveAsPng(EffectFilePath(id));
+            }
+
+            var entry = new EffectEntry
+            {
+                Id           = id,
+                Name         = Path.GetFileNameWithoutExtension(sourcePath),
+                OriginalFile = Path.GetFileName(sourcePath),
+                CreatedDate  = DateTimeOffset.UtcNow,
+            };
+            _effects.Add(entry);
+            Save();
+            return entry;
+        }
+        catch (Exception ex)
+        {
+            DynamicTextureManager.Log.Error($"Could not import effect pattern from {sourcePath}:\n{ex}");
+            return null;
+        }
+    }
+
+    public void RenameEffect(Guid id, string newName)
+    {
+        if (GetEffect(id) is not { } entry)
+            return;
+
+        entry.Name = newName;
+        Save();
+    }
+
+    public void DeleteEffect(Guid id)
+    {
+        if (_effects.RemoveAll(e => e.Id == id) == 0)
+            return;
+
+        Save();
+        try
+        {
+            File.Delete(EffectFilePath(id));
+        }
+        catch (Exception ex)
+        {
+            DynamicTextureManager.Log.Warning($"Could not delete effect pattern file for {id}: {ex.Message}");
         }
     }
 
@@ -266,14 +360,14 @@ public sealed class DecalLibrary : IService
         }
 
         var copied = new List<string>();
-        foreach (var entry in _decals)
+        foreach (var id in _decals.Select(d => d.Id).Concat(_effects.Select(e => e.Id)))
         {
-            var source = Path.Combine(old, $"{entry.Id}.png");
+            var source = Path.Combine(old, $"{id}.png");
             // Consistent with the load-time drop behavior: missing files are skipped.
             if (!File.Exists(source))
                 continue;
 
-            var destination = Path.Combine(target, $"{entry.Id}.png");
+            var destination = Path.Combine(target, $"{id}.png");
             try
             {
                 File.Copy(source, destination, overwrite: true);
@@ -291,24 +385,25 @@ public sealed class DecalLibrary : IService
                         // Rollback is best-effort; the authoritative copies are still in the old folder.
                     }
 
-                return $"Could not copy {entry.Name}: {ex.Message}";
+                return $"Could not copy {id}: {ex.Message}";
             }
         }
 
         _config.DecalStorageFolder = newFolder;
         _config.Save();
 
-        foreach (var entry in _decals)
+        foreach (var id in _decals.Select(d => d.Id).Concat(_effects.Select(e => e.Id)))
             try
             {
-                File.Delete(Path.Combine(old, $"{entry.Id}.png"));
+                File.Delete(Path.Combine(old, $"{id}.png"));
             }
             catch (Exception ex)
             {
-                DynamicTextureManager.Log.Warning($"Could not remove old decal file for {entry.Id}: {ex.Message}");
+                DynamicTextureManager.Log.Warning($"Could not remove old library file for {id}: {ex.Message}");
             }
 
         _decals.Clear();
+        _effects.Clear();
         Load();
         return null;
     }
@@ -342,6 +437,22 @@ public sealed class DecalLibrary : IService
                     Preset       = token["Preset"] is JObject preset ? DecalPreset.Load(preset) : null,
                 });
             }
+
+            if (json["Effects"] is JArray effects)
+                foreach (var token in effects.OfType<JObject>())
+                {
+                    var id = token["Id"]?.ToObject<Guid>() ?? Guid.Empty;
+                    if (id == Guid.Empty || !File.Exists(EffectFilePath(id)))
+                        continue;
+
+                    _effects.Add(new EffectEntry
+                    {
+                        Id           = id,
+                        Name         = token["Name"]?.ToObject<string>() ?? id.ToString(),
+                        OriginalFile = token["OriginalFile"]?.ToObject<string>() ?? string.Empty,
+                        CreatedDate  = token["CreatedDate"]?.ToObject<DateTimeOffset?>() ?? DateTimeOffset.UtcNow,
+                    });
+                }
         }
         catch (Exception ex)
         {
@@ -351,6 +462,7 @@ public sealed class DecalLibrary : IService
 
     private void Save()
     {
+        ++Revision;
         try
         {
             var json = new JObject
@@ -368,6 +480,13 @@ public sealed class DecalLibrary : IService
                     if (d.Preset != null)
                         token["Preset"] = d.Preset.Serialize();
                     return token;
+                })),
+                ["Effects"] = new JArray(_effects.Select(e => new JObject
+                {
+                    ["Id"]           = e.Id,
+                    ["Name"]         = e.Name,
+                    ["OriginalFile"] = e.OriginalFile,
+                    ["CreatedDate"]  = e.CreatedDate.ToString("O"),
                 })),
             };
             File.WriteAllText(_filenames.DecalIndexFile, json.ToString(Formatting.Indented));

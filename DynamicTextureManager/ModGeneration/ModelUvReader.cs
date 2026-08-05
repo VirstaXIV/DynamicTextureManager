@@ -9,7 +9,6 @@ using DynamicTextureManager.DTextures.Data;
 using DynamicTextureManager.Interop;
 using OtterGui.Services;
 using Penumbra.GameData.Files;
-using Penumbra.GameData.Files.MaterialStructs;
 
 namespace DynamicTextureManager.ModGeneration;
 
@@ -231,31 +230,6 @@ public sealed class ModelUvReader(IDataManager dataManager, PenumbraService penu
         return string.Empty;
     }
 
-    /// <summary>
-    /// TEMPORARY diagnostic (2026-07 overlay-part investigation): a quick summary of a
-    /// material's shader package and whether it carries a colorset — distinguishes a diffuse-
-    /// paintable overlay (nails/accents) from a colorset-driven one (piercings/pubic hair,
-    /// which decals cannot target via the tattoo/diffuse-bake mechanism, only via the
-    /// gear-style id-map mechanism). Remove alongside the rest of the A0 diagnostic.
-    /// </summary>
-    private string ClassifyOverlayMaterial(string gamePath)
-    {
-        try
-        {
-            var bytes = LoadGameFile(gamePath);
-            if (bytes == null)
-                return "unreadable";
-
-            var mtrl = new MtrlFile(bytes);
-            var hasColorTable = mtrl.Table is ColorTable or LegacyColorTable;
-            return $"shader {mtrl.ShaderPackage.Name}, colorTable={hasColorTable}";
-        }
-        catch (Exception ex)
-        {
-            return $"unreadable ({ex.Message})";
-        }
-    }
-
     /// <summary> The race code in a body skin material's path — a fallback only, see <see cref="BodyTopModelPattern"/>. </summary>
     public static string BodyMaterialRace(string materialGamePath)
     {
@@ -317,6 +291,28 @@ public sealed class ModelUvReader(IDataManager dataManager, PenumbraService penu
     }
 
     /// <summary>
+    /// Raw material names the source's model references (e.g. "/mt_c0201h0179_hir_a.mtrl") —
+    /// how a multi-material hairstyle's OTHER materials are discovered without each having
+    /// been added as a source. Empty when the model cannot be loaded.
+    /// </summary>
+    public IReadOnlyList<string> ModelMaterialNames(SourcePath source)
+    {
+        if (source.MdlGamePath.Length == 0)
+            return [];
+
+        try
+        {
+            var bytes = LoadModelBytes(source);
+            return bytes == null ? [] : new MdlFile(bytes).Materials;
+        }
+        catch (Exception ex)
+        {
+            DynamicTextureManager.Log.Warning($"Could not read material names of {source.MdlGamePath}: {ex.Message}");
+            return [];
+        }
+    }
+
+    /// <summary>
     /// Material file names the resolved SmallClothes body models reference — i.e. the skin
     /// materials the character's body actually renders with. A body material outside this set
     /// (e.g. the vanilla _a material while a body mod is active) only shows on stray gear-
@@ -357,13 +353,28 @@ public sealed class ModelUvReader(IDataManager dataManager, PenumbraService penu
     /// Each model resolves through Penumbra so modded bodies load. Null (fall back to the
     /// recorded model) when nothing references the material — e.g. nonstandard NPC bodies.
     /// </summary>
-    /// <summary> Resolve the SmallClothes model set through Penumbra — cheap enough to run per lookup for the cache key. </summary>
-    private (string Race, (string GamePath, string Actual)[] Resolved) ResolveBodyModels(SourcePath source)
+    /// <summary>
+    /// Resolve the SmallClothes model set through Penumbra for the cache key. The UI asks for
+    /// body meshes every frame (viewport, overlay entries), and each resolve is four IPC
+    /// round trips — a short TTL keeps mod switches visible while dropping the per-frame cost.
+    /// </summary>
+    private (string Race, (string GamePath, string Actual)[] Resolved, string Joined) ResolveBodyModels(SourcePath source)
     {
         var topMatch = BodyTopModelPattern.Match(source.MdlGamePath);
         var race     = topMatch.Success ? topMatch.Groups[1].Value : BodyMaterialRace(source.GamePath);
-        return (race, Array.ConvertAll(BodyModelSetForRace(race), p => (p, penumbra.ResolvePlayerPath(p))));
+        var now      = Environment.TickCount64;
+        if (_bodyResolveCache.TryGetValue(race, out var hit) && now - hit.AtMs < BodyResolveTtlMs)
+            return (race, hit.Resolved, hit.Joined);
+
+        var resolved = Array.ConvertAll(BodyModelSetForRace(race), p => (p, penumbra.ResolvePlayerPath(p)));
+        var joined   = string.Join(";", resolved.Select(r => r.Item2));
+        _bodyResolveCache[race] = (now, resolved, joined);
+        return (race, resolved, joined);
     }
+
+    private const long BodyResolveTtlMs = 1000;
+
+    private readonly Dictionary<string, (long AtMs, (string GamePath, string Actual)[] Resolved, string Joined)> _bodyResolveCache = [];
 
     /// <summary> Read and parse the resolved model set — only on cache misses. </summary>
     private List<MdlFile> LoadBodyModels((string GamePath, string Actual)[] resolved)
@@ -385,8 +396,8 @@ public sealed class ModelUvReader(IDataManager dataManager, PenumbraService penu
 
     private MaterialMesh? GetBodyMesh(SourcePath source)
     {
-        var (race, resolved) = ResolveBodyModels(source);
-        var key = $"bodyset|{source.GamePath}|{string.Join(";", resolved.Select(r => r.Actual))}";
+        var (race, resolved, joined) = ResolveBodyModels(source);
+        var key = $"bodyset|{source.GamePath}|{joined}";
         if (_meshCache.TryGetValue(key, out var cached))
             return cached;
 
@@ -471,7 +482,7 @@ public sealed class ModelUvReader(IDataManager dataManager, PenumbraService penu
         var result = new List<BodyOverlayMaterial>();
         try
         {
-            var (race, resolved) = ResolveBodyModels(source);
+            var (race, resolved, _) = ResolveBodyModels(source);
             var models = LoadBodyModels(resolved);
             var (_, variant, editableNames) = ComputeEditableBodyMaterials(source, race, models);
 
@@ -514,8 +525,23 @@ public sealed class ModelUvReader(IDataManager dataManager, PenumbraService penu
     private byte[]? LoadModelBytes(SourcePath source)
     {
         if (source.MdlActualPath.Length > 0 && Path.IsPathRooted(source.MdlActualPath) && File.Exists(source.MdlActualPath))
+        {
+            DynamicTextureManager.Log.Debug($"Model {source.MdlGamePath}: loading stored file \"{source.MdlActualPath}\".");
             return File.ReadAllBytes(source.MdlActualPath);
+        }
 
+        // The stored snapshot can be absent or stale (resource trees do not always carry a
+        // usable actual path for model nodes — 2026-07-29: a modded hair mdl came through as
+        // its game path, silently rendering the VANILLA mesh under the mod's textures).
+        // Resolve fresh through the collection like the body models do.
+        var resolved = penumbra.ResolvePlayerPath(source.MdlGamePath);
+        if (resolved.Length > 0 && Path.IsPathRooted(resolved) && File.Exists(resolved))
+        {
+            DynamicTextureManager.Log.Debug($"Model {source.MdlGamePath}: loading resolved file \"{resolved}\".");
+            return File.ReadAllBytes(resolved);
+        }
+
+        DynamicTextureManager.Log.Debug($"Model {source.MdlGamePath}: loading vanilla game file.");
         return dataManager.GetFile(source.MdlGamePath)?.Data;
     }
 
@@ -750,7 +776,7 @@ public sealed class ModelUvReader(IDataManager dataManager, PenumbraService penu
 
     private readonly record struct RawVertex(Vector3 Position, Vector3 Normal, Vector2 Uv);
 
-    /// <summary> Decode positions, normals, UV0 and skinning of one mesh from the raw vertex streams. </summary>
+    /// <summary> Decode positions, normals and UV0 of one mesh from the raw vertex streams. </summary>
     private static bool TryReadMeshVertices(MdlFile mdl, byte[] data, int meshIndex, out RawVertex[] vertices)
     {
         vertices = [];
@@ -805,7 +831,16 @@ public sealed class ModelUvReader(IDataManager dataManager, PenumbraService penu
 
     private static Vector3? ReadVector3(byte[] data, long p, MdlFile.VertexType type)
     {
-        if (p < 0 || p + 16 > data.Length)
+        // Bound by what each format actually reads — a fixed 16-byte requirement would
+        // spuriously reject a 4-byte element sitting at the very end of a vertex stream.
+        var size = type switch
+        {
+            MdlFile.VertexType.Single3 or MdlFile.VertexType.Single4 => 12,
+            MdlFile.VertexType.Half4                                 => 6,
+            MdlFile.VertexType.NByte4                                => 4,
+            _                                                        => 0,
+        };
+        if (p < 0 || p + size > data.Length)
             return null;
 
         return type switch

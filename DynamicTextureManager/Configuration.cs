@@ -16,17 +16,11 @@ namespace DynamicTextureManager;
 
 public class Configuration: IPluginConfiguration, ISavable
 {
-    public bool OpenFoldersByDefault { get; set; } = false;
     public bool AutoReload { get; set; } = true;
     public int OverlayPriority { get; set; } = 999;
-    public bool LivePreview { get; set; } = true;
     public bool DeleteModWithDTexture { get; set; } = true;
     public int DefaultDecalMaxColors { get; set; } = 6;
     public bool ShowUvSeams { get; set; } = true;
-    public Guid SelectedDTexture { get; set; } = Guid.Empty;
-    public float CurrentDTextureSelectorWidth { get; set; } = 200f;
-    public float DTMSelectorMinimumScale { get; set; } = 0.1f;
-    public float DTMSelectorMaximumScale { get; set; } = 0.5f;
     public DoubleModifier DeleteDTextureModifier { get; set; } = new(ModifierHotkey.Control, ModifierHotkey.Shift);
 
     /// <summary> Folder decal images are stored in; empty uses the default inside the plugin config directory. </summary>
@@ -40,12 +34,18 @@ public class Configuration: IPluginConfiguration, ISavable
     /// </summary>
     public uint PreviewSkinTone { get; set; } = 0xFF8AAAD6;
 
+
     /// <summary>
-    /// Whether <see cref="PreviewSkinTone"/> was ever set deliberately (manual ColorEdit or the
-    /// "Use my character's skin color" button) — gates the Load Skin auto-populate from
-    /// clobbering a choice the user actually made.
+    /// Preview-only hair colors (packed Rgba32) for hair materials in the 3D viewport. Hair has
+    /// no diffuse texture — the game lerps the customize main/highlight colors by the normal
+    /// map's blue channel in-shader, so the preview needs stand-in colors. Never written into
+    /// any texture.
     /// </summary>
-    public bool PreviewSkinToneUserSet { get; set; } = false;
+    public uint PreviewHairColor { get; set; } = 0xFF2A2D45;
+
+    /// <summary> Preview-only hair highlight color, see <see cref="PreviewHairColor"/>. </summary>
+    public uint PreviewHairHighlight { get; set; } = 0xFFC8B09A;
+
 
     /// <summary> Debug tunables for the empirical mask-map finish semantics, see ModGeneration.FinishMapping. </summary>
     public int MaskRoughnessChannel { get; set; } = 1;
@@ -78,9 +78,7 @@ public class Configuration: IPluginConfiguration, ISavable
     }
     
     public void Save() => _saveService.DelaySave(this);
-    
-    public void SaveNow() => _saveService.ImmediateSave(this);
-    
+
     private void Load()
     {
         if (!File.Exists(_saveService.FileNames.ConfigFile))

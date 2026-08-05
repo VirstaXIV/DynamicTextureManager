@@ -20,8 +20,11 @@ public sealed class TextureCompositor(DecalLibrary decals) : IService
     /// Apply all enabled layers onto the base texture. Returns the composited RGBA buffer.
     /// Surface-projected layers need the material's mesh geometry; without it they are skipped.
     /// </summary>
-    public byte[] Composite(DecodedTexture baseTexture, IEnumerable<TextureLayer> layers, MaterialMesh? mesh = null)
+    private byte[] Composite(DecodedTexture baseTexture, IEnumerable<TextureLayer> layers, MaterialMesh? mesh)
     {
+        if (!layers.Any(l => l.Enabled))
+            return (byte[])baseTexture.Rgba.Clone();
+
         using var image = Image.LoadPixelData<Rgba32>(baseTexture.Rgba, baseTexture.Width, baseTexture.Height);
 
         foreach (var layer in layers)
@@ -33,6 +36,9 @@ public sealed class TextureCompositor(DecalLibrary decals) : IService
             {
                 case DecalLayer decal:
                     ApplyDecal(image, decal, mesh);
+                    break;
+                case HairShineLayer shine:
+                    HairAdjust.ApplyShine(image, shine);
                     break;
                 default:
                     DynamicTextureManager.Log.Warning($"Unknown layer type {layer.LayerType}, skipped.");
@@ -65,9 +71,12 @@ public sealed class TextureCompositor(DecalLibrary decals) : IService
     /// map), applying each layer's material effect instead of its colors. Placement is fully
     /// UV-normalized, so resolution differences between the siblings do not matter.
     /// </summary>
-    public byte[] CompositeSiblingEffects(DecodedTexture baseTexture, IEnumerable<TextureLayer> layers, TextureSlot slot,
-        MaterialMesh? mesh = null)
+    private byte[] CompositeSiblingEffects(DecodedTexture baseTexture, IEnumerable<TextureLayer> layers, TextureSlot slot,
+        MaterialMesh? mesh)
     {
+        if (!layers.OfType<DecalLayer>().Any(l => l.Enabled && l.HasMaterialEffects))
+            return baseTexture.Rgba;
+
         using var image = Image.LoadPixelData<Rgba32>(baseTexture.Rgba, baseTexture.Width, baseTexture.Height);
 
         foreach (var layer in layers.OfType<DecalLayer>())
@@ -119,12 +128,45 @@ public sealed class TextureCompositor(DecalLibrary decals) : IService
     private static byte LerpByte(byte from, byte to, float t)
         => (byte)Math.Clamp((int)Math.Round(from + (to - from) * t), 0, 255);
 
+    private sealed record CachedDecal(long Stamp, Rgba32[] Pixels, int Width, int Height);
+
+    private readonly Dictionary<string, CachedDecal> _decalCache = new(StringComparer.OrdinalIgnoreCase);
+
+    /// <summary>
+    /// Decal image decode, cached by file stamp — every composite stamps the same few PNGs,
+    /// and effect replays load each one a second time per pass. The cached pixels are copied
+    /// into a fresh image, so callers can keep mutating (flip/resize/rotate) their copy.
+    /// </summary>
+    private Image<Rgba32> LoadDecal(string path)
+    {
+        var stamp = File.GetLastWriteTimeUtc(path).Ticks;
+        CachedDecal? cached;
+        lock (_decalCache)
+            _decalCache.TryGetValue(path, out cached);
+
+        if (cached == null || cached.Stamp != stamp)
+        {
+            using var image = Image.Load<Rgba32>(path);
+            var pixels = new Rgba32[image.Width * image.Height];
+            image.CopyPixelDataTo(pixels);
+            cached = new CachedDecal(stamp, pixels, image.Width, image.Height);
+            lock (_decalCache)
+            {
+                if (_decalCache.Count >= 8 && !_decalCache.ContainsKey(path))
+                    _decalCache.Clear();
+                _decalCache[path] = cached;
+            }
+        }
+
+        return Image.LoadPixelData<Rgba32>(cached.Pixels, cached.Width, cached.Height);
+    }
+
     private void ApplyDecal(Image<Rgba32> target, DecalLayer layer, MaterialMesh? mesh, TextureSlot? effectSlot = null)
     {
-        var path = decals.FilePath(layer.DecalId);
+        var path = decals.LayerImagePath(layer);
         if (!File.Exists(path))
         {
-            DynamicTextureManager.Log.Warning($"Decal {layer.DecalId} is missing from the library, layer skipped.");
+            DynamicTextureManager.Log.Warning($"Decal image {path} is missing, layer skipped.");
             return;
         }
 
@@ -136,7 +178,7 @@ public sealed class TextureCompositor(DecalLibrary decals) : IService
                 return;
             }
 
-            using var source = Image.Load<Rgba32>(path);
+            using var source = LoadDecal(path);
             ApplyFlips(source, layer);
             SurfaceDecalBaker.Bake(target, source, mesh, layer, effectSlot);
             return;
@@ -147,7 +189,7 @@ public sealed class TextureCompositor(DecalLibrary decals) : IService
         var width  = Math.Max(1, (int)Math.Round(layer.ScaleX * scale * target.Width));
         var height = Math.Max(1, (int)Math.Round(layer.ScaleY * scale * target.Height));
 
-        using var decal = Image.Load<Rgba32>(path);
+        using var decal = LoadDecal(path);
         ApplyFlips(decal, layer);
         var sourceWidth = decal.Width;
         // Bilinear resampling invents blend colors at edges; keep colorset decals crisp so
@@ -196,6 +238,8 @@ public sealed class TextureCompositor(DecalLibrary decals) : IService
     private static void ApplyColorDecal(Image<Rgba32> target, Image<Rgba32> decal, DecalLayer layer, int offsetX, int offsetY)
     {
         var opacity = Math.Clamp(layer.Opacity, 0f, 1f);
+        if (opacity <= 0f)
+            return;
 
         for (var dy = 0; dy < decal.Height; ++dy)
         {
@@ -209,15 +253,19 @@ public sealed class TextureCompositor(DecalLibrary decals) : IService
                 if (tx < 0 || tx >= target.Width)
                     continue;
 
-                var sample = DecalQuantizer.ApplyTint(decal[dx, dy], layer);
+                var source = decal[dx, dy];
+                if (source.A == 0)
+                    continue;
+
+                var sample = DecalQuantizer.ApplyTint(source, layer);
                 var alpha  = sample.A / 255f * opacity;
                 if (alpha <= 0f)
                     continue;
 
                 var pixel = target[tx, ty];
-                pixel.R        = LerpByte(pixel.R, sample.R, alpha);
-                pixel.G        = LerpByte(pixel.G, sample.G, alpha);
-                pixel.B        = LerpByte(pixel.B, sample.B, alpha);
+                pixel.R = LerpByte(pixel.R, sample.R, alpha);
+                pixel.G = LerpByte(pixel.G, sample.G, alpha);
+                pixel.B = LerpByte(pixel.B, sample.B, alpha);
                 target[tx, ty] = pixel;
             }
         }
@@ -233,7 +281,7 @@ public sealed class TextureCompositor(DecalLibrary decals) : IService
     {
         if (!File.Exists(stampPath))
         {
-            DynamicTextureManager.Log.Warning($"Extracted decal {layer.DecalId} is missing from the library — its original footprint stays in place.");
+            DynamicTextureManager.Log.Warning($"Extracted decal stamp {stampPath} is missing — its original footprint stays in place.");
             return;
         }
 
@@ -246,8 +294,7 @@ public sealed class TextureCompositor(DecalLibrary decals) : IService
         if (stamp.Width != w || stamp.Height != h)
             stamp.Mutate(c => c.Resize(w, h, KnownResamplers.NearestNeighbor));
 
-        var threshold = layer.AlphaThresholdByte;
-        var fillR     = IdMapTexel.PairByte(layer.FillPair);
+        var fillR = IdMapTexel.PairByte(layer.FillPair);
 
         for (var dy = 0; dy < h; ++dy)
         {
@@ -258,7 +305,10 @@ public sealed class TextureCompositor(DecalLibrary decals) : IService
             for (var dx = 0; dx < w; ++dx)
             {
                 var tx = x0 + dx;
-                if (tx < 0 || tx >= target.Width || stamp[dx, dy].A < threshold)
+                // Every marked texel was decal (content OR the alpha-1 erase halo) — the
+                // layer's threshold only shapes the RESTAMP; erasing less than the whole
+                // footprint leaves the original decal's fringe speckled across the map.
+                if (tx < 0 || tx >= target.Width || stamp[dx, dy].A == 0)
                     continue;
 
                 var pixel = target[tx, ty];

@@ -14,6 +14,9 @@ public sealed class DTextureData
     /// <summary> Colorset edits keyed by material game path. </summary>
     public Dictionary<string, MaterialEdit> Materials = [];
 
+    /// <summary> Animated-highlight conversions keyed by hair material game path. </summary>
+    public Dictionary<string, AnimatedHairEdit> AnimatedHair = [];
+
     /// <summary> Texture layer stacks keyed by texture game path. </summary>
     public Dictionary<string, List<TextureLayer>> Textures = [];
 
@@ -31,7 +34,8 @@ public sealed class DTextureData
     public string LastBuiltHash = string.Empty;
 
     public bool HasEdits
-        => Materials.Values.Any(m => !m.IsEmpty) || Textures.Values.Any(t => t.Count > 0);
+        => Materials.Values.Any(m => !m.IsEmpty) || Textures.Values.Any(t => t.Count > 0)
+         || AnimatedHair.Values.Any(a => a.Enabled);
 
     public JObject Serialize()
         => new()
@@ -43,6 +47,8 @@ public sealed class DTextureData
             ["Textures"] = new JObject(Textures
                 .Where(kvp => kvp.Value.Count > 0)
                 .Select(kvp => new JProperty(kvp.Key, new JArray(kvp.Value.Select(l => l.Serialize()))))),
+            ["AnimatedHair"] = new JObject(AnimatedHair
+                .Select(kvp => new JProperty(kvp.Key, kvp.Value.Serialize()))),
             ["TextureSourcePaths"] = new JObject(TextureSourcePaths
                 .Select(kvp => new JProperty(kvp.Key, kvp.Value))),
             ["OutputModDirectory"] = OutputModDirectory,
@@ -69,6 +75,11 @@ public sealed class DTextureData
         if (json["Textures"] is JObject textures)
             foreach (var property in textures.Properties())
                 ret.Textures[property.Name] = TextureLayer.LoadList(property.Value);
+
+        if (json["AnimatedHair"] is JObject animated)
+            foreach (var property in animated.Properties())
+                if (property.Value is JObject value)
+                    ret.AnimatedHair[property.Name] = AnimatedHairEdit.Load(value);
 
         if (json["TextureSourcePaths"] is JObject sourcePaths)
             foreach (var property in sourcePaths.Properties())

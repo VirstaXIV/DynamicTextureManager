@@ -16,9 +16,7 @@ public sealed class DynamicTextureManager : IDalamudPlugin
     public string Name => "DynamicTextureManager";
     
     public static readonly string Version = Assembly.GetExecutingAssembly().GetName().Version?.ToString() ?? string.Empty;
-    public static readonly string CommitHash =
-        Assembly.GetExecutingAssembly().GetCustomAttribute<AssemblyInformationalVersionAttribute>()?.InformationalVersion ?? "Unknown";
-    
+
     public static readonly Logger Log = new();
     public static MessageService Messager { get; private set; } = null!;
     private readonly ServiceManager _services;

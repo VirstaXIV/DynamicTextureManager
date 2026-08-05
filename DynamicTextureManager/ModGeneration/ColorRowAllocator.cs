@@ -17,7 +17,6 @@ namespace DynamicTextureManager.ModGeneration;
 /// </summary>
 public static class ColorRowAllocator
 {
-    public const int RowCount  = 32;
     public const int PairCount = 16;
 
     /// <summary> Channel spread at or below which a color counts as achromatic (gray-scale). </summary>

@@ -23,33 +23,13 @@ public static class DecalQuantizer
     private const int SampleBudget = 120_000;
 
     /// <summary>
-    /// Extract at most <paramref name="maxColors"/> colors from the pixels whose alpha passes
-    /// the layer's threshold. Images that already use few enough distinct colors keep them
-    /// exactly; otherwise similar colors are merged by a Wu quantizer. The palette is sorted
-    /// by luminance (brightest first) so re-extracting the same image is stable.
-    /// </summary>
-    public static uint[] ExtractPalette(string pngPath, int maxColors, float alphaThreshold)
-    {
-        maxColors = Math.Max(1, maxColors);
-        var opaque = LoadOpaquePixels(pngPath, alphaThreshold);
-        if (opaque.Count == 0)
-            return [];
-
-        var distinct = opaque.Distinct().ToList();
-        if (distinct.Count > maxColors)
-            distinct = QuantizeDown(opaque, maxColors);
-
-        return SortPalette(distinct);
-    }
-
-    /// <summary>
     /// Extract the SMALLEST palette that still renders the image faithfully: candidate
     /// palettes grow one color at a time until the blended rendering error — each pixel's
     /// distance to the nearest gradient-pair segment or solo color, the same model the
     /// composite renders with — drops within <paramref name="mergeDistance"/> (0-255 RGB
     /// scale, 95th percentile so stray specks don't force extra colors). The color count is
     /// automatic; the threshold is the only knob. Deterministic for the same image and
-    /// settings, like <see cref="ExtractPalette"/>.
+    /// settings.
     /// </summary>
     public static uint[] ExtractPaletteAuto(string pngPath, float alphaThreshold, float mergeDistance)
     {
@@ -316,14 +296,16 @@ public static class DecalQuantizer
             }
         }
 
-        var a  = new Rgba32(palette[near]);
-        var b  = new Rgba32(palette[far]);
-        var ab = new [] { b.R - a.R, b.G - a.G, b.B - a.B };
-        var lengthSq = ab[0] * ab[0] + ab[1] * ab[1] + ab[2] * ab[2];
+        var a   = new Rgba32(palette[near]);
+        var b   = new Rgba32(palette[far]);
+        var abR = b.R - a.R;
+        var abG = b.G - a.G;
+        var abB = b.B - a.B;
+        var lengthSq = abR * abR + abG * abG + abB * abB;
         if (lengthSq == 0)
             return (near, far, 0f);
 
-        var dot = (pixel.R - a.R) * ab[0] + (pixel.G - a.G) * ab[1] + (pixel.B - a.B) * ab[2];
+        var dot = (pixel.R - a.R) * abR + (pixel.G - a.G) * abG + (pixel.B - a.B) * abB;
         return (near, far, Math.Clamp(dot / (float)lengthSq, 0f, 1f));
     }
 
@@ -357,14 +339,16 @@ public static class DecalQuantizer
     /// </summary>
     public static byte GradientG(in Rgba32 sample, uint aColor, uint bColor)
     {
-        var a  = new Rgba32(aColor);
-        var b  = new Rgba32(bColor);
-        var ba = new[] { a.R - b.R, a.G - b.G, a.B - b.B };
-        var lengthSq = ba[0] * ba[0] + ba[1] * ba[1] + ba[2] * ba[2];
+        var a   = new Rgba32(aColor);
+        var b   = new Rgba32(bColor);
+        var baR = a.R - b.R;
+        var baG = a.G - b.G;
+        var baB = a.B - b.B;
+        var lengthSq = baR * baR + baG * baG + baB * baB;
         if (lengthSq == 0)
             return 255;
 
-        var dot = (sample.R - b.R) * ba[0] + (sample.G - b.G) * ba[1] + (sample.B - b.B) * ba[2];
+        var dot = (sample.R - b.R) * baR + (sample.G - b.G) * baG + (sample.B - b.B) * baB;
         return (byte)Math.Clamp((int)Math.Round(255f * dot / lengthSq), 0, 255);
     }
 

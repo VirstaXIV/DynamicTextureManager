@@ -1,4 +1,3 @@
-using System;
 using System.Numerics;
 using Dalamud.Bindings.ImGui;
 using Dalamud.Interface;
@@ -27,14 +26,11 @@ public sealed class DTMFileSystemSelector : FileSystemSelector<DTexture, DTMFile
     { }
     
     protected override float CurrentWidth
-        => _config.CurrentDTextureSelectorWidth * ImUtf8.GlobalScale;
-    
-    protected override float MinimumScaling
-        => _config.DTMSelectorMinimumScale;
+        => 200f * ImUtf8.GlobalScale;
 
     protected override float MaximumScaling
-        => _config.DTMSelectorMaximumScale;
-    
+        => 0.5f;
+
     public DTMFileSystemSelector(DTextureManager dTextureManager, DTextureFileSystem fileSystem, IKeyState keyState,
         Configuration config, Logger log, OverlayModManager overlayMods)
         : base(fileSystem, keyState, log, allowMultipleSelection: true)
@@ -48,13 +44,6 @@ public sealed class DTMFileSystemSelector : FileSystemSelector<DTexture, DTMFile
         AddButton(DeleteButton, 1000);
         UnsubscribeRightClickLeaf(RenameLeaf);
         SetFilterTooltip();
-        
-        if (_config.SelectedDTexture == Guid.Empty)
-            return;
-
-        var dTexture = dTextureManager.DTextures.ByIdentifier(_config.SelectedDTexture);
-        if (dTexture != null)
-            SelectByValue(dTexture);
     }
     
     public override void Dispose()
@@ -64,10 +53,7 @@ public sealed class DTMFileSystemSelector : FileSystemSelector<DTexture, DTMFile
     
     public override ISortMode<DTexture> SortMode
         => _config.SortMode;
-    
-    protected override bool FoldersDefaultOpen
-        => _config.OpenFoldersByDefault;
-    
+
     private void NewDTextureButton(Vector2 size)
     {
         if (ImGuiUtil.DrawDisabledButton(FontAwesomeIcon.Plus.ToIconString(), size, "Create a new dTexture with default configuration.", false,
