@@ -122,7 +122,7 @@ public class DTMPanel : IDisposable
         {
             if (left)
             {
-                if (ImUtf8.CollapsingHeader("Canvases"u8,
+                if (ImUtf8.CollapsingHeader("Sources"u8,
                         selected.Data.Source.IsEmpty ? ImGuiTreeNodeFlags.DefaultOpen : ImGuiTreeNodeFlags.None))
                 {
                     _sourceTab.Draw(selected);
