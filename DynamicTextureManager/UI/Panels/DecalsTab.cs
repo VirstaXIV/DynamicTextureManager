@@ -325,6 +325,14 @@ public sealed class DecalsTab(
     private List<TextureOption>? _materialOptionsCache;
     private (List<TextureOption>? Options, string Material) _materialOptionsKey;
 
+    // Unit grouping + label regexes redone only when the option list turns over (it is
+    // rebuilt whenever the source materials change), not per frame.
+    private List<(SourceUnit Unit, List<SourcePath> Parts)>? _unitSelectorCache;
+    private List<TextureOption>?                             _unitSelectorKey;
+
+    private MtrlFile?  _manageRowDiffuseMtrl;
+    private Vector3[]? _manageRowDiffuse;
+
     /// <summary>
     /// The editing target selector: sources are MODEL units (the pieces added to this mod),
     /// so the dropdown lists those. A piece with several editable materials gets a Part
@@ -332,12 +340,18 @@ public sealed class DecalsTab(
     /// </summary>
     private void DrawUnitSelector(DTexture dTexture)
     {
-        var units = SourceUnits.Of(dTexture.Data.Source)
-            .Select(u => (Unit: u, Parts: u.Materials
-                .Where(m => !m.Overlay && _options!.Any(o => string.Equals(o.MaterialGamePath, m.GamePath, StringComparison.OrdinalIgnoreCase)))
-                .ToList()))
-            .Where(t => t.Parts.Count > 0)
-            .ToList();
+        if (_unitSelectorCache == null || !ReferenceEquals(_unitSelectorKey, _options))
+        {
+            _unitSelectorKey   = _options;
+            _unitSelectorCache = SourceUnits.Of(dTexture.Data.Source)
+                .Select(u => (Unit: u, Parts: u.Materials
+                    .Where(m => !m.Overlay && _options!.Any(o => string.Equals(o.MaterialGamePath, m.GamePath, StringComparison.OrdinalIgnoreCase)))
+                    .ToList()))
+                .Where(t => t.Parts.Count > 0)
+                .ToList();
+        }
+
+        var units = _unitSelectorCache;
         if (units.Count == 0)
             return;
 
@@ -486,7 +500,7 @@ public sealed class DecalsTab(
     /// <summary> Debounced on-model preview of slot color/dye changes through a temporary mod. </summary>
     private void UpdateSlotPreview(DTexture dTexture)
     {
-        if (!_slotPreviewDirty || !config.LivePreview || _slotPreviewOption == null)
+        if (!_slotPreviewDirty || _slotPreviewOption == null)
             return;
         if (Environment.TickCount64 - _slotPreviewMs < SlotPreviewDebounceMs)
             return;
@@ -539,9 +553,6 @@ public sealed class DecalsTab(
 
         ImUtf8.HoverTooltip("Import an image into the decal library and stamp it onto the selected material right away.\nTo import without stamping, use the Decal Library window (title-bar button)."u8);
     }
-
-    private void AddLayer(DTexture dTexture, Guid decalId)
-        => AddLayer(dTexture, decalId, decals.Get(decalId)?.Preset);
 
     private void AddLayer(DTexture dTexture, Guid decalId, DecalPreset? preset)
     {
@@ -3137,7 +3148,15 @@ public sealed class DecalsTab(
         }
 
         var claimedRows = ClaimedRowsForMaterial(dTexture, option.MaterialGamePath, null);
-        var rowDiffuse  = MaterialEditApplier.ResolveRowDiffuse(option.Mtrl, null);
+        // The base (no-edit) row colors depend only on the captured material — resolve once
+        // per capture, not every frame this section is open.
+        if (!ReferenceEquals(_manageRowDiffuseMtrl, option.Mtrl))
+        {
+            _manageRowDiffuseMtrl = option.Mtrl;
+            _manageRowDiffuse     = MaterialEditApplier.ResolveRowDiffuse(option.Mtrl, null);
+        }
+
+        var rowDiffuse = _manageRowDiffuse;
 
         DrawSlotAvailability(dTexture, option, claimedRows, rowDiffuse);
 

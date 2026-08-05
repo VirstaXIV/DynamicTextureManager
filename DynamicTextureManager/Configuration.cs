@@ -16,17 +16,11 @@ namespace DynamicTextureManager;
 
 public class Configuration: IPluginConfiguration, ISavable
 {
-    public bool OpenFoldersByDefault { get; set; } = false;
     public bool AutoReload { get; set; } = true;
     public int OverlayPriority { get; set; } = 999;
-    public bool LivePreview { get; set; } = true;
     public bool DeleteModWithDTexture { get; set; } = true;
     public int DefaultDecalMaxColors { get; set; } = 6;
     public bool ShowUvSeams { get; set; } = true;
-    public Guid SelectedDTexture { get; set; } = Guid.Empty;
-    public float CurrentDTextureSelectorWidth { get; set; } = 200f;
-    public float DTMSelectorMinimumScale { get; set; } = 0.1f;
-    public float DTMSelectorMaximumScale { get; set; } = 0.5f;
     public DoubleModifier DeleteDTextureModifier { get; set; } = new(ModifierHotkey.Control, ModifierHotkey.Shift);
 
     /// <summary> Folder decal images are stored in; empty uses the default inside the plugin config directory. </summary>
@@ -84,9 +78,7 @@ public class Configuration: IPluginConfiguration, ISavable
     }
     
     public void Save() => _saveService.DelaySave(this);
-    
-    public void SaveNow() => _saveService.ImmediateSave(this);
-    
+
     private void Load()
     {
         if (!File.Exists(_saveService.FileNames.ConfigFile))

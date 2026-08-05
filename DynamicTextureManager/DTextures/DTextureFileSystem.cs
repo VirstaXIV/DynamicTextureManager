@@ -113,17 +113,6 @@ public class DTextureFileSystem : FileSystem<DTexture>, IDisposable, ISavable
                 if (TryGetValue(dTexture, out var leaf1))
                     Delete(leaf1);
                 return;
-            case DTextureChanged.Type.ReloadedAll:
-                Reload();
-                return;
-            case DTextureChanged.Type.Renamed when (data as RenameTransaction?)?.Old is { } oldName:
-                if (!TryGetValue(dTexture, out var leaf2))
-                    return;
-
-                var old = oldName.FixName();
-                if (old == leaf2.Name || leaf2.Name.IsDuplicateName(out var baseName, out _) && baseName == old)
-                    RenameWithDuplicates(leaf2, dTexture.Name);
-                return;
         }
     }
     

@@ -1,4 +1,5 @@
 using System;
+using System.Collections.Generic;
 using System.IO;
 using Dalamud.Plugin.Services;
 using DynamicTextureManager.DTextures.Data;
@@ -15,7 +16,37 @@ namespace DynamicTextureManager.ModGeneration;
 /// </summary>
 public sealed class SourceFileProvider(IDataManager dataManager, PenumbraService penumbra) : IService
 {
+    // One preview rebuild resolves and reads the same handful of materials several times
+    // (sibling-target discovery, owner lookup, classification), each a Penumbra IPC round
+    // trip plus disk reads. A short TTL collapses those; edits to the underlying mod files
+    // show up within the TTL. Bytes are shared read-only — GetMaterial parses a fresh
+    // MtrlFile per call, so callers can keep mutating their copy.
+    private const long CacheTtlMs = 2000;
+
+    private readonly Dictionary<(string Game, string Actual, string Mod, string? Exclude), (long AtMs, byte[]? Bytes)> _fileCache = [];
+
     public byte[]? GetFile(SourcePath source, string? excludeDirectory)
+    {
+        var key = (source.GamePath, source.ActualPath, source.ModDirectory, excludeDirectory);
+        var now = Environment.TickCount64;
+        lock (_fileCache)
+        {
+            if (_fileCache.TryGetValue(key, out var hit) && now - hit.AtMs < CacheTtlMs)
+                return hit.Bytes;
+        }
+
+        var bytes = GetFileUncached(source, excludeDirectory);
+        lock (_fileCache)
+        {
+            if (_fileCache.Count >= 64)
+                _fileCache.Clear();
+            _fileCache[key] = (now, bytes);
+        }
+
+        return bytes;
+    }
+
+    private byte[]? GetFileUncached(SourcePath source, string? excludeDirectory)
     {
         if (IsUsable(source.ActualPath, excludeDirectory))
             return TryRead(source.ActualPath);

@@ -353,13 +353,28 @@ public sealed class ModelUvReader(IDataManager dataManager, PenumbraService penu
     /// Each model resolves through Penumbra so modded bodies load. Null (fall back to the
     /// recorded model) when nothing references the material — e.g. nonstandard NPC bodies.
     /// </summary>
-    /// <summary> Resolve the SmallClothes model set through Penumbra — cheap enough to run per lookup for the cache key. </summary>
-    private (string Race, (string GamePath, string Actual)[] Resolved) ResolveBodyModels(SourcePath source)
+    /// <summary>
+    /// Resolve the SmallClothes model set through Penumbra for the cache key. The UI asks for
+    /// body meshes every frame (viewport, overlay entries), and each resolve is four IPC
+    /// round trips — a short TTL keeps mod switches visible while dropping the per-frame cost.
+    /// </summary>
+    private (string Race, (string GamePath, string Actual)[] Resolved, string Joined) ResolveBodyModels(SourcePath source)
     {
         var topMatch = BodyTopModelPattern.Match(source.MdlGamePath);
         var race     = topMatch.Success ? topMatch.Groups[1].Value : BodyMaterialRace(source.GamePath);
-        return (race, Array.ConvertAll(BodyModelSetForRace(race), p => (p, penumbra.ResolvePlayerPath(p))));
+        var now      = Environment.TickCount64;
+        if (_bodyResolveCache.TryGetValue(race, out var hit) && now - hit.AtMs < BodyResolveTtlMs)
+            return (race, hit.Resolved, hit.Joined);
+
+        var resolved = Array.ConvertAll(BodyModelSetForRace(race), p => (p, penumbra.ResolvePlayerPath(p)));
+        var joined   = string.Join(";", resolved.Select(r => r.Item2));
+        _bodyResolveCache[race] = (now, resolved, joined);
+        return (race, resolved, joined);
     }
+
+    private const long BodyResolveTtlMs = 1000;
+
+    private readonly Dictionary<string, (long AtMs, (string GamePath, string Actual)[] Resolved, string Joined)> _bodyResolveCache = [];
 
     /// <summary> Read and parse the resolved model set — only on cache misses. </summary>
     private List<MdlFile> LoadBodyModels((string GamePath, string Actual)[] resolved)
@@ -381,8 +396,8 @@ public sealed class ModelUvReader(IDataManager dataManager, PenumbraService penu
 
     private MaterialMesh? GetBodyMesh(SourcePath source)
     {
-        var (race, resolved) = ResolveBodyModels(source);
-        var key = $"bodyset|{source.GamePath}|{string.Join(";", resolved.Select(r => r.Actual))}";
+        var (race, resolved, joined) = ResolveBodyModels(source);
+        var key = $"bodyset|{source.GamePath}|{joined}";
         if (_meshCache.TryGetValue(key, out var cached))
             return cached;
 
@@ -467,7 +482,7 @@ public sealed class ModelUvReader(IDataManager dataManager, PenumbraService penu
         var result = new List<BodyOverlayMaterial>();
         try
         {
-            var (race, resolved) = ResolveBodyModels(source);
+            var (race, resolved, _) = ResolveBodyModels(source);
             var models = LoadBodyModels(resolved);
             var (_, variant, editableNames) = ComputeEditableBodyMaterials(source, race, models);
 

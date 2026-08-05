@@ -158,6 +158,9 @@ public sealed class DecalLibrary : IService
     public string EffectFilePath(Guid id)
         => Path.Combine(StorageDirectory, $"{id}.png");
 
+    /// <summary> Bumped on every library mutation, so UIs can cache views derived from the entry lists. </summary>
+    public int Revision { get; private set; }
+
     public DecalEntry? Get(Guid id)
         => _decals.FirstOrDefault(d => d.Id == id);
 
@@ -459,6 +462,7 @@ public sealed class DecalLibrary : IService
 
     private void Save()
     {
+        ++Revision;
         try
         {
             var json = new JObject
