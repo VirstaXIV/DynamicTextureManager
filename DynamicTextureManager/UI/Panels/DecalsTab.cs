@@ -230,7 +230,7 @@ public sealed class DecalsTab(
 
         if (dTexture.Data.Source.IsEmpty)
         {
-            ImUtf8.Text("Add a canvas first — open the Canvases section."u8);
+            ImUtf8.Text("Add a source first — open the Sources section."u8);
             return;
         }
 
