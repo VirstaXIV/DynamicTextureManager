@@ -109,15 +109,12 @@ public class DTMPanel : IDisposable
     public void Dispose()
     { }
 
-    public void Draw()
-    {
-        using var group = Im.Group();
-        DrawHeader();
-        DrawPanel();
-    }
+    /// <summary> The header is mounted as the layout's RightHeader so it sits flush above the panel child. </summary>
+    public IHeader Header
+        => _header;
 
-    private void DrawHeader()
-        => _header.Draw(new Vector2(Im.ContentRegion.Available.X, Im.Style.FrameHeight));
+    public void Draw()
+        => DrawPanel();
 
     private string SelectionName
         => _selector.Selected == null ? "No Selection" : _selector.Selected.Name.Text;
@@ -147,8 +144,9 @@ public class DTMPanel : IDisposable
     /// </summary>
     private void DrawPanel()
     {
-        using var child = Im.Child.Begin("##Panel"u8, Im.ContentRegion.Available, true);
-        if (!child || _selector.Selected == null)
+        // The layout's right panel child already provides the border and padding —
+        // draw straight into it, or the content floats inside a second inset box.
+        if (_selector.Selected == null)
             return;
 
         var selected = _selector.Selected;

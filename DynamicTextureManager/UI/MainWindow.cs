@@ -124,7 +124,7 @@ public class MainWindow : Window, IDisposable
             LeftHeader  = selector.Header;
             LeftPanel   = selector;
             LeftFooter  = selector.Footer;
-            RightHeader = NopHeaderFooter.Instance;
+            RightHeader = panel.Header;
             RightPanel  = new PanelAdapter(panel);
             RightFooter = NopHeaderFooter.Instance;
         }
