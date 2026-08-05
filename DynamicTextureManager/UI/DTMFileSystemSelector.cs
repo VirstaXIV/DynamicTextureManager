@@ -56,7 +56,7 @@ public sealed class DTMFileSystemSelector : FileSystemSelector<DTexture, DTMFile
 
     private void NewDTextureButton(Vector2 size)
     {
-        if (ImGuiUtil.DrawDisabledButton(FontAwesomeIcon.Plus.ToIconString(), size, "Create a new dTexture with default configuration.", false,
+        if (ImGuiUtil.DrawDisabledButton(FontAwesomeIcon.Plus.ToIconString(), size, "Create a new canvas group. Each group builds into one Penumbra mod.", false,
                 true))
         {
             _cloneDTexture = null;
@@ -69,7 +69,7 @@ public sealed class DTMFileSystemSelector : FileSystemSelector<DTexture, DTMFile
 
     private void CloneDTextureButton(Vector2 size)
     {
-        var tooltip = Selected == null ? "No dTexture selected." : $"Clone {Selected.Name}.";
+        var tooltip = Selected == null ? "No canvas group selected." : $"Clone {Selected.Name}.";
         if (ImGuiUtil.DrawDisabledButton(FontAwesomeIcon.Clone.ToIconString(), size, tooltip, Selected == null, true))
         {
             _cloneDTexture = Selected;
@@ -94,7 +94,7 @@ public sealed class DTMFileSystemSelector : FileSystemSelector<DTexture, DTMFile
 
 
     private void DeleteButton(Vector2 size)
-        => DeleteSelectionButton(size, _config.DeleteDTextureModifier, "dTexture", "dTextures", _dTextureManager.Delete);
+        => DeleteSelectionButton(size, _config.DeleteDTextureModifier, "canvas group", "canvas groups", _dTextureManager.Delete);
 
     /// <summary> Gray out entries whose generated mod is currently disabled in Penumbra. </summary>
     protected override void DrawLeafName(FileSystem<DTexture>.Leaf leaf, in DTextureState state, bool selected)
@@ -105,11 +105,11 @@ public sealed class DTMFileSystemSelector : FileSystemSelector<DTexture, DTMFile
         using var color = ImRaii.PushColor(ImGuiCol.Text, ColorId.DisabledMod.Value(), disabled);
         using var _     = ImRaii.TreeNode(leaf.Name, flag);
         if (disabled && ImGui.IsItemHovered())
-            ImUtf8.HoverTooltip("The generated mod of this dTexture is currently disabled in Penumbra."u8);
+            ImUtf8.HoverTooltip("The generated mod of this canvas group is currently disabled in Penumbra."u8);
     }
     
     private void SetFilterTooltip()
     {
-        FilterTooltip = "Filter dTextures for those where their full paths or names contain the given substring.";
+        FilterTooltip = "Filter canvas groups for those where their full paths or names contain the given substring.";
     }
 }
