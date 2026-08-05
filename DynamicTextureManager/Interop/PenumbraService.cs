@@ -19,8 +19,7 @@ public sealed class PenumbraService : IDisposable, IService
 {
     public const int RequiredBreakingVersion = 5;
 
-    private readonly IDalamudPluginInterface _pluginInterface;
-    private readonly LunaLogger              _log;
+    private readonly LunaLogger _log;
 
     private readonly EventSubscriber                 _initializedEvent;
     private readonly EventSubscriber                 _disposedEvent;
@@ -67,7 +66,6 @@ public sealed class PenumbraService : IDisposable, IService
 
     public PenumbraService(IDalamudPluginInterface pi, LunaLogger log)
     {
-        _pluginInterface = pi;
         _log             = log;
 
         _apiVersion                 = new ApiVersion(pi);
