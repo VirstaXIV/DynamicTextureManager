@@ -3,7 +3,7 @@ using System.Collections.Generic;
 using System.IO;
 using Newtonsoft.Json;
 using Newtonsoft.Json.Linq;
-using OtterGui.Services;
+using IService = Luna.IService;
 
 namespace DynamicTextureManager.ModGeneration;
 

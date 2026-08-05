@@ -3,7 +3,7 @@ using System.Collections.Generic;
 using System.IO;
 using DynamicTextureManager.Interop;
 using DynamicTextureManager.Services;
-using OtterGui.Services;
+using IService = Luna.IService;
 using Penumbra.GameData.Files;
 using Penumbra.GameData.Files.MaterialStructs;
 using Penumbra.GameData.Structs;

@@ -2,8 +2,8 @@ using System;
 using System.Collections.Generic;
 using System.Threading.Tasks;
 using Dalamud.Plugin;
-using OtterGui.Log;
-using OtterGui.Services;
+using Luna;
+using IService = Luna.IService;
 using Penumbra.Api.Enums;
 using Penumbra.Api.Helpers;
 using Penumbra.Api.IpcSubscribers;
@@ -20,7 +20,7 @@ public sealed class PenumbraService : IDisposable, IService
     public const int RequiredBreakingVersion = 5;
 
     private readonly IDalamudPluginInterface _pluginInterface;
-    private readonly Logger                  _log;
+    private readonly LunaLogger              _log;
 
     private readonly EventSubscriber                 _initializedEvent;
     private readonly EventSubscriber                 _disposedEvent;
@@ -65,7 +65,7 @@ public sealed class PenumbraService : IDisposable, IService
     /// <summary> Fired when a mod directory is moved in Penumbra, with old and new directory names. </summary>
     public event Action<string, string>? ModMoved;
 
-    public PenumbraService(IDalamudPluginInterface pi, Logger log)
+    public PenumbraService(IDalamudPluginInterface pi, LunaLogger log)
     {
         _pluginInterface = pi;
         _log             = log;

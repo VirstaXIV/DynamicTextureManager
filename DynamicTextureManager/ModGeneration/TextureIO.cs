@@ -2,7 +2,7 @@ using System;
 using System.IO;
 using Dalamud.Plugin.Services;
 using Lumina.Data.Files;
-using OtterGui.Services;
+using IService = Luna.IService;
 
 namespace DynamicTextureManager.ModGeneration;
 

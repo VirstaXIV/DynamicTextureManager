@@ -5,7 +5,7 @@ using System.Linq;
 using DynamicTextureManager.DTextures.Data;
 using Newtonsoft.Json;
 using Newtonsoft.Json.Linq;
-using OtterGui.Services;
+using IService = Luna.IService;
 using SixLabors.ImageSharp;
 
 namespace DynamicTextureManager.Services;

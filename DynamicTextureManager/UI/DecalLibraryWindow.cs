@@ -1,10 +1,8 @@
 using System;
 using System.Numerics;
-using Dalamud.Bindings.ImGui;
 using Dalamud.Interface.Windowing;
 using DynamicTextureManager.Services;
-using OtterGui.Raii;
-using OtterGui.Text;
+using ImSharp;
 
 namespace DynamicTextureManager.UI;
 
@@ -53,21 +51,26 @@ public class DecalLibraryWindow : Window
 
     public override void Draw()
     {
+        // The shared ImSharp context attaches on a framework tick after service
+        // construction — Im.* calls before that dereference an empty context.
+        if (!ImSharpConfiguration.IsInitialized)
+            return;
+
         if (_onPick == null)
         {
             var focusEffects = _focusEffects;
             _focusEffects = false;
-            using var tabs = ImUtf8.TabBar("##resourceTabs"u8);
+            using var tabs = Im.TabBar.Begin("##resourceTabs"u8);
             if (tabs)
             {
-                using (var tab = ImUtf8.TabItem("Decals"u8))
+                using (var tab = tabs.Item("Decals"u8))
                 {
                     if (tab)
                         _panel.Draw();
                 }
 
-                using (var tab = ImUtf8.TabItem("Effect Patterns"u8,
-                           focusEffects ? ImGuiTabItemFlags.SetSelected : ImGuiTabItemFlags.None))
+                using (var tab = tabs.Item("Effect Patterns"u8,
+                           focusEffects ? TabItemFlags.SetSelected : TabItemFlags.None))
                 {
                     if (tab)
                         _panel.DrawEffects();
@@ -77,15 +80,15 @@ public class DecalLibraryWindow : Window
             return;
         }
 
-        ImUtf8.TextWrapped(_pickerPrompt);
-        if (ImUtf8.SmallButton("Cancel"u8))
+        Im.TextWrapped(_pickerPrompt);
+        if (Im.SmallButton("Cancel"u8))
         {
             _onPick = null;
             IsOpen  = false;
             return;
         }
 
-        ImGui.Separator();
+        Im.Separator();
         _panel.Draw(entry =>
         {
             var pick = _onPick;
