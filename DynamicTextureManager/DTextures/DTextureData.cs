@@ -30,6 +30,12 @@ public sealed class DTextureData
     /// <summary> Directory name of the generated Penumbra mod, empty while never built. </summary>
     public string OutputModDirectory = string.Empty;
 
+    /// <summary>
+    /// Penumbra priority of the generated mod; null uses the global default. Per-group so
+    /// two canvas groups overriding the same file can decide which one wins.
+    /// </summary>
+    public int? ModPriority;
+
     /// <summary> Hash over the source inputs of the last successful build, for change detection. </summary>
     public string LastBuiltHash = string.Empty;
 
@@ -52,6 +58,7 @@ public sealed class DTextureData
             ["TextureSourcePaths"] = new JObject(TextureSourcePaths
                 .Select(kvp => new JProperty(kvp.Key, kvp.Value))),
             ["OutputModDirectory"] = OutputModDirectory,
+            ["ModPriority"]        = ModPriority,
             ["LastBuiltHash"]      = LastBuiltHash,
         };
 
@@ -64,6 +71,7 @@ public sealed class DTextureData
         {
             Source             = SourceRef.Load(json["Source"] as JObject),
             OutputModDirectory = json["OutputModDirectory"]?.ToObject<string>() ?? string.Empty,
+            ModPriority        = json["ModPriority"]?.ToObject<int?>(),
             LastBuiltHash      = json["LastBuiltHash"]?.ToObject<string>() ?? string.Empty,
         };
 

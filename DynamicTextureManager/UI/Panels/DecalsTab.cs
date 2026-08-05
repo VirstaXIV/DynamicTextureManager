@@ -230,7 +230,7 @@ public sealed class DecalsTab(
 
         if (dTexture.Data.Source.IsEmpty)
         {
-            ImUtf8.Text("Select a source first."u8);
+            ImUtf8.Text("Add a canvas first — open the Canvases section."u8);
             return;
         }
 
@@ -397,8 +397,8 @@ public sealed class DecalsTab(
         else
         {
             ImGui.SameLine();
-            ImUtf8.LabeledHelpMarker("Source"u8,
-                "The piece being edited. Decals stamp onto its right texture automatically (the colorset id map on colorset-driven gear, else the color texture) and their material effects touch the normal/mask maps.\nThe finished textures are viewable in the Textures tab."u8);
+            ImUtf8.LabeledHelpMarker("Canvas"u8,
+                "The piece being edited. Decals stamp onto its right texture automatically (the colorset id map on colorset-driven gear, else the color texture) and their material effects touch the normal/mask maps."u8);
         }
     }
 
