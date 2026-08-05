@@ -7,22 +7,13 @@ using DynamicTextureManager.ModGeneration;
 using DynamicTextureManager.Services;
 using ImSharp;
 using Luna;
-using IService = Luna.IService;
 using Window = Dalamud.Interface.Windowing.Window;
 
 namespace DynamicTextureManager.UI;
 
-public class ConfigWindowPosition : IService
-{
-    public bool IsOpen { get; set; }
-    public Vector2 Position { get; set; }
-    public Vector2 Size { get; set; }
-}
-
 public class ConfigWindow : Window, IDisposable
 {
     private readonly Configuration _configuration;
-    private readonly ConfigWindowPosition _position;
     private readonly PenumbraService _penumbra;
     private readonly OverlayModManager _overlayMods;
     private readonly DecalLibrary _decals;
@@ -34,7 +25,7 @@ public class ConfigWindow : Window, IDisposable
     private string? _decalFolderStatus;
     private bool    _decalFolderStatusIsError;
 
-    public ConfigWindow(Configuration configuration, ConfigWindowPosition position, PenumbraService penumbra, OverlayModManager overlayMods,
+    public ConfigWindow(Configuration configuration, PenumbraService penumbra, OverlayModManager overlayMods,
         DecalLibrary decals)
         : base("Dynamic Texture Manager: Configuration")
     {
@@ -45,7 +36,6 @@ public class ConfigWindow : Window, IDisposable
         };
 
         _configuration = configuration;
-        _position = position;
         _penumbra = penumbra;
         _overlayMods = overlayMods;
         _decals = decals;
@@ -60,8 +50,6 @@ public class ConfigWindow : Window, IDisposable
         if (!ImSharpConfiguration.IsInitialized)
             return;
 
-        _position.Size = Im.Window.Size;
-        _position.Position = Im.Window.Position;
         _fileDialog.Draw();
 
         Checkbox("Auto Rebuild"u8, "Automatically rebuild the generated mod shortly after edits, once it has been built with the hammer button."u8,

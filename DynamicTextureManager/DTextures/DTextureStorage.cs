@@ -1,6 +1,5 @@
 using System;
 using System.Collections.Generic;
-using System.Diagnostics.CodeAnalysis;
 using System.Linq;
 using IService = Luna.IService;
 
@@ -8,12 +7,6 @@ namespace DynamicTextureManager.DTextures;
 
 public class DTextureStorage : List<DTexture>, IService
 {
-    public bool TryGetValue(Guid identifier, [NotNullWhen(true)] out DTexture? dTexture)
-    {
-        dTexture = ByIdentifier(identifier);
-        return dTexture != null;
-    }
-
     public DTexture? ByIdentifier(Guid identifier)
         => this.FirstOrDefault(d => d.Identifier == identifier);
 

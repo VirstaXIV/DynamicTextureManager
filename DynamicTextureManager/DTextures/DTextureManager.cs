@@ -17,8 +17,8 @@ public sealed class DTextureManager : DTextureEditor
 {
     public readonly DTextureStorage DTextures;
     
-    public DTextureManager(SaveService saveService, DTextureChanged @event, DTextureStorage storage, Configuration config)
-        : base(saveService, @event, config)
+    public DTextureManager(SaveService saveService, DTextureChanged @event, DTextureStorage storage)
+        : base(saveService, @event)
     {
         DTextures = storage;
 
@@ -62,7 +62,6 @@ public sealed class DTextureManager : DTextureEditor
                 continue;
             }
 
-            dTexture.Index = DTextures.Count;
             DTextures.Add(dTexture);
         }
 
@@ -120,14 +119,13 @@ public sealed class DTextureManager : DTextureEditor
             Identifier   = Guid.NewGuid(),
             CreationDate = DateTimeOffset.UtcNow,
             Name         = name,
-            Index        = DTextures.Count,
         };
         dTexture.LastEdit = dTexture.CreationDate;
 
         DTextures.Add(dTexture);
         SaveService.ImmediateSave(dTexture);
         DynamicTextureManager.Log.Debug($"Added new dTexture {dTexture.Identifier}.");
-        DTextureChanged.Invoke(DTextureChanged.Type.Created, dTexture, new CreationTransaction(name, path));
+        DTextureChanged.Invoke(DTextureChanged.Type.Created, dTexture, new CreationTransaction(path));
         return dTexture;
     }
 
@@ -139,7 +137,6 @@ public sealed class DTextureManager : DTextureEditor
             Identifier   = Guid.NewGuid(),
             CreationDate = DateTimeOffset.UtcNow,
             Name         = name,
-            Index        = DTextures.Count,
         };
         dTexture.LastEdit = dTexture.CreationDate;
         // The clone gets its own generated mod, so do not inherit build state.
@@ -150,7 +147,7 @@ public sealed class DTextureManager : DTextureEditor
         DTextures.Add(dTexture);
         SaveService.ImmediateSave(dTexture);
         DynamicTextureManager.Log.Debug($"Added new dTexture {dTexture.Identifier} by cloning {other.Identifier}.");
-        DTextureChanged.Invoke(DTextureChanged.Type.Created, dTexture, new CreationTransaction(name, path));
+        DTextureChanged.Invoke(DTextureChanged.Type.Created, dTexture, new CreationTransaction(path));
         return dTexture;
     }
 
@@ -195,9 +192,7 @@ public sealed class DTextureManager : DTextureEditor
 
     public void Delete(DTexture dTexture)
     {
-        foreach (var d in DTextures.Skip(dTexture.Index + 1))
-            --d.Index;
-        DTextures.RemoveAt(dTexture.Index);
+        DTextures.Remove(dTexture);
         SaveService.ImmediateDelete(dTexture);
         DTextureChanged.Invoke(DTextureChanged.Type.Deleted, dTexture, null);
     }

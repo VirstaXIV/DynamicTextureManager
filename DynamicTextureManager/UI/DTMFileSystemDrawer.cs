@@ -12,8 +12,6 @@ namespace DynamicTextureManager.UI;
 
 public sealed class DTMFileSystemDrawer : FileSystemDrawer<DTMFileSystemCache.DTextureNode>
 {
-    internal readonly Configuration     Config;
-    internal readonly DTextureManager   Manager;
     internal readonly OverlayModManager OverlayMods;
     internal readonly DTextureChanged   DTextureChanged;
 
@@ -21,8 +19,6 @@ public sealed class DTMFileSystemDrawer : FileSystemDrawer<DTMFileSystemCache.DT
         Configuration config, OverlayModManager overlayMods, DTextureChanged dTextureChanged)
         : base(messager, fileSystem, new DTMFilter())
     {
-        Manager         = manager;
-        Config          = config;
         OverlayMods     = overlayMods;
         DTextureChanged = dTextureChanged;
 
