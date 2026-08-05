@@ -2,7 +2,7 @@ using System;
 using System.IO;
 using Dalamud.Plugin.Services;
 using FFXIVClientStructs.FFXIV.Client.Graphics.Scene;
-using OtterGui.Services;
+using IService = Luna.IService;
 using ObjectType = FFXIVClientStructs.FFXIV.Client.Graphics.Scene.ObjectType;
 
 namespace DynamicTextureManager.Interop;

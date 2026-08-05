@@ -102,10 +102,11 @@ public class Configuration: IPluginConfiguration, ISavable
         }
     }
     
-    public string ToFilename(FilenameService fileNames) => fileNames.ConfigFile;
+    public string ToFilePath(FilenameService fileNames) => fileNames.ConfigFile;
 
-    public void Save(StreamWriter writer)
+    public void Save(Stream stream)
     {
+        using var writer = new StreamWriter(stream, System.Text.Encoding.UTF8, leaveOpen: true);
         using var jWriter = new JsonTextWriter(writer);
         jWriter.Formatting = Formatting.Indented;
         var serializer = new JsonSerializer {

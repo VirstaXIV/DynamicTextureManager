@@ -1,24 +1,23 @@
 using DynamicTextureManager.DTextures;
 using DynamicTextureManager.DTextures.History;
-using OtterGui.Classes;
+using Luna;
 
 namespace DynamicTextureManager.Events;
 
 /// <summary>
-/// Triggered when a DTexture is edited in any way.
-/// <list type="number">
-///     <item>Parameter is the type of the change </item>
-///     <item>Parameter is the changed DTexture. </item>
-///     <item>Parameter is any additional data depending on the type of change. </item>
-/// </list>
+/// Triggered when a DTexture is edited in any way. The arguments carry the type of the
+/// change, the changed DTexture, and any additional data depending on the type of change.
 /// </summary>
-public sealed class DTextureChanged() : EventWrapper<DTextureChanged.Type, DTexture, ITransaction?, DTextureChanged.Priority>(nameof(DTextureChanged))
+public sealed class DTextureChanged(LunaLogger log)
+    : EventBase<DTextureChanged.Arguments, DTextureChanged.Priority>(nameof(DTextureChanged), log)
 {
+    public readonly record struct Arguments(Type Type, DTexture DTexture, ITransaction? Data);
+
     public enum Type
     {
         /// <summary> A new dTexture was created. </summary>
         Created,
-        
+
         /// <summary> An existing dTexture was deleted. </summary>
         Deleted,
     }
@@ -31,4 +30,7 @@ public sealed class DTextureChanged() : EventWrapper<DTextureChanged.Type, DText
         /// <seealso cref="ModGeneration.OverlayModManager.OnDTextureChanged"/>
         OverlayModManager = -2,
     }
+
+    public void Invoke(Type type, DTexture dTexture, ITransaction? data)
+        => Invoke(new Arguments(type, dTexture, data));
 }

@@ -9,7 +9,7 @@ using DynamicTextureManager.DTextures;
 using DynamicTextureManager.Events;
 using DynamicTextureManager.ModGeneration;
 using DynamicTextureManager.ModGeneration.Shaders;
-using OtterGui.Services;
+using IService = Luna.IService;
 
 namespace DynamicTextureManager.Services;
 
@@ -107,12 +107,12 @@ public sealed class CompositePreviewCache : IService, IDisposable
         _entries.Clear();
     }
 
-    private void OnDTextureChanged(DTextureChanged.Type type, DTexture dTexture, DTextures.History.ITransaction? _)
+    private void OnDTextureChanged(in DTextureChanged.Arguments args)
     {
-        if (type is DTextureChanged.Type.Deleted)
-            Drop(dTexture.Identifier);
+        if (args.Type is DTextureChanged.Type.Deleted)
+            Drop(args.DTexture.Identifier);
         else
-            Invalidate(dTexture.Identifier);
+            Invalidate(args.DTexture.Identifier);
     }
 
     /// <summary>

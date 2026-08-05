@@ -4,7 +4,7 @@ using Dalamud.Bindings.ImGui;
 using Dalamud.Interface;
 using Dalamud.Interface.Windowing;
 using DynamicTextureManager.ModGeneration;
-using OtterGui.Services;
+using IService = Luna.IService;
 
 namespace DynamicTextureManager.UI;
 

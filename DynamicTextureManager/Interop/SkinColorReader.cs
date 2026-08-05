@@ -2,7 +2,7 @@ using System;
 using System.Numerics;
 using System.Runtime.CompilerServices;
 using Dalamud.Plugin.Services;
-using OtterGui.Services;
+using IService = Luna.IService;
 using Penumbra.GameData.Enums;
 using Penumbra.GameData.Files;
 using Penumbra.GameData.Interop;
