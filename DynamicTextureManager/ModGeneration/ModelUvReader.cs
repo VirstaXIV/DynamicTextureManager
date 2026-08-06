@@ -514,10 +514,13 @@ public sealed class ModelUvReader(IDataManager dataManager, PenumbraService penu
             // The well-defined deform chain runs base-model → derived-skeleton (the game
             // deforms c0201-authored bodies onto a c0801 skeleton); the face already lives
             // in the derived space, so its inverse brings it back to the body's raw space.
+            // The NECK bone governs the junction ring on both sides — the head bone's deform
+            // overshoots by its extra head-relative motion (verified ~1.5 cm too high).
             var deformer = _pbd.GetRacialDeformer(
                 (Penumbra.GameData.Enums.GenderRace)int.Parse(faceRace[1..]),
                 (Penumbra.GameData.Enums.GenderRace)int.Parse(bodyRace[1..]));
-            if (!deformer.DeformMatrices.TryGetValue("j_kao", out var matrix))
+            if (!deformer.DeformMatrices.TryGetValue("j_kubi", out var matrix)
+             && !deformer.DeformMatrices.TryGetValue("j_kao", out matrix))
                 return;
 
             var inverse = matrix.Invert();
