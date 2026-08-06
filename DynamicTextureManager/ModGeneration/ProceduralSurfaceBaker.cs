@@ -10,6 +10,12 @@ using SixLabors.ImageSharp.PixelFormats;
 namespace DynamicTextureManager.ModGeneration;
 
 /// <summary>
+/// A custom markings image resolved by the compositor: intensity = luminance × alpha, 0..1.
+/// The stamp (source file write time) keys the bake cache, so edits on disk regenerate.
+/// </summary>
+public sealed record MarkingPatternImage(long Stamp, float[] Intensity, int Width, int Height);
+
+/// <summary>
 /// Bakes a procedural surface layer (fur, scales, skin patterns) over the whole editable mesh
 /// surface. The pattern is evaluated in world space at each texel's surface position, so it is
 /// seamless across UV islands and material splits; a guide-anchor flow field orients it along
@@ -27,12 +33,13 @@ public static class ProceduralSurfaceBaker
     /// instead of its colors.
     /// </param>
     public static void Bake(Image<Rgba32> target, MaterialMesh mesh, ProceduralSurfaceLayer layer,
-        TextureSlot? effectSlot = null, CharacterColors characterColors = default)
+        TextureSlot? effectSlot = null, CharacterColors characterColors = default,
+        MarkingPatternImage? markingPattern = null)
     {
         if (layer.Opacity <= 0f)
             return;
 
-        var generated = GetOrGenerate(mesh, layer, target.Width, target.Height, characterColors);
+        var generated = GetOrGenerate(mesh, layer, target.Width, target.Height, characterColors, markingPattern);
         if (generated == null)
             return;
 
@@ -77,7 +84,7 @@ public static class ProceduralSurfaceBaker
     private static long _cacheSeq;
 
     private static GeneratedFields? GetOrGenerate(MaterialMesh mesh, ProceduralSurfaceLayer layer,
-        int width, int height, CharacterColors characterColors)
+        int width, int height, CharacterColors characterColors, MarkingPatternImage? markingPattern)
     {
         static string Tone(Vector3? v)
             => v is { } t ? FormattableString.Invariant($"{t.X:F3},{t.Y:F3},{t.Z:F3}") : "-";
@@ -86,6 +93,8 @@ public static class ProceduralSurfaceBaker
             ? $"{Tone(characterColors.Skin)}|{Tone(characterColors.HairMain)}|{Tone(characterColors.HairHighlight)}"
             : "none";
         var key   = $"{layer.ContentHash()}|{width}x{height}|{tones}";
+        if (markingPattern != null)
+            key += $"|mp{markingPattern.Stamp}";
         var table = Cache.GetOrCreateValue(mesh);
 
         lock (table)
@@ -97,7 +106,7 @@ public static class ProceduralSurfaceBaker
             }
         }
 
-        var fields = Generate(mesh, layer, width, height, characterColors);
+        var fields = Generate(mesh, layer, width, height, characterColors, markingPattern);
         if (fields == null)
             return null;
 
@@ -618,7 +627,7 @@ public static class ProceduralSurfaceBaker
     // ------------------------------------------------------------------ stage B: generators
 
     private static GeneratedFields? Generate(MaterialMesh mesh, ProceduralSurfaceLayer layer,
-        int width, int height, CharacterColors characterColors)
+        int width, int height, CharacterColors characterColors, MarkingPatternImage? markingPattern)
     {
         var surface = RasterizeFields(width, height, mesh, layer);
         if (surface == null)
@@ -721,6 +730,7 @@ public static class ProceduralSurfaceBaker
                 {
                     FurMarkingStyle.None    => 0f,
                     FurMarkingStyle.Painted => surface.MarkingPaint?[index] ?? 0f,
+                    FurMarkingStyle.Custom  => EvaluateCustomMarkings(layer, markingPattern, surface.Position[index]),
                     _                       => EvaluateMarkings(layer, surface.Position[index], surface.FlowPotential[index]),
                 };
 
@@ -993,6 +1003,50 @@ public static class ProceduralSurfaceBaker
                 return 1f - ProceduralFields.Smooth(veinW * 0.3f, veinW, MathF.Abs(v - 0.5f));
             }
         }
+    }
+
+    /// <summary>
+    /// Custom markings: a user-imported tileable image sampled in the shared cylinder world
+    /// frame, so the pattern is continuous across canvases like the generated markings. The
+    /// tile count around the azimuth is rounded to an integer so the frame's ±π wrap lands on
+    /// a tile boundary; the slight aspect distortion that costs is invisible next to a seam.
+    /// </summary>
+    private static float EvaluateCustomMarkings(ProceduralSurfaceLayer layer, MarkingPatternImage? pattern, Vector3 pos)
+    {
+        if (pattern == null || layer.MarkingAmount <= 0f)
+            return 0f;
+
+        var frame = WorldFrame(pos);
+        var tile  = MathF.Max(0.005f, layer.MarkingScaleCm / 100f);
+
+        const float period = MathF.PI * 2f * 0.1f;
+        var tilesAround = MathF.Max(1f, MathF.Round(period / tile));
+        var value = SampleWrapped(pattern, frame.X * (tilesAround / period), frame.Y / tile);
+
+        var cut = 1f - Math.Clamp(layer.MarkingAmount, 0f, 1f);
+        return ProceduralFields.Smooth(cut - 0.08f, cut + 0.08f, value);
+    }
+
+    /// <summary> Bilinear sample with wrap on both axes — the pattern tiles over the unbounded frame. </summary>
+    private static float SampleWrapped(MarkingPatternImage p, float u, float v)
+    {
+        static int Mod(int a, int m)
+            => (a % m + m) % m;
+
+        var fx = u * p.Width - 0.5f;
+        var fy = v * p.Height - 0.5f;
+        var x0 = (int)MathF.Floor(fx);
+        var y0 = (int)MathF.Floor(fy);
+        var tx = fx - x0;
+        var ty = fy - y0;
+        var x1 = Mod(x0 + 1, p.Width);
+        var y1 = Mod(y0 + 1, p.Height);
+        x0 = Mod(x0, p.Width);
+        y0 = Mod(y0, p.Height);
+
+        var top    = p.Intensity[y0 * p.Width + x0] + (p.Intensity[y0 * p.Width + x1] - p.Intensity[y0 * p.Width + x0]) * tx;
+        var bottom = p.Intensity[y1 * p.Width + x0] + (p.Intensity[y1 * p.Width + x1] - p.Intensity[y1 * p.Width + x0]) * tx;
+        return top + (bottom - top) * ty;
     }
 
     private static float ApplyContrast(float v, float contrast)

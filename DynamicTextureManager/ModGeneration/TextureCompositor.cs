@@ -50,7 +50,8 @@ public sealed class TextureCompositor(DecalLibrary decals) : IService
                     break;
                 case ProceduralSurfaceLayer proc:
                     if (mesh != null)
-                        ProceduralSurfaceBaker.Bake(image, mesh, proc, characterColors: characterColors);
+                        ProceduralSurfaceBaker.Bake(image, mesh, proc, characterColors: characterColors,
+                            markingPattern: ResolveMarkingPattern(proc));
                     else
                         DynamicTextureManager.Log.Warning("Procedural surface layer skipped — no mesh geometry available for this texture's material.");
                     break;
@@ -105,7 +106,8 @@ public sealed class TextureCompositor(DecalLibrary decals) : IService
                     ApplyDecal(image, decal, mesh, effectSlot: slot);
                     break;
                 case ProceduralSurfaceLayer proc when mesh != null:
-                    ProceduralSurfaceBaker.Bake(image, mesh, proc, effectSlot: slot, characterColors: characterColors);
+                    ProceduralSurfaceBaker.Bake(image, mesh, proc, effectSlot: slot, characterColors: characterColors,
+                        markingPattern: ResolveMarkingPattern(proc));
                     break;
             }
         }
@@ -154,6 +156,63 @@ public sealed class TextureCompositor(DecalLibrary decals) : IService
     private sealed record CachedDecal(long Stamp, Rgba32[] Pixels, int Width, int Height);
 
     private readonly Dictionary<string, CachedDecal> _decalCache = new(StringComparer.OrdinalIgnoreCase);
+
+    private readonly Dictionary<string, MarkingPatternImage> _patternCache = new(StringComparer.OrdinalIgnoreCase);
+
+    /// <summary>
+    /// The custom markings image a procedural layer samples, converted to intensity
+    /// (luminance × alpha) once and cached by file stamp — the baker reads it per texel.
+    /// Missing images degrade to unmarked coats, mirroring the decal-skip behavior.
+    /// </summary>
+    private MarkingPatternImage? ResolveMarkingPattern(ProceduralSurfaceLayer layer)
+    {
+        if (layer.Markings != FurMarkingStyle.Custom || layer.MarkingPatternId == Guid.Empty)
+            return null;
+
+        var path = decals.PatternFilePath(layer.MarkingPatternId);
+        if (!File.Exists(path))
+        {
+            DynamicTextureManager.Log.Warning($"Marking pattern image {path} is missing, markings skipped.");
+            return null;
+        }
+
+        var stamp = File.GetLastWriteTimeUtc(path).Ticks;
+        MarkingPatternImage? cached;
+        lock (_patternCache)
+            _patternCache.TryGetValue(path, out cached);
+
+        if (cached == null || cached.Stamp != stamp)
+        {
+            try
+            {
+                using var image = Image.Load<Rgba32>(path);
+                var pixels = new Rgba32[image.Width * image.Height];
+                image.CopyPixelDataTo(pixels);
+                var intensity = new float[pixels.Length];
+                for (var i = 0; i < pixels.Length; ++i)
+                {
+                    var p = pixels[i];
+                    intensity[i] = (0.2126f * p.R + 0.7152f * p.G + 0.0722f * p.B) / 255f * (p.A / 255f);
+                }
+
+                cached = new MarkingPatternImage(stamp, intensity, image.Width, image.Height);
+            }
+            catch (Exception ex)
+            {
+                DynamicTextureManager.Log.Warning($"Could not load marking pattern image {path}, markings skipped: {ex.Message}");
+                return null;
+            }
+
+            lock (_patternCache)
+            {
+                if (_patternCache.Count >= 4 && !_patternCache.ContainsKey(path))
+                    _patternCache.Clear();
+                _patternCache[path] = cached;
+            }
+        }
+
+        return cached;
+    }
 
     /// <summary>
     /// Decal image decode, cached by file stamp — every composite stamps the same few PNGs,
