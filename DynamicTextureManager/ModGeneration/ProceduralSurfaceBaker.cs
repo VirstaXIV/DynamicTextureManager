@@ -190,10 +190,12 @@ public static class ProceduralSurfaceBaker
 
         // Small companion canvases (the face) skip charts entirely and live in the shared
         // world frame — near the body axis that frame IS a good flow chart, and it makes
-        // them match the body at the junction by construction.
-        var worldOnly = directional && MeshExtent(mesh) < 0.35f;
+        // them match the body at the junction by construction. The seam machinery applies
+        // to EVERY kind: the flow potential (stripe bands, tabby markings) must also agree
+        // where canvases meet.
+        var worldOnly = MeshExtent(mesh) < 0.35f;
         var charts    = directional && !worldOnly ? SurfaceFlowField.ComputeCharts(mesh, flow, layer.Anchors) : null;
-        var boundary  = charts != null ? SurfaceFlowField.BoundaryDistance(mesh) : null;
+        var boundary  = worldOnly ? null : SurfaceFlowField.BoundaryDistance(mesh);
         var fields = new SurfaceFields
         {
             Covered        = new bool[texels],
@@ -338,6 +340,17 @@ public static class ProceduralSurfaceBaker
                     fields.Normal[index]         = normal;
                     fields.TexelsPerMeter[index] = texelsPerMeter;
 
+                    // The band reaches DOWN from the body's top edge far enough to cover
+                    // where the face's own rim visibly meets the body (~9 cm of neck) —
+                    // both sides are fully in the shared world frame there.
+                    var seam = worldOnly
+                        ? 0f
+                        : boundary != null
+                            ? ProceduralFields.Smooth(0.09f, 0.16f,
+                                boundary[i0] * w0 + boundary[i1] * w1 + boundary[i2] * w2)
+                            : 1f;
+                    fields.SeamBlend[index] = seam;
+
                     if (charts != null)
                     {
                         Vector2 InterpV(Vector2[] plane)
@@ -361,27 +374,15 @@ public static class ProceduralSurfaceBaker
                         var sum = wa + wb + wc;
                         fields.BlendB[index] = wb / sum;
                         fields.BlendC[index] = wc / sum;
-
-                        // The band reaches DOWN from the body's top edge far enough to cover
-                        // where the face's own rim visibly meets the body (~9 cm of neck) —
-                        // both sides are fully in the shared world frame there.
-                        fields.SeamBlend[index] = boundary != null
-                            ? ProceduralFields.Smooth(0.09f, 0.16f,
-                                boundary[i0] * w0 + boundary[i1] * w1 + boundary[i2] * w2)
-                            : 1f;
-                    }
-                    else if (worldOnly)
-                    {
-                        fields.SeamBlend[index] = 0f;
-                    }
-                    else
-                    {
-                        fields.SeamBlend[index] = 1f;
                     }
 
-                    fields.FlowPotential[index] = flow != null && (flow.HasFlow[i0] || flow.HasFlow[i1] || flow.HasFlow[i2])
+                    // The potential (stripe/tabby banding coordinate) fades to plain world
+                    // descent at seams — both canvases band identically where they meet.
+                    var meshPotential = flow != null && (flow.HasFlow[i0] || flow.HasFlow[i1] || flow.HasFlow[i2])
                         ? flow.Potential[i0] * w0 + flow.Potential[i1] * w1 + flow.Potential[i2] * w2
                         : natural.Potential[i0] * w0 + natural.Potential[i1] * w1 + natural.Potential[i2] * w2;
+                    var descent = -fields.Position[index].Y;
+                    fields.FlowPotential[index] = descent + (meshPotential - descent) * seam;
 
                     any = true;
                 }
