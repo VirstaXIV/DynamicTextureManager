@@ -284,12 +284,6 @@ public sealed class ModelUvReader(IDataManager dataManager, PenumbraService penu
         if (IsFaceSkinMaterial(source.GamePath) && GetFaceMesh(source) is { } faceMesh)
             return faceMesh;
 
-        // A body-family skin material the body models never reference renders on the WORN
-        // GEAR models recorded for it (false-nail hands, toe feet riding a compat material):
-        // its geometry is every recorded model merged, only its own meshes editable.
-        if (source.MdlGamePath.Contains(';'))
-            return GetGearSkinMesh(source);
-
         if (source.MdlGamePath.Length == 0)
             return null;
 
@@ -385,6 +379,35 @@ public sealed class ModelUvReader(IDataManager dataManager, PenumbraService penu
         }
 
         return slots;
+    }
+
+    /// <summary>
+    /// Material file names the UNMODDED SmallClothes body models reference (race-substituted)
+    /// — the vanilla body material family. A tree material in this set while the resolved
+    /// body renders with something else is the vanilla-compat set bibo-family mods override
+    /// for gear-embedded skin patches: the SAME body under an alternate material.
+    /// </summary>
+    public HashSet<string> VanillaBodyMaterialNames(string race)
+    {
+        var names = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+        foreach (var gamePath in BodyModelSetForRace(race))
+        {
+            try
+            {
+                var bytes = dataManager.GetFile(gamePath)?.Data;
+                if (bytes == null)
+                    continue;
+
+                foreach (var material in new MdlFile(bytes).Materials)
+                    names.Add(SubstituteBodyRace(Path.GetFileName(material), race));
+            }
+            catch (Exception ex)
+            {
+                DynamicTextureManager.Log.Warning($"Could not read materials of vanilla body model {gamePath}: {ex.Message}");
+            }
+        }
+
+        return names;
     }
 
     /// <summary>
@@ -554,55 +577,6 @@ public sealed class ModelUvReader(IDataManager dataManager, PenumbraService penu
         }
     }
 
-    /// <summary>
-    /// The merged geometry of several recorded models (';'-joined in MdlGamePath) for a
-    /// skin material only worn gear renders — see the gear-skin branch in
-    /// <see cref="GetMesh"/>. Material names match with the wearer's race substituted on
-    /// both sides, like the body set; the mesh's GamePath stays the material path, like
-    /// <see cref="GetBodyMesh"/>.
-    /// </summary>
-    private MaterialMesh? GetGearSkinMesh(SourcePath source)
-    {
-        var key = CacheKey(source);
-        if (_meshCache.TryGetValue(key, out var cached))
-            return cached;
-
-        MaterialMesh? mesh = null;
-        try
-        {
-            var models = new List<MdlFile>();
-            foreach (var gamePath in source.MdlGamePath.Split(';', StringSplitOptions.RemoveEmptyEntries))
-            {
-                var bytes = LoadGameFile(gamePath);
-                if (bytes == null)
-                    DynamicTextureManager.Log.Warning($"Could not load model {gamePath} for {source.GamePath}.");
-                else
-                    models.Add(new MdlFile(bytes));
-            }
-
-            if (models.Count > 0)
-            {
-                var race     = BodyMaterialRace(source.GamePath);
-                var fileName = Path.GetFileName(source.GamePath);
-                mesh = ReadMeshes(models, material => string.Equals(
-                        SubstituteBodyRace(Path.GetFileName(material), race), fileName, StringComparison.OrdinalIgnoreCase),
-                    fileName, source.GamePath, includeContext: true);
-            }
-
-            if (mesh != null)
-                DynamicTextureManager.Log.Information(
-                    $"Gear-skin geometry of {source.GamePath}: {mesh.VertexCount} vertices, {mesh.TriangleCount} triangles "
-                  + $"({mesh.TriangleEditable.Count(e => e)} editable) from {models.Count} model(s).");
-        }
-        catch (Exception ex)
-        {
-            DynamicTextureManager.Log.Warning($"Could not read gear-skin geometry for {source.GamePath}: {ex.Message}");
-        }
-
-        _meshCache[key] = mesh;
-        return mesh;
-    }
-
     private MaterialMesh? GetBodyMesh(SourcePath source)
     {
         var (race, resolved, joined) = ResolveBodyModels(source);
@@ -622,6 +596,26 @@ public sealed class ModelUvReader(IDataManager dataManager, PenumbraService penu
             mesh = ReadMeshes(models,
                 material => editableNames.Contains(SubstituteBodyRace(Path.GetFileName(material), race)), sourceName,
                 source.GamePath, includeContext: true, modelUnits: units);
+
+            // Vanilla-compat set: gear-embedded skin patches render with the VANILLA body
+            // material, and bibo-family mods override its textures so gear matches (Muse's
+            // _a) — worn false-nail gloves render their hand skin with it. The resolved
+            // (modded) body models never reference it, but the UNMODDED SmallClothes set
+            // does, and every gear skin patch maps into that layout: bake through the
+            // vanilla set and any worn piece matches.
+            if (mesh == null)
+            {
+                var vanilla = LoadBodyModels(Array.ConvertAll(BodyModelSetForRace(race), p => (p, string.Empty)));
+                var (vanillaName, _, vanillaEditable) = ComputeEditableBodyMaterials(source, race, vanilla.Models);
+                mesh = ReadMeshes(vanilla.Models,
+                    material => vanillaEditable.Contains(SubstituteBodyRace(Path.GetFileName(material), race)), vanillaName,
+                    source.GamePath, includeContext: true, modelUnits: vanilla.Units);
+                if (mesh != null)
+                    DynamicTextureManager.Log.Information(
+                        $"Body geometry of {source.GamePath} comes from the VANILLA SmallClothes set ({race}) — "
+                      + "no resolved body model references it (vanilla-compat material).");
+            }
+
             if (mesh != null)
                 DynamicTextureManager.Log.Information(
                     $"Body geometry of {source.GamePath}: {mesh.VertexCount} vertices, {mesh.TriangleCount} triangles "

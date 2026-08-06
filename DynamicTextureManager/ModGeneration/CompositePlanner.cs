@@ -117,9 +117,10 @@ public static class CompositePlanner
             if (!IsBodyFamilySkinMaterial(source.GamePath))
                 continue;
 
-            // Same rule as the diffuse companions: relief reaches the face and split body
-            // canvases, never overlay parts (nail plates stay nails).
-            if (source.Overlay && !ModelUvReader.IsFaceSkinMaterial(source.GamePath))
+            // Same rule as the diffuse companions: relief reaches the face, split body
+            // canvases and body mirrors (the same body under an alternate material set) —
+            // never overlay parts (nail plates stay nails).
+            if (source.Overlay && !source.BodyMirror && !ModelUvReader.IsFaceSkinMaterial(source.GamePath))
                 continue;
 
             var mtrl = files.GetMaterial(source, null);
@@ -216,11 +217,13 @@ public static class CompositePlanner
             if (mesh == null)
                 continue;
 
-            // Full-coverage procedural layers continue onto the face and onto body canvases
-            // split across materials — but NOT onto overlay parts (nails, claws, accents):
-            // fur belongs on the skin around a fingernail, never on the nail plate itself.
-            // Decals keep reaching overlay parts by footprint, so tattoos still cross them.
-            var proceduralTarget = ModelUvReader.IsFaceSkinMaterial(targetSource.GamePath) || !targetSource.Overlay;
+            // Full-coverage procedural layers continue onto the face, onto body canvases
+            // split across materials and onto body mirrors (the same body under an
+            // alternate material set) — but NOT onto overlay parts (nails, claws,
+            // accents): fur belongs on the skin around a fingernail, never on the nail
+            // plate itself. Decals keep reaching overlay parts by footprint.
+            var proceduralTarget = targetSource.BodyMirror || !targetSource.Overlay
+             || ModelUvReader.IsFaceSkinMaterial(targetSource.GamePath);
 
             var touching = new List<TextureLayer>();
             foreach (var (otherSource, otherDiffuse, otherLayers) in bodyFamily)

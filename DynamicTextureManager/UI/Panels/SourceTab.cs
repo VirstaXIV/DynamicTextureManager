@@ -363,24 +363,10 @@ public sealed class SourceTab(
         var seen = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
 
         var body = new List<(ResolvedMaterial Material, string Diffuse)>();
-        var referencingModels = new Dictionary<string, SortedSet<string>>(StringComparer.OrdinalIgnoreCase);
         foreach (var group in groups)
         foreach (var material in group.Materials)
         {
-            if (!ModelUvReader.IsBodySkinMaterial(material.GamePath))
-                continue;
-
-            // Every model the tree shows rendering this material — gear-exposed skin
-            // (false-nail hands, toe feet) can be referenced by several worn pieces, and
-            // a bake onto it needs them all.
-            if (material.MdlGamePath.Length > 0)
-            {
-                if (!referencingModels.TryGetValue(material.GamePath, out var models))
-                    referencingModels[material.GamePath] = models = new SortedSet<string>(StringComparer.OrdinalIgnoreCase);
-                models.Add(material.MdlGamePath);
-            }
-
-            if (!seen.Add(material.GamePath))
+            if (!ModelUvReader.IsBodySkinMaterial(material.GamePath) || !seen.Add(material.GamePath))
                 continue;
 
             var (isSkin, diffuse) = SkinInfo(material);
@@ -434,27 +420,53 @@ public sealed class SourceTab(
                     deduped.Add(e);
             }
 
-            // Tree skin materials no resolved body model references: superseded vanilla
-            // skin (only shown on gear-embedded patches) — or skin a WORN GEAR model
-            // renders with a texture set of its own (false-nail hands riding the body
-            // mod's bibo-compat material). They stay full canvases so every body bake
-            // (procedural relief included) continues onto them, and they carry the
-            // models the tree shows rendering them as their geometry — the body models
-            // never reference these, so their UV layout only exists on those pieces.
-            // Ones sharing a canvas diffuse already render with the canvas texture and
-            // need no entry of their own.
-            var leftovers = new List<ResolvedMaterial>();
+            // Tree skin materials no resolved body model references, painting their own
+            // textures. The ones the VANILLA SmallClothes set renders with are the SAME
+            // body under an alternate material set — the vanilla-compat material
+            // bibo-family mods override so gear-embedded skin patches match (Muse's _a;
+            // worn false-nail gloves render their hand skin with it). Those join as
+            // BODY MIRRORS: not a canvas of their own — every body bake replays onto
+            // their texture set through the vanilla body layout, which every gear skin
+            // patch maps into. The rest (nail-plate-style extras) stay plain overlay
+            // parts. Ones sharing a canvas diffuse already render with the canvas
+            // texture and need no entry of their own.
+            var vanillaNames = uvReader.VanillaBodyMaterialNames(race);
+            var leftovers    = new List<ResolvedMaterial>();
             if (deduped.Count > 0)
                 for (var i = 0; i < body.Count; ++i)
                 {
                     if (matched.Contains(i) || body[i].Diffuse.Length == 0 || !byDiffuse.Add(body[i].Diffuse))
                         continue;
 
-                    var models = referencingModels.TryGetValue(body[i].Material.GamePath, out var set)
-                        ? string.Join(';', set)
-                        : body[i].Material.MdlGamePath;
-                    leftovers.Add(body[i].Material with { MdlGamePath = models, MdlActualPath = string.Empty });
+                    var mirror = vanillaNames.Contains(
+                        ModelUvReader.SubstituteBodyRace(Path.GetFileName(body[i].Material.GamePath), race));
+                    leftovers.Add(body[i].Material with
+                    {
+                        Label         = mirror ? "Gear Skin" : body[i].Material.Label,
+                        MdlGamePath   = topModel,
+                        MdlActualPath = string.Empty,
+                        IsOverlayPart = true,
+                        IsBodyMirror  = mirror,
+                    });
                 }
+
+            // The vanilla-compat set exists whether or not worn gear currently exposes it —
+            // rebuild missing mirrors from their conventional paths, so the outfit at add
+            // time never decides whether gear skin matches.
+            if (deduped.Count > 0)
+            {
+                var present = deduped.Select(e => e.Material).Concat(leftovers)
+                    .Select(m => ModelUvReader.SubstituteBodyRace(Path.GetFileName(m.GamePath), race))
+                    .ToHashSet(StringComparer.OrdinalIgnoreCase);
+                foreach (var name in vanillaNames.Where(n => !slots.ContainsKey(n) && !present.Contains(n)))
+                {
+                    if (SynthesizeBodyMaterial(name, topModel) is not { } entry
+                     || entry.Diffuse.Length == 0 || !byDiffuse.Add(entry.Diffuse))
+                        continue;
+
+                    leftovers.Add(entry.Material with { Label = "Gear Skin", IsOverlayPart = true, IsBodyMirror = true });
+                }
+            }
 
             // Resolved models unreadable (nonstandard bodies) — the tree's view is all there is.
             if (deduped.Count == 0)
@@ -665,6 +677,7 @@ public sealed class SourceTab(
                 MdlGamePath   = material.MdlGamePath,
                 MdlActualPath = material.MdlActualPath,
                 Overlay       = material.IsOverlayPart,
+                BodyMirror    = material.IsBodyMirror,
             });
 
             // A hairstyle brings its model's sibling materials along as hidden companions.
