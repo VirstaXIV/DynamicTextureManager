@@ -262,6 +262,18 @@ public static class ProceduralSurfaceBaker
     /// </summary>
     private static float[]? ComputeRegionWeights(MaterialMesh mesh, ProceduralSurfaceLayer layer)
     {
+        // The face companion canvas is its own mesh, not a body unit — it takes the face
+        // weight uniformly and ignores the body-part sliders.
+        if (mesh.GamePath.Contains("/obj/face/", StringComparison.OrdinalIgnoreCase))
+        {
+            if (layer.WeightFace >= 1f)
+                return null;
+
+            var uniform = new float[mesh.VertexCount];
+            Array.Fill(uniform, Math.Clamp(layer.WeightFace, 0f, 1f));
+            return uniform;
+        }
+
         if (layer is { WeightChest: 1f, WeightLegs: 1f, WeightHands: 1f, WeightFeet: 1f })
             return null;
 

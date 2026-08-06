@@ -109,6 +109,7 @@ public sealed class ProceduralSurfaceSection
         {
             Im.Text("Body Coverage"u8);
             Im.Tooltip.OnHover("How strongly the pattern covers each part of the body."u8);
+            changed |= DrawSliderClamped("Face"u8, ref layer.WeightFace, 0f, 1f);
             changed |= DrawSliderClamped("Chest"u8, ref layer.WeightChest, 0f, 1f);
             changed |= DrawSliderClamped("Legs"u8, ref layer.WeightLegs, 0f, 1f);
             changed |= DrawSliderClamped("Hands"u8, ref layer.WeightHands, 0f, 1f);

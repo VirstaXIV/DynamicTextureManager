@@ -183,6 +183,16 @@ public sealed class ModelUvReader(IDataManager dataManager, PenumbraService penu
     public static bool IsBodySkinMaterial(string materialGamePath)
         => BodySkinMaterialPattern.IsMatch(materialGamePath);
 
+    /// <summary>
+    /// Face skin materials. The face keeps its own model (unlike the body), but its material
+    /// path carries the correct race/face ids — faces are per-character, no race substitution.
+    /// </summary>
+    private static readonly Regex FaceSkinMaterialPattern =
+        new(@"^chara/human/(c\d{4})/obj/face/(f\d{4})/material/", RegexOptions.IgnoreCase | RegexOptions.Compiled);
+
+    public static bool IsFaceSkinMaterial(string materialGamePath)
+        => FaceSkinMaterialPattern.IsMatch(materialGamePath);
+
     /// <summary> Body material file name (mt_cXXXXbYYYY_*.mtrl) → its conventional game path; the race/body codes live in the name itself. </summary>
     private static readonly Regex BodyMaterialNamePattern =
         new(@"^mt_(c\d{4})(b\d{4})_", RegexOptions.IgnoreCase | RegexOptions.Compiled);
@@ -267,6 +277,12 @@ public sealed class ModelUvReader(IDataManager dataManager, PenumbraService penu
         // models only embed the few skin patches they expose.
         if (IsBodySkinMaterial(source.GamePath) && GetBodyMesh(source) is { } bodyMesh)
             return bodyMesh;
+
+        // Face skin: the model derives from the material path itself. Must run before the
+        // generic branch — face sources travel inside the Body unit and record the body's
+        // model path as their unit key, which is not their geometry.
+        if (IsFaceSkinMaterial(source.GamePath) && GetFaceMesh(source) is { } faceMesh)
+            return faceMesh;
 
         if (source.MdlGamePath.Length == 0)
             return null;
@@ -415,6 +431,53 @@ public sealed class ModelUvReader(IDataManager dataManager, PenumbraService penu
         }
 
         return (models, units);
+    }
+
+    /// <summary>
+    /// The face model's geometry for a face skin material: model path derived from the
+    /// material path (chara/human/cX/obj/face/fY/model/cXfY_fac.mdl), only the source
+    /// material's own meshes editable — the face model also carries iris/brow/occlusion
+    /// meshes whose UVs live in other textures.
+    /// </summary>
+    private MaterialMesh? GetFaceMesh(SourcePath source)
+    {
+        var match = FaceSkinMaterialPattern.Match(source.GamePath);
+        if (!match.Success)
+            return null;
+
+        var race      = match.Groups[1].Value;
+        var face      = match.Groups[2].Value;
+        var modelPath = $"chara/human/{race}/obj/face/{face}/model/{race}{face}_fac.mdl";
+        var resolved  = penumbra.ResolvePlayerPath(modelPath);
+        var key       = $"face|{source.GamePath}|{resolved}";
+        if (_meshCache.TryGetValue(key, out var cached))
+            return cached;
+
+        MaterialMesh? mesh = null;
+        try
+        {
+            var bytes = LoadGameFile(modelPath);
+            if (bytes == null)
+            {
+                DynamicTextureManager.Log.Warning($"Could not load face model {modelPath} for its geometry.");
+            }
+            else
+            {
+                var fileName = Path.GetFileName(source.GamePath);
+                mesh = ReadMeshes([new MdlFile(bytes)],
+                    material => material.EndsWith(fileName, StringComparison.OrdinalIgnoreCase), fileName, modelPath);
+                if (mesh != null)
+                    DynamicTextureManager.Log.Information(
+                        $"Face geometry of {source.GamePath}: {mesh.VertexCount} vertices, {mesh.TriangleCount} triangles.");
+            }
+        }
+        catch (Exception ex)
+        {
+            DynamicTextureManager.Log.Warning($"Could not read face geometry for {source.GamePath}: {ex.Message}");
+        }
+
+        _meshCache[key] = mesh;
+        return mesh;
     }
 
     private MaterialMesh? GetBodyMesh(SourcePath source)

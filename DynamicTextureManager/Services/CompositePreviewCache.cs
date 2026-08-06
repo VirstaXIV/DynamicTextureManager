@@ -223,7 +223,7 @@ public sealed class CompositePreviewCache : IService, IDisposable
             // pay for it. Merged into the regular layer list (not effect layers): a companion
             // decal should render in full color exactly like a normal layer, so the Textures
             // tab's "Generated" view for nails/accents matches what actually gets built.
-            var anyBodyFamily = dTexture.Data.Source.Materials.Count(m => ModelUvReader.IsBodySkinMaterial(m.GamePath)) > 1;
+            var anyBodyFamily = dTexture.Data.Source.Materials.Count(m => CompositePlanner.IsBodyFamilySkinMaterial(m.GamePath)) > 1;
             if (anyBodyFamily)
             {
                 var companion = CompositePlanner.OverlayCompanionTargets(dTexture.Data, _shaderHandlers, _sourceFiles, _uvReader)
