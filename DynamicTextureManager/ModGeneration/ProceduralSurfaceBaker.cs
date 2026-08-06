@@ -187,8 +187,13 @@ public static class ProceduralSurfaceBaker
         var natural = SurfaceFlowField.BodyFlow(mesh);
         var region  = ComputeRegionWeights(mesh, layer);
         var directional = layer.Kind is SurfaceGeneratorKind.Fur or SurfaceGeneratorKind.Scales;
-        var charts   = directional ? SurfaceFlowField.ComputeCharts(mesh, flow, layer.Anchors) : null;
-        var boundary = directional ? SurfaceFlowField.BoundaryDistance(mesh) : null;
+
+        // Small companion canvases (the face) skip charts entirely and live in the shared
+        // world frame — near the body axis that frame IS a good flow chart, and it makes
+        // them match the body at the junction by construction.
+        var worldOnly = directional && MeshExtent(mesh) < 0.35f;
+        var charts    = directional && !worldOnly ? SurfaceFlowField.ComputeCharts(mesh, flow, layer.Anchors) : null;
+        var boundary  = charts != null ? SurfaceFlowField.BoundaryDistance(mesh) : null;
         var fields = new SurfaceFields
         {
             Covered        = new bool[texels],
@@ -241,39 +246,22 @@ public static class ProceduralSurfaceBaker
                 ? MathF.Sqrt(MathF.Abs(area) * 0.5f / worldArea)
                 : 0f;
 
-            // The triangle's three dominant charts by summed inverse-square seed distance,
-            // ties broken by chart index. Three keeps the switch error small where two
-            // charts tie. A chart whose coordinates JUMP across this triangle is rejected —
-            // that is its cut locus (geodesic paths meeting around a limb), where its
-            // unfolding is discontinuous and would print a hard line.
+            // The triangle's three dominant charts by summed per-vertex weight — quality
+            // (fading smoothly toward each chart's cut locus) over squared seed distance,
+            // ties broken by chart index. The weights are SMOOTH per vertex, so a chart
+            // hands over gradually wherever it tears or grows distant; any residual
+            // pick-switch lands on the third slot where its weight is negligible.
             var chartA = 0;
             var chartB = 0;
             var chartC = 0;
             if (charts != null)
             {
-                var maxEdge = MathF.Max((mesh.Positions[i1] - mesh.Positions[i0]).Length(),
-                    MathF.Max((mesh.Positions[i2] - mesh.Positions[i1]).Length(),
-                        (mesh.Positions[i0] - mesh.Positions[i2]).Length()));
-                var coherent = 4f * maxEdge + 0.02f;
-
                 var bestA = -1f;
                 var bestB = -1f;
                 var bestC = -1f;
                 for (var chart = 0; chart < charts.Count; ++chart)
                 {
-                    var d0 = charts.Distance[chart][i0];
-                    var d1 = charts.Distance[chart][i1];
-                    var d2 = charts.Distance[chart][i2];
-                    if (d0 >= float.MaxValue || d1 >= float.MaxValue || d2 >= float.MaxValue)
-                        continue;
-
-                    var l0 = charts.Local[chart][i0];
-                    var l1 = charts.Local[chart][i1];
-                    var l2 = charts.Local[chart][i2];
-                    if ((l1 - l0).Length() > coherent || (l2 - l1).Length() > coherent || (l0 - l2).Length() > coherent)
-                        continue;
-
-                    var w = 1f / (d0 * d0 + 1e-4f) + 1f / (d1 * d1 + 1e-4f) + 1f / (d2 * d2 + 1e-4f);
+                    var w = ChartWeight(charts, chart, i0) + ChartWeight(charts, chart, i1) + ChartWeight(charts, chart, i2);
                     if (w > bestA)
                     {
                         (bestC, chartC) = (bestB, chartB);
@@ -291,17 +279,14 @@ public static class ProceduralSurfaceBaker
                     }
                 }
 
-                if (bestA < 0f)
+                if (bestA <= 0f)
                 {
-                    // Every chart is cut or unreached here (rare) — take the nearest
-                    // reached one anyway rather than sampling garbage from chart 0.
+                    // Every chart is torn or unreached here (rare) — take the nearest
+                    // reached one rather than sampling garbage from chart 0.
                     var bestD = float.MaxValue;
                     for (var chart = 0; chart < charts.Count; ++chart)
                     {
                         var d0 = charts.Distance[chart][i0];
-                        if (d0 >= float.MaxValue)
-                            continue;
-
                         if (d0 < bestD)
                         {
                             bestD  = d0;
@@ -311,13 +296,6 @@ public static class ProceduralSurfaceBaker
 
                     chartB = chartA;
                     chartC = chartA;
-                }
-                else
-                {
-                    if (bestB < 0f)
-                        chartB = chartA;
-                    if (bestC < 0f)
-                        chartC = chartB;
                 }
             }
 
@@ -362,11 +340,12 @@ public static class ProceduralSurfaceBaker
 
                     if (charts != null)
                     {
-                        float Interp(float[] plane)
-                            => plane[i0] * w0 + plane[i1] * w1 + plane[i2] * w2;
-
                         Vector2 InterpV(Vector2[] plane)
                             => plane[i0] * w0 + plane[i1] * w1 + plane[i2] * w2;
+
+                        float WeightAt(int chart)
+                            => ChartWeight(charts, chart, i0) * w0 + ChartWeight(charts, chart, i1) * w1
+                              + ChartWeight(charts, chart, i2) * w2;
 
                         fields.FlowCoordA[index] = InterpV(charts.Local[chartA]);
                         fields.FlowCoordB[index] = InterpV(charts.Local[chartB]);
@@ -375,27 +354,29 @@ public static class ProceduralSurfaceBaker
                         fields.OffsetB[index]    = charts.Offset[chartB];
                         fields.OffsetC[index]    = charts.Offset[chartC];
 
-                        var wa = 1f;
-                        var wb = 0f;
-                        var wc = 0f;
-                        if (chartB != chartA || chartC != chartA)
-                        {
-                            var da = Interp(charts.Distance[chartA]);
-                            var db = Interp(charts.Distance[chartB]);
-                            var dc = Interp(charts.Distance[chartC]);
-                            wa = 1f / (da * da + 1e-4f);
-                            wb = chartB != chartA ? 1f / (db * db + 1e-4f) : 0f;
-                            wc = chartC != chartA && chartC != chartB ? 1f / (dc * dc + 1e-4f) : 0f;
-                        }
+                        var wa = MathF.Max(1e-6f, WeightAt(chartA));
+                        var wb = chartB != chartA ? WeightAt(chartB) : 0f;
+                        var wc = chartC != chartA && chartC != chartB ? WeightAt(chartC) : 0f;
 
                         var sum = wa + wb + wc;
                         fields.BlendB[index] = wb / sum;
                         fields.BlendC[index] = wc / sum;
 
+                        // The band reaches DOWN from the body's top edge far enough to cover
+                        // where the face's own rim visibly meets the body (~9 cm of neck) —
+                        // both sides are fully in the shared world frame there.
                         fields.SeamBlend[index] = boundary != null
-                            ? ProceduralFields.Smooth(0.015f, 0.055f,
+                            ? ProceduralFields.Smooth(0.09f, 0.16f,
                                 boundary[i0] * w0 + boundary[i1] * w1 + boundary[i2] * w2)
                             : 1f;
+                    }
+                    else if (worldOnly)
+                    {
+                        fields.SeamBlend[index] = 0f;
+                    }
+                    else
+                    {
+                        fields.SeamBlend[index] = 1f;
                     }
 
                     fields.FlowPotential[index] = flow != null && (flow.HasFlow[i0] || flow.HasFlow[i1] || flow.HasFlow[i2])
@@ -532,24 +513,27 @@ public static class ProceduralSurfaceBaker
                             a.Item2 + (b.Item2 - a.Item2) * t,
                             a.Item3 + (b.Item3 - a.Item3) * t);
 
-                    var blendB = surface.BlendB[index];
-                    var blendC = surface.BlendC[index];
-                    sample = Directional(surface.FlowCoordA[index], surface.OffsetA[index]);
-                    if (blendB > 0.004f)
-                        sample = Mix(sample, Directional(surface.FlowCoordB[index], surface.OffsetB[index]),
-                            blendB / MathF.Max(1e-4f, 1f - blendC));
-                    if (blendC > 0.004f)
-                        sample = Mix(sample, Directional(surface.FlowCoordC[index], surface.OffsetC[index]), blendC);
-
-                    // Near the mesh's open boundary the pattern fades into a shared world
-                    // frame — a cylinder around the body axis — so both canvases meeting
-                    // there (body and face at the neck ring) arrive at the SAME pattern.
+                    // Near the mesh's open boundary (and on world-only canvases like the
+                    // face) the pattern lives in a shared world frame — a cylinder around
+                    // the body axis — so canvases meeting there arrive at the SAME pattern.
                     var seam = surface.SeamBlend[index];
-                    if (seam < 0.996f)
+                    if (seam <= 0.004f)
                     {
-                        var pos = surface.Position[index];
-                        var worldCoord = new Vector2(MathF.Atan2(pos.X, pos.Z) * 0.1f, -pos.Y);
-                        sample = Mix(Directional(worldCoord, 0f), sample, seam);
+                        sample = Directional(WorldFrame(surface.Position[index]), 0f);
+                    }
+                    else
+                    {
+                        var blendB = surface.BlendB[index];
+                        var blendC = surface.BlendC[index];
+                        sample = Directional(surface.FlowCoordA[index], surface.OffsetA[index]);
+                        if (blendB > 0.004f)
+                            sample = Mix(sample, Directional(surface.FlowCoordB[index], surface.OffsetB[index]),
+                                blendB / MathF.Max(1e-4f, 1f - blendC));
+                        if (blendC > 0.004f)
+                            sample = Mix(sample, Directional(surface.FlowCoordC[index], surface.OffsetC[index]), blendC);
+
+                        if (seam < 0.996f)
+                            sample = Mix(Directional(WorldFrame(surface.Position[index]), 0f), sample, seam);
                     }
                 }
                 else
@@ -827,6 +811,34 @@ public static class ProceduralSurfaceBaker
 
     private static float ApplyContrast(float v, float contrast)
         => Math.Clamp(0.5f + (v - 0.5f) * (contrast * 2f), 0f, 1f);
+
+    /// <summary> The shared world frame: a cylinder around the body's vertical axis, identical on every canvas. </summary>
+    private static Vector2 WorldFrame(Vector3 pos)
+        => new(MathF.Atan2(pos.X, pos.Z) * 0.1f, -pos.Y);
+
+    /// <summary> A chart's smooth per-vertex weight: cut-locus-damped quality over squared seed distance. </summary>
+    private static float ChartWeight(SurfaceFlowField.SurfaceCharts charts, int chart, int vertex)
+    {
+        var quality = charts.Quality[chart][vertex];
+        if (quality <= 0f)
+            return 0f;
+
+        var distance = charts.Distance[chart][vertex];
+        return quality / (distance * distance + 1e-4f);
+    }
+
+    private static float MeshExtent(MaterialMesh mesh)
+    {
+        Vector3 min = new(float.MaxValue), max = new(float.MinValue);
+        foreach (var p in mesh.Positions)
+        {
+            min = Vector3.Min(min, p);
+            max = Vector3.Max(max, p);
+        }
+
+        var size = max - min;
+        return MathF.Max(size.X, MathF.Max(size.Y, size.Z));
+    }
 
     // ------------------------------------------------------------------ stage C: composition
 

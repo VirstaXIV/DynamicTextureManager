@@ -513,6 +513,13 @@ public static class SurfaceFlowField
         /// <summary> Per chart, per raw vertex: geodesic distance to the chart seed (MaxValue unreached). </summary>
         public required float[][] Distance;
 
+        /// <summary>
+        /// Per chart, per raw vertex: how usable the chart is here, fading SMOOTHLY to 0
+        /// toward its cut locus (where the unfolding tears and coordinates jump) — weights
+        /// damped by this hand over to a neighboring chart without any hard switch.
+        /// </summary>
+        public required float[][] Quality;
+
         /// <summary> Per chart: stable pattern offset decorrelating the charts. </summary>
         public required float[] Offset;
 
@@ -588,6 +595,9 @@ public static class SurfaceFlowField
         Vector3 SeedFlow(int vertex)
             => flow != null && flow.HasFlow[vertex] ? flow.Direction[vertex] : natural.Direction[vertex];
 
+        var qualities = new List<float[]>();
+        var (_, neighbors) = mesh.GetOrBuildAdjacency();
+
         void AddChart(int seedVertex, Vector3 dir)
         {
             var normal = mesh.Normals[seedVertex].LengthSquared() > 1e-8f
@@ -605,19 +615,47 @@ public static class SurfaceFlowField
 
             var walk = TransportWalk(mesh, mesh.Positions[seedVertex], normal, tangent, bitangent, float.MaxValue);
 
+            // Chart quality per canonical vertex: the worst coordinate stretch toward any
+            // neighbor. Near the cut locus the unfolding tears (coordinates jump across a
+            // short edge) — quality fades smoothly to 0 there instead of switching hard.
+            var quality = new float[count];
+            for (var v = 0; v < count; ++v)
+            {
+                if (canonical[v] != v || !walk.Reached[v])
+                    continue;
+
+                var stretch = 1f;
+                foreach (var u in neighbors[v])
+                {
+                    if (!walk.Reached[u])
+                        continue;
+
+                    var edge = (mesh.Positions[u] - mesh.Positions[v]).Length();
+                    if (edge < 1e-6f)
+                        continue;
+
+                    stretch = MathF.Max(stretch, (walk.Local[u] - walk.Local[v]).Length() / edge);
+                }
+
+                quality[v] = 1f - ProceduralFields.Smooth(2.5f, 5f, stretch);
+            }
+
             var local = new Vector2[count];
             var dist  = new float[count];
+            var qual  = new float[count];
             for (var v = 0; v < count; ++v)
             {
                 var c = canonical[v];
                 local[v] = walk.Local[c];
                 dist[v]  = walk.Reached[c] ? walk.Distance[c] : float.MaxValue;
+                qual[v]  = quality[c];
                 if (dist[v] < minDist[v])
                     minDist[v] = dist[v];
             }
 
             locals.Add(local);
             distances.Add(dist);
+            qualities.Add(qual);
         }
 
         foreach (var anchor in anchors)
@@ -685,6 +723,7 @@ public static class SurfaceFlowField
         {
             Local    = locals.ToArray(),
             Distance = distances.ToArray(),
+            Quality  = qualities.ToArray(),
             Offset   = offsets,
         };
     }
