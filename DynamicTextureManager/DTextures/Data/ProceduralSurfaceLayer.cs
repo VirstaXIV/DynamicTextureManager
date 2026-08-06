@@ -22,8 +22,9 @@ public enum SurfacePatternStyle
 }
 
 /// <summary>
-/// Coat markings on fur: where the highlight color interacts with the main coat color —
-/// tabby banding, spots, marbled swirls. None leaves a plain single-color coat.
+/// Markings: where the highlight color interacts with the base color — tabby banding,
+/// spots, marbled swirls, or a hand-painted mask. Available on every generator kind.
+/// None leaves a plain single-color surface.
 /// </summary>
 public enum FurMarkingStyle
 {
@@ -31,6 +32,7 @@ public enum FurMarkingStyle
     Stripes  = 1,
     Spots    = 2,
     Marbling = 3,
+    Painted  = 4,
 }
 
 /// <summary>
@@ -143,8 +145,39 @@ public sealed class ProceduralSurfaceLayer : TextureLayer
 
     public List<FlowAnchor> Anchors = [];
 
-    /// <summary> Dominant feature size in centimeters on the body (plate size, stripe period, strand spacing). </summary>
+    /// <summary> Legacy shared size — kept for older saves; the per-kind sizes below rule. </summary>
     public float FeatureSizeCm = 2f;
+
+    /// <summary>
+    /// Feature size per kind, in centimeters. Separate on purpose: fur only reads as fur
+    /// at small strand sizes while scales and patterns live at centimeter scale — one
+    /// shared slider kept dragging a fur-tuned value into the other kinds.
+    /// </summary>
+    public float FurSizeCm = 0.3f;
+
+    public float ScaleSizeCm = 2f;
+
+    public float PatternSizeCm = 2f;
+
+    /// <summary> The active kind's feature size. </summary>
+    public float ActiveSizeCm
+    {
+        get => Kind switch
+        {
+            SurfaceGeneratorKind.Fur    => FurSizeCm,
+            SurfaceGeneratorKind.Scales => ScaleSizeCm,
+            _                           => PatternSizeCm,
+        };
+        set
+        {
+            switch (Kind)
+            {
+                case SurfaceGeneratorKind.Fur:    FurSizeCm = value; break;
+                case SurfaceGeneratorKind.Scales: ScaleSizeCm = value; break;
+                default:                          PatternSizeCm = value; break;
+            }
+        }
+    }
 
     /// <summary> Primary color, packed Rgba32 (0xAABBGGRR). </summary>
     public uint ColorA = 0xFF303030;
@@ -209,6 +242,9 @@ public sealed class ProceduralSurfaceLayer : TextureLayer
     /// <summary> The painted coverage mask, as its brush dabs in stroke order. </summary>
     public List<CoverageDab> MaskDabs = [];
 
+    /// <summary> The painted markings mask (highlight-color placement), same dab model. </summary>
+    public List<CoverageDab> MarkingDabs = [];
+
     /// <summary> Softening of part-boundary transitions (0 = hard cut at the unit seam). </summary>
     public float RegionFeather = 0.5f;
 
@@ -256,6 +292,9 @@ public sealed class ProceduralSurfaceLayer : TextureLayer
         json["Seed"]            = Seed;
         json["Anchors"]         = new JArray(Anchors.Select(a => a.Serialize()));
         json["FeatureSizeCm"]   = FeatureSizeCm;
+        json["FurSizeCm"]       = FurSizeCm;
+        json["ScaleSizeCm"]     = ScaleSizeCm;
+        json["PatternSizeCm"]   = PatternSizeCm;
         json["ColorA"]          = ColorA;
         json["ColorB"]          = ColorB;
         json["UseCharacterColors"] = UseCharacterColors;
@@ -284,11 +323,13 @@ public sealed class ProceduralSurfaceLayer : TextureLayer
         json["WeightFace"]      = WeightFace;
         json["RegionFeather"]   = RegionFeather;
         json["MaskDabs"]        = new JArray(MaskDabs.Select(d => d.Serialize()));
+        json["MarkingDabs"]     = new JArray(MarkingDabs.Select(d => d.Serialize()));
         json["SurfaceAttributes"] = SurfaceAttributes;
     }
 
     public static ProceduralSurfaceLayer LoadProcedural(JObject json)
-        => new()
+    {
+        var ret = new ProceduralSurfaceLayer
         {
             Kind            = (SurfaceGeneratorKind)(json["Kind"]?.ToObject<int>() ?? 0),
             Seed            = json["Seed"]?.ToObject<int>() ?? 1,
@@ -326,6 +367,17 @@ public sealed class ProceduralSurfaceLayer : TextureLayer
             MaskDabs        = json["MaskDabs"] is JArray dabs
                 ? dabs.OfType<JArray>().Select(CoverageDab.Load).OfType<CoverageDab>().ToList()
                 : [],
+            MarkingDabs     = json["MarkingDabs"] is JArray marks
+                ? marks.OfType<JArray>().Select(CoverageDab.Load).OfType<CoverageDab>().ToList()
+                : [],
             SurfaceAttributes = json["SurfaceAttributes"]?.ToObject<uint>() ?? uint.MaxValue,
         };
+
+        // Older saves carried one shared size: it becomes the ACTIVE kind's size; the other
+        // kinds start from their own defaults instead of inheriting a mistuned value.
+        ret.FurSizeCm     = json["FurSizeCm"]?.ToObject<float>() ?? (ret.Kind == SurfaceGeneratorKind.Fur ? ret.FeatureSizeCm : 0.3f);
+        ret.ScaleSizeCm   = json["ScaleSizeCm"]?.ToObject<float>() ?? (ret.Kind == SurfaceGeneratorKind.Scales ? ret.FeatureSizeCm : 2f);
+        ret.PatternSizeCm = json["PatternSizeCm"]?.ToObject<float>() ?? (ret.Kind == SurfaceGeneratorKind.Pattern ? ret.FeatureSizeCm : 2f);
+        return ret;
+    }
 }

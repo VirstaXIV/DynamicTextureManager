@@ -62,8 +62,22 @@ public sealed class ProceduralSurfaceSection
             changed |= DrawPackedColor("Color B"u8, ref layer.ColorB);
         }
 
-        changed |= DrawSliderClamped("Size (cm)"u8, ref layer.FeatureSizeCm, 0.2f, 10f, "%.1f"u8);
-        Im.Tooltip.OnHover("Size of the plates, stripes or fur clumps on the body."u8);
+        // Each kind keeps its own size — fur reads as fur only at small strand sizes,
+        // scales and patterns live at centimeter scale.
+        var (minSize, maxSize) = layer.Kind == SurfaceGeneratorKind.Fur ? (0.1f, 2f) : (0.5f, 10f);
+        var size = layer.ActiveSizeCm;
+        if (DrawSliderClamped("Size (cm)"u8, ref size, minSize, maxSize))
+        {
+            layer.ActiveSizeCm = size;
+            changed            = true;
+        }
+
+        Im.Tooltip.OnHover(layer.Kind switch
+        {
+            SurfaceGeneratorKind.Fur    => "Strand size — small values read as fur."u8,
+            SurfaceGeneratorKind.Scales => "Plate size on the body."u8,
+            _                           => "Pattern feature size on the body."u8,
+        });
 
         changed |= DrawSliderClamped("Opacity"u8, ref layer.Opacity, 0f, 1f);
 
@@ -74,14 +88,11 @@ public sealed class ProceduralSurfaceSection
             Im.Tooltip.OnHover("How much of the skin the pattern covers."u8);
         }
 
-        if (layer.Kind == SurfaceGeneratorKind.Fur)
+        changed |= DrawMarkings(layer);
+        if (layer.Markings is not FurMarkingStyle.None and not FurMarkingStyle.Painted)
         {
-            changed |= DrawMarkings(layer);
-            if (layer.Markings != FurMarkingStyle.None)
-            {
-                changed |= DrawSliderClamped("Marking Size (cm)"u8, ref layer.MarkingScaleCm, 2f, 20f, "%.1f"u8);
-                changed |= DrawSliderClamped("Marking Amount"u8, ref layer.MarkingAmount, 0f, 1f);
-            }
+            changed |= DrawSliderClamped("Marking Size (cm)"u8, ref layer.MarkingScaleCm, 2f, 20f, "%.1f"u8);
+            changed |= DrawSliderClamped("Marking Amount"u8, ref layer.MarkingAmount, 0f, 1f);
         }
 
         if (Im.Tree.Header("Fine-Tuning"u8))
@@ -137,7 +148,7 @@ public sealed class ProceduralSurfaceSection
     }
 
     private static readonly FurMarkingStyle[] MarkingStyles =
-        [FurMarkingStyle.None, FurMarkingStyle.Stripes, FurMarkingStyle.Spots, FurMarkingStyle.Marbling];
+        [FurMarkingStyle.None, FurMarkingStyle.Stripes, FurMarkingStyle.Spots, FurMarkingStyle.Marbling, FurMarkingStyle.Painted];
 
     private static string MarkingLabel(FurMarkingStyle style)
         => style switch
@@ -145,6 +156,7 @@ public sealed class ProceduralSurfaceSection
             FurMarkingStyle.Stripes  => "Stripes (Tabby)",
             FurMarkingStyle.Spots    => "Spots",
             FurMarkingStyle.Marbling => "Marbling",
+            FurMarkingStyle.Painted  => "Painted",
             _                        => "None",
         };
 
@@ -166,7 +178,7 @@ public sealed class ProceduralSurfaceSection
                 }
         }
 
-        Im.Tooltip.OnHover("Coat markings in the highlight color — stripes wrap the body and limbs like a tabby."u8);
+        Im.Tooltip.OnHover("Markings in the highlight color — tabby stripes wrapping the body, spots, marbling, or your own painted design (Paint Markings below)."u8);
         return changed;
     }
 
