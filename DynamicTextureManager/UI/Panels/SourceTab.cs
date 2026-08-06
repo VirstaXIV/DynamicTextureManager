@@ -387,28 +387,53 @@ public sealed class SourceTab(
             // materials the body does not render with (the vanilla _a patches gear embeds
             // while a body mod is active), can miss the real torso material entirely under
             // covering gear, and lists absolute-pathed materials under their foreign race
-            // code, so names match with the wearer's race substituted on both sides. The
-            // slot bits then separate THE body (torso/legs materials) from part-specific
-            // skin (feet replacements, claws — hands/feet-only): those join the overlay
-            // parts below instead of competing as the main canvas — a feet mod used to be
-            // able to read as the whole body mod. Several materials painting the SAME
-            // diffuse texture are one canvas (body mods split torso/legs into materials
-            // sharing one full-body texture) — the shared canvas lists once.
+            // code, so names match with the wearer's race substituted on both sides. Every
+            // rendered model-referenced skin material is a canvas — hands/feet-only ones
+            // included (feet replacements, false-nail hands: their skin must keep taking
+            // the body bakes) — but ranked torso → legs → hands → feet, so a part mod can
+            // never read as the whole body mod: the torso stays the primary canvas and the
+            // unit's label. Model-referenced extras the tree never surfaced are only
+            // rebuilt for the torso/legs (the body proper, hidden by covering gear);
+            // hand/feet extras missing from the tree are the nail/claw plates the overlay
+            // scan below already offers, and stay overlay parts. Several materials
+            // painting the SAME diffuse texture are one canvas (body mods split torso/legs
+            // into materials sharing one full-body texture) — the shared canvas lists once.
             var slots     = uvReader.ResolvedBodyMaterialSlots(race);
             var byDiffuse = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
             var deduped   = new List<(ResolvedMaterial Material, string Diffuse)>();
-            foreach (var name in slots.Where(kvp => (kvp.Value & 0b0011) != 0)
-                         .OrderBy(kvp => (kvp.Value & 1) != 0 ? 0 : 1)
+            var matched   = new HashSet<int>();
+            foreach (var (name, mask) in slots
+                         .OrderBy(kvp => int.TrailingZeroCount(kvp.Value))
                          .ThenBy(kvp => kvp.Key, StringComparer.OrdinalIgnoreCase)
-                         .Select(kvp => kvp.Key))
+                         .Select(kvp => (kvp.Key, kvp.Value)))
             {
                 var index = body.FindIndex(e => string.Equals(
                     ModelUvReader.SubstituteBodyRace(Path.GetFileName(e.Material.GamePath), race), name,
                     StringComparison.OrdinalIgnoreCase));
-                var entry = index >= 0 ? body[index] : SynthesizeBodyMaterial(name, topModel);
+                if (index >= 0)
+                    matched.Add(index);
+
+                var entry = index >= 0            ? body[index]
+                    : (mask & 0b0011) != 0        ? SynthesizeBodyMaterial(name, topModel)
+                                                  : null;
                 if (entry is { } e && (e.Diffuse.Length == 0 || byDiffuse.Add(e.Diffuse)))
                     deduped.Add(e);
             }
+
+            // Tree skin materials no resolved body model references: superseded vanilla
+            // skin — or a special GEAR model's own hand/nail skin (gear-based false
+            // nails). They join as overlay parts so bakes can continue onto them without
+            // competing as the body; ones sharing a canvas diffuse already render with
+            // the canvas texture and need no entry of their own.
+            var leftovers = new List<ResolvedMaterial>();
+            if (deduped.Count > 0)
+                for (var i = 0; i < body.Count; ++i)
+                {
+                    if (matched.Contains(i) || body[i].Diffuse.Length == 0 || !byDiffuse.Add(body[i].Diffuse))
+                        continue;
+
+                    leftovers.Add(body[i].Material with { MdlGamePath = topModel, MdlActualPath = string.Empty, IsOverlayPart = true });
+                }
 
             // Resolved models unreadable (nonstandard bodies) — the tree's view is all there is.
             if (deduped.Count == 0)
@@ -438,6 +463,7 @@ public sealed class SourceTab(
                 .Concat(uvReader.GetBodyOverlayMaterials(bodySource)
                     .Where(o => !canvasNames.Contains(o.Name))
                     .Select(o => ResolveOverlayMaterial(o, topModel)))
+                .Concat(leftovers)
                 .Concat(faceMaterials)
                 .ToList();
             ret.Add(new ResolvedModelGroup("Body", bodyUnit));
