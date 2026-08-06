@@ -117,6 +117,11 @@ public static class CompositePlanner
             if (!IsBodyFamilySkinMaterial(source.GamePath))
                 continue;
 
+            // Same rule as the diffuse companions: relief reaches the face and split body
+            // canvases, never overlay parts (nail plates stay nails).
+            if (source.Overlay && !ModelUvReader.IsFaceSkinMaterial(source.GamePath))
+                continue;
+
             var mtrl = files.GetMaterial(source, null);
             if (mtrl == null)
                 continue;
@@ -211,6 +216,12 @@ public static class CompositePlanner
             if (mesh == null)
                 continue;
 
+            // Full-coverage procedural layers continue onto the face and onto body canvases
+            // split across materials — but NOT onto overlay parts (nails, claws, accents):
+            // fur belongs on the skin around a fingernail, never on the nail plate itself.
+            // Decals keep reaching overlay parts by footprint, so tattoos still cross them.
+            var proceduralTarget = ModelUvReader.IsFaceSkinMaterial(targetSource.GamePath) || !targetSource.Overlay;
+
             var touching = new List<TextureLayer>();
             foreach (var (otherSource, otherDiffuse, otherLayers) in bodyFamily)
             {
@@ -218,8 +229,8 @@ public static class CompositePlanner
                     continue;
 
                 foreach (var layer in otherLayers)
-                    if (layer is ProceduralSurfaceLayer
-                     || (layer is DecalLayer decal && SurfaceDecalBaker.FootprintTouches(mesh, decal)))
+                    if (layer is ProceduralSurfaceLayer ? proceduralTarget
+                        : layer is DecalLayer decal && SurfaceDecalBaker.FootprintTouches(mesh, decal))
                         touching.Add(layer);
             }
 
