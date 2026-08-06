@@ -365,12 +365,18 @@ public static class SurfaceFlowField
         }
 
         // Flow = tangent-plane gradient of the crown distance, estimated from the edges.
+        // The potential is normalized per component to "descent below the crown's HEIGHT"
+        // (distance minus the crown's Y): near every crown it approximates world descent,
+        // so separate canvases (body, face) carry approximately CONTINUOUS potentials at
+        // their junction instead of each starting from zero at its own crown.
         var direction = new Vector3[count];
         var potential = new float[count];
         for (var v = 0; v < count; ++v)
         {
             var c = canonical[v];
-            potential[v] = distance[c] >= float.MaxValue ? mesh.Positions[v].Y : distance[c];
+            potential[v] = distance[c] >= float.MaxValue
+                ? -mesh.Positions[v].Y
+                : distance[c] - mesh.Positions[crowns[componentOf[c]]].Y;
 
             var g = Vector3.Zero;
             var cPos = mesh.Positions[c];
