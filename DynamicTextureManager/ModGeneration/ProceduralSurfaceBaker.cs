@@ -579,10 +579,13 @@ public static class ProceduralSurfaceBaker
         {
             var center   = new Vector3(dab.X, dab.Y, dab.Z);
             var radius   = MathF.Max(0.005f, dab.Radius);
-            var outer    = radius * 1.4f;
-            var outer2   = outer * outer;
-            var inner    = radius * 0.6f;
             var strength = Math.Clamp(dab.Strength, 0f, 1f);
+            // Strength is the brush hardness: the full-effect plateau grows with it while
+            // the fade band past it shrinks — max is a clean cutoff at the brush edge,
+            // low values barely breathe on the pattern.
+            var inner  = radius * strength;
+            var outer  = MathF.Max(radius * (1.4f - 0.4f * strength), inner + 0.002f);
+            var outer2 = outer * outer;
 
             for (var v = 0; v < count; ++v)
             {
