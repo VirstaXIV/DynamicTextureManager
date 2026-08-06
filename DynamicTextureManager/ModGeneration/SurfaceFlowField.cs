@@ -415,6 +415,67 @@ public static class SurfaceFlowField
         return Vector3.Normalize(down);
     }
 
+    // ------------------------------------------------------------------ geodesic path
+
+    /// <summary>
+    /// The shortest path along the surface between two picked points, as a polyline of
+    /// vertex positions — the paint tools lay dabs along it, so a couple of clicks draw a
+    /// stripe that follows the body instead of cutting through space. Empty when the points
+    /// don't connect (separate mesh pieces).
+    /// </summary>
+    public static List<Vector3> GeodesicPath(MaterialMesh mesh, Vector3 from, Vector3 to)
+    {
+        var (canonical, neighbors) = mesh.GetOrBuildAdjacency();
+        var start  = NearestVertex(mesh, from);
+        var target = NearestVertex(mesh, to);
+        if (start < 0 || target < 0)
+            return [];
+
+        start  = canonical[start];
+        target = canonical[target];
+        if (start == target)
+            return [mesh.Positions[start]];
+
+        var count    = mesh.VertexCount;
+        var distance = new float[count];
+        var parent   = new int[count];
+        Array.Fill(distance, float.MaxValue);
+        Array.Fill(parent, -1);
+        distance[start] = 0f;
+
+        var queue = new PriorityQueue<int, (float Dist, int Vertex)>();
+        queue.Enqueue(start, (0f, start));
+        while (queue.TryDequeue(out var u, out var priority))
+        {
+            if (priority.Dist > distance[u])
+                continue;
+
+            if (u == target)
+                break;
+
+            var uPos = mesh.Positions[u];
+            foreach (var v in neighbors[u])
+            {
+                var d = priority.Dist + (mesh.Positions[v] - uPos).Length();
+                if (d >= distance[v])
+                    continue;
+
+                distance[v] = d;
+                parent[v]   = u;
+                queue.Enqueue(v, (d, v));
+            }
+        }
+
+        if (distance[target] >= float.MaxValue)
+            return [];
+
+        var path = new List<Vector3>();
+        for (var v = target; v >= 0; v = parent[v])
+            path.Add(mesh.Positions[v]);
+        path.Reverse();
+        return path;
+    }
+
     // ------------------------------------------------------------------ mesh boundary distance
 
     private static readonly System.Runtime.CompilerServices.ConditionalWeakTable<MaterialMesh, float[]> BoundaryCache = new();

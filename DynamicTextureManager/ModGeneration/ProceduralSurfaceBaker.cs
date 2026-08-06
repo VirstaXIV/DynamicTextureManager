@@ -169,6 +169,9 @@ public static class ProceduralSurfaceBaker
         /// the SAME pattern at their junction ring.
         /// </summary>
         public required float[] SeamBlend;
+
+        /// <summary> Painted markings mask (0 = base color, 1 = highlight), when the style is Painted. </summary>
+        public float[]? MarkingPaint;
     }
 
     /// <summary>
@@ -198,6 +201,7 @@ public static class ProceduralSurfaceBaker
         var worldOnly = MeshExtent(mesh) < 0.35f;
         var charts    = directional && !worldOnly ? SurfaceFlowField.ComputeCharts(mesh, flow, []) : null;
         var boundary  = worldOnly ? null : SurfaceFlowField.BoundaryDistance(mesh);
+        var painted   = layer.Markings == FurMarkingStyle.Painted ? ComputePaintMask(mesh, layer.MarkingDabs) : null;
         var fields = new SurfaceFields
         {
             Covered        = new bool[texels],
@@ -215,6 +219,7 @@ public static class ProceduralSurfaceBaker
             OffsetB        = new float[texels],
             OffsetC        = new float[texels],
             SeamBlend      = new float[texels],
+            MarkingPaint   = painted != null ? new float[texels] : null,
         };
 
         var indices = mesh.Indices;
@@ -378,6 +383,9 @@ public static class ProceduralSurfaceBaker
                         fields.BlendC[index] = wc / sum;
                     }
 
+                    if (painted != null)
+                        fields.MarkingPaint![index] = painted[i0] * w0 + painted[i1] * w1 + painted[i2] * w2;
+
                     // The potential (stripe/tabby banding coordinate) fades to plain world
                     // descent at seams — both canvases band identically where they meet.
                     var meshPotential = flow != null && (flow.HasFlow[i0] || flow.HasFlow[i1] || flow.HasFlow[i2])
@@ -395,30 +403,19 @@ public static class ProceduralSurfaceBaker
     }
 
     /// <summary>
-    /// Per-vertex coverage weights: the painted brush dabs, applied in stroke order — erase
-    /// dabs take the max fade, restore dabs peel it back — each with a smooth falloff band
-    /// around its radius so the thinning transition has room. The face companion canvas is
-    /// its own mesh and takes the face slider uniformly instead (the brush paints the body
-    /// viewport). Null when nothing reduces coverage — the common case pays nothing.
+    /// Per-vertex mask painted by brush dabs in stroke order — paint dabs take the max
+    /// value, restore dabs peel it back — each with a smooth falloff band around its
+    /// radius. Null when no dab contributes.
     /// </summary>
-    private static float[]? ComputeRegionWeights(MaterialMesh mesh, ProceduralSurfaceLayer layer)
+    private static float[]? ComputePaintMask(MaterialMesh mesh, List<CoverageDab> dabs)
     {
-        if (mesh.GamePath.Contains("/obj/face/", StringComparison.OrdinalIgnoreCase))
-        {
-            if (layer.WeightFace >= 1f)
-                return null;
-
-            var uniform = new float[mesh.VertexCount];
-            Array.Fill(uniform, Math.Clamp(layer.WeightFace, 0f, 1f));
-            return uniform;
-        }
-
-        if (layer.MaskDabs.Count == 0)
+        if (dabs.Count == 0)
             return null;
 
         var count = mesh.VertexCount;
-        var erase = new float[count];
-        foreach (var dab in layer.MaskDabs)
+        var mask  = new float[count];
+        var any   = false;
+        foreach (var dab in dabs)
         {
             var center   = new Vector3(dab.X, dab.Y, dab.Z);
             var radius   = MathF.Max(0.005f, dab.Radius);
@@ -437,19 +434,40 @@ public static class ProceduralSurfaceBaker
                 if (falloff <= 0f)
                     continue;
 
-                erase[v] = dab.Restore ? erase[v] * (1f - falloff) : MathF.Max(erase[v], falloff);
+                mask[v] = dab.Restore ? mask[v] * (1f - falloff) : MathF.Max(mask[v], falloff);
+                any     = true;
             }
         }
 
-        var any    = false;
-        var result = new float[count];
-        for (var v = 0; v < count; ++v)
+        return any ? mask : null;
+    }
+
+    /// <summary>
+    /// Per-vertex coverage weights: 1 minus the painted erase mask. The face companion
+    /// canvas is its own mesh and takes the face slider uniformly instead (the brush
+    /// paints the body viewport). Null when nothing reduces coverage.
+    /// </summary>
+    private static float[]? ComputeRegionWeights(MaterialMesh mesh, ProceduralSurfaceLayer layer)
+    {
+        if (mesh.GamePath.Contains("/obj/face/", StringComparison.OrdinalIgnoreCase))
         {
-            result[v] = 1f - erase[v];
-            any      |= erase[v] > 0f;
+            if (layer.WeightFace >= 1f)
+                return null;
+
+            var uniform = new float[mesh.VertexCount];
+            Array.Fill(uniform, Math.Clamp(layer.WeightFace, 0f, 1f));
+            return uniform;
         }
 
-        return any ? result : null;
+        var erase = ComputePaintMask(mesh, layer.MaskDabs);
+        if (erase == null)
+            return null;
+
+        var result = new float[erase.Length];
+        for (var v = 0; v < erase.Length; ++v)
+            result[v] = 1f - erase[v];
+
+        return result;
     }
 
     // ------------------------------------------------------------------ stage B: generators
@@ -488,8 +506,8 @@ public static class ProceduralSurfaceBaker
             colorB = Vector3.Lerp(colorB, tone, 0.5f);
         }
 
-        // World scale: pattern frequency from the dominant feature size, resolution-free.
-        var k = 1f / Math.Max(0.002f, layer.FeatureSizeCm / 100f);
+        // World scale: pattern frequency from the ACTIVE kind's feature size, resolution-free.
+        var k = 1f / Math.Max(0.001f, layer.ActiveSizeCm / 100f);
 
         // Per-texel evaluation is a pure function of the sampled surface — deterministic
         // under any row scheduling.
@@ -506,7 +524,7 @@ public static class ProceduralSurfaceBaker
                 (float, float, float) Directional(Vector2 coord, float offset)
                     => layer.Kind == SurfaceGeneratorKind.Scales
                         ? EvaluateScales(layer, coord, offset, k)
-                        : EvaluateFur(layer, surface.Position[index], surface.FlowPotential[index], coord, offset, k);
+                        : EvaluateFur(layer, coord, offset, k);
 
                 (float Height, float AlbedoT, float Coverage) sample;
                 if (layer.Kind is SurfaceGeneratorKind.Fur or SurfaceGeneratorKind.Scales)
@@ -544,9 +562,20 @@ public static class ProceduralSurfaceBaker
                     sample = EvaluatePattern(layer, surface, index, k);
                 }
 
-                var (heightV, albedoT, coverage) = sample;
+                var (heightV, jitter, coverage) = sample;
 
                 heightV = ApplyContrast(heightV, layer.Contrast);
+
+                // Markings place the highlight color over the base, on every kind: a
+                // generated world-space field (tabby bands, spots, marbling) or the painted
+                // mask. Generators contribute only their tonal jitter around the base.
+                var marking = layer.Markings switch
+                {
+                    FurMarkingStyle.None    => 0f,
+                    FurMarkingStyle.Painted => surface.MarkingPaint?[index] ?? 0f,
+                    _                       => EvaluateMarkings(layer, surface.Position[index], surface.FlowPotential[index]),
+                };
+                var albedoT = Math.Clamp(marking + jitter, 0f, 1f);
 
                 // Region weights and exclusion fades THIN the pattern instead of ghosting
                 // it: the fading weight becomes a survival threshold against the pattern's
@@ -646,9 +675,9 @@ public static class ProceduralSurfaceBaker
     {
         var pos = surface.Position[index];
 
-        // Low-frequency color variation across the body, centered so 0 variation = pure A/B mix midpoint.
-        var mix = ProceduralFields.Fbm3(layer.Seed + 7777, pos * (k * 0.15f), 2);
-        var albedoT = Math.Clamp(0.5f + (mix - 0.5f) * 2f * layer.ColorVariation, 0f, 1f);
+        // Low-frequency tonal jitter around the base color; markings add the highlight on top.
+        var mix     = ProceduralFields.Fbm3(layer.Seed + 7777, pos * (k * 0.15f), 2);
+        var albedoT = (mix - 0.5f) * 2f * layer.ColorVariation;
 
         // Threshold is exposed as "Amount" — more slider means more pattern, whatever the style.
         float coverage;
@@ -707,7 +736,7 @@ public static class ProceduralSurfaceBaker
         var height = ProceduralFields.Smooth(0f, bevel, w.EdgeDist);
 
         var cellT   = (w.CellHash & 0xFFFFFF) / 16777215f;
-        var albedoT = Math.Clamp(0.5f + (cellT - 0.5f) * 2f * layer.ColorVariation, 0f, 1f);
+        var albedoT = (cellT - 0.5f) * 2f * layer.ColorVariation;
 
         return (height, albedoT, 1f);
     }
@@ -716,12 +745,11 @@ public static class ProceduralSurfaceBaker
     /// Fur, built the way painted animal fur reads: strands GROUP into clumps (elongated
     /// cellular cells along the flow) separated by dark creases, and each strand is a sharp
     /// ridged-noise line. The coat wears the MAIN color throughout (dark roots, full color
-    /// at the crests); the highlight color enters only through the coat MARKINGS — tabby
-    /// bands wrapping the body, spots, marbled swirls — evaluated in world space so they
-    /// continue seamlessly over every chart and canvas. Flecks add sparse lighter tips.
+    /// at the crests); the highlight color enters only through the markings, added by the
+    /// caller. Flecks add sparse lighter tips.
     /// </summary>
     private static (float Height, float AlbedoT, float Coverage) EvaluateFur(
-        ProceduralSurfaceLayer layer, Vector3 pos, float potential, Vector2 coord, float island, float k)
+        ProceduralSurfaceLayer layer, Vector2 coord, float island, float k)
     {
         var across = coord.X * k;
         var along  = coord.Y * k;
@@ -752,12 +780,9 @@ public static class ProceduralSurfaceBaker
         // rather than cut black holes.
         var height = Math.Clamp((0.3f + 0.7f * separation) * (0.25f + 0.55f * strand + 0.2f * fine), 0f, 1f);
 
-        // The coat wears the main (hair) color; markings paint the highlight color over it.
-        // Per-clump tone jitter feeds the shared variation slider; strands modulate the
-        // marking edge slightly so it grows out of the coat instead of sitting on top.
-        var marking = EvaluateMarkings(layer, pos, potential);
-        var albedoT = Math.Clamp(marking * (0.8f + 0.2f * strand)
-          + (clumpTone - 0.5f) * 2f * layer.ColorVariation * 0.35f, 0f, 1f);
+        // The coat wears the main (hair) color; markings (added by the caller) paint the
+        // highlight over it. Per-clump tone jitter feeds the shared variation slider.
+        var albedoT = (clumpTone - 0.5f) * 2f * layer.ColorVariation * 0.35f;
 
         // Sparse brighter flecks, elongated along the flow — stray hairs catching the light.
         if (layer.SpeckDensity > 0f)
@@ -765,8 +790,8 @@ public static class ProceduralSurfaceBaker
             var speck = ProceduralFields.Worley(layer.Seed + 4242, new Vector2(a * 2.2f, along * 0.5f));
             var fleck = 1f - ProceduralFields.Smooth(0.04f, 0.16f, speck.F1);
             var gate  = ProceduralFields.Hash01(layer.Seed + 555, (int)speck.CellHash, 0, 0) < layer.SpeckDensity ? 1f : 0f;
-            albedoT = Math.Clamp(albedoT + fleck * gate * 0.5f, 0f, 1f);
-            height  = Math.Clamp(height + fleck * gate * 0.15f, 0f, 1f);
+            albedoT += fleck * gate * 0.5f;
+            height   = Math.Clamp(height + fleck * gate * 0.15f, 0f, 1f);
         }
 
         // A hint of skin in the deepest clump separations — the coat itself stays opaque
