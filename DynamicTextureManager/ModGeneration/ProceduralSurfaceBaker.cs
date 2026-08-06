@@ -476,11 +476,12 @@ public static class ProceduralSurfaceBaker
     }
 
     /// <summary>
-    /// Fur: elongated noise ridges along the flow — the across-flow coordinate runs at
-    /// strand-aspect frequency (curl-warped so strands wave instead of running straight),
-    /// the along-flow coordinate stays low frequency, and the normal-offset axis decorrelates
-    /// closely layered surfaces. Sparse cellular specks break the strands up into visible
-    /// roots and tips. Color runs base-to-tip between the two layer colors.
+    /// Fur, built the way painted animal fur reads: strands GROUP into clumps (elongated
+    /// cellular cells along the flow) separated by dark creases, and each strand is a sharp
+    /// ridged-noise line — thin bright highlights over a dark base, not soft gradients. A
+    /// slow wave warps everything so clumps swing instead of running straight. Color maps
+    /// height base-to-tip with a sharpened tip so only the strand crests catch the light
+    /// color; flecks add sparse extra-bright tips.
     /// </summary>
     private static (float Height, float AlbedoT, float Coverage) EvaluateFur(
         ProceduralSurfaceLayer layer, SurfaceFields surface, int index, float k)
@@ -494,22 +495,46 @@ public static class ProceduralSurfaceBaker
         var along  = Vector3.Dot(pos, f) * k;
         var depth  = Vector3.Dot(pos, n) * k;
 
-        var curl = layer.Curl * 8f * (ProceduralFields.Fbm3(layer.Seed + 909, pos * k, 3) - 0.5f);
-        var a    = across * MathF.Max(1f, layer.StrandAspect) + curl;
+        // Slow wave: clumps and strands swing together along their length.
+        var wave = layer.Curl * 3f
+          * (ProceduralFields.Fbm3(layer.Seed + 909, new Vector3(across * 0.35f, along * 0.12f, depth * 0.35f), 2) - 0.5f);
+        var a = across + wave;
 
-        var height = ProceduralFields.Fbm3(layer.Seed, new Vector3(a, along * 0.25f, depth), 4);
+        // Clump layer: cells stretched hard along the flow, their lattice broken up by an
+        // independent low-frequency warp (unwarped cells read as a diamond grid); the border
+        // distance carves the darker separation between neighboring clumps.
+        var warpX = (ProceduralFields.Fbm3(layer.Seed + 71, new Vector3(across * 0.5f, along * 0.2f, depth), 2) - 0.5f) * 1.2f;
+        var warpY = (ProceduralFields.Fbm3(layer.Seed + 72, new Vector3(across * 0.5f, along * 0.2f, depth), 2) - 0.5f) * 0.6f;
+        var clump      = ProceduralFields.Worley(layer.Seed + 1717, new Vector2(a * 1.4f + warpX, along * 0.22f + warpY));
+        var separation = ProceduralFields.Smooth(0f, 0.5f, clump.EdgeDist);
+        var clumpTone  = (clump.CellHash & 0xFFFFFF) / 16777215f;
 
-        // Sparse speck field: cell centers become dark roots/flecks, density-gated.
+        // Strand layer: sharp ridged lines at strand-aspect frequency, very elongated, the
+        // normal-offset axis decorrelating layered surfaces.
+        var aspect = MathF.Max(1f, layer.StrandAspect);
+        var strand = ProceduralFields.Ridged3(layer.Seed,
+            new Vector3(a * aspect, along * aspect * 0.06f, depth * 0.5f), 2);
+        var fine = ProceduralFields.Ridged3(layer.Seed + 31,
+            new Vector3(a * aspect * 2.3f, along * aspect * 0.16f, depth * 0.5f), 2);
+
+        // Strands carry the height, clump separation recesses it — floored so creases dim
+        // rather than cut black holes.
+        var height = Math.Clamp((0.3f + 0.7f * separation) * (0.25f + 0.55f * strand + 0.2f * fine), 0f, 1f);
+
+        // Only strand crests take the tip color: sharpen so thin bright lines emerge from
+        // the dark base, per-clump tone jitter feeding the shared variation slider.
+        var tip     = strand * strand * (0.6f + 0.4f * fine) * (0.25f + 0.75f * separation);
+        var albedoT = Math.Clamp(tip + (clumpTone - 0.5f) * 2f * layer.ColorVariation * 0.35f, 0f, 1f);
+
+        // Sparse brighter flecks, elongated along the flow — stray hairs catching the light.
         if (layer.SpeckDensity > 0f)
         {
-            var speck = ProceduralFields.Worley(layer.Seed + 4242, new Vector2(a * 0.5f, along * 2f));
-            var spot  = 1f - ProceduralFields.Smooth(0.05f, 0.25f, speck.F1);
-            height = Math.Clamp(height - spot * layer.SpeckDensity * 0.5f, 0f, 1f);
+            var speck = ProceduralFields.Worley(layer.Seed + 4242, new Vector2(a * 2.2f, along * 0.5f));
+            var fleck = 1f - ProceduralFields.Smooth(0.04f, 0.16f, speck.F1);
+            var gate  = ProceduralFields.Hash01(layer.Seed + 555, (int)speck.CellHash, 0, 0) < layer.SpeckDensity ? 1f : 0f;
+            albedoT = Math.Clamp(albedoT + fleck * gate * 0.5f, 0f, 1f);
+            height  = Math.Clamp(height + fleck * gate * 0.15f, 0f, 1f);
         }
-
-        // Base-to-tip gradient plus the shared low-frequency variation.
-        var mix     = ProceduralFields.Fbm3(layer.Seed + 7777, pos * (k * 0.15f), 2);
-        var albedoT = Math.Clamp(height + (mix - 0.5f) * 2f * layer.ColorVariation * 0.5f, 0f, 1f);
 
         return (height, albedoT, 1f);
     }
