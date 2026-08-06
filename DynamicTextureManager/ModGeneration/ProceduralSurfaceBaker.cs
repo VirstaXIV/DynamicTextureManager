@@ -575,6 +575,13 @@ public static class ProceduralSurfaceBaker
                     FurMarkingStyle.Painted => surface.MarkingPaint?[index] ?? 0f,
                     _                       => EvaluateMarkings(layer, surface.Position[index], surface.FlowPotential[index]),
                 };
+
+                // Marking edges mix WITH the coat: the pattern's own height field (strand
+                // crests, plate tops) dithers the boundary, so the colors hand over strand
+                // by strand along the flow instead of drawing a smooth line.
+                if (marking is > 0.001f and < 0.999f)
+                    marking = ProceduralFields.Smooth(0.35f, 0.65f, marking + (heightV - 0.5f) * 0.6f);
+
                 var albedoT = Math.Clamp(marking + jitter, 0f, 1f);
 
                 // Region weights and exclusion fades THIN the pattern instead of ghosting

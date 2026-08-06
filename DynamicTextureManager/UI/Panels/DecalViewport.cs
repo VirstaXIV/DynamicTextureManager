@@ -534,7 +534,7 @@ public sealed class DecalViewport(ITextureProvider textureProvider) : IDisposabl
             (_, true)                      => "regrow the pattern",
         };
         return _paintLine
-            ? $"Click points: {verb} along a stripe · RMB orbit · Wheel zoom"
+            ? $"Click points: {verb} along a stripe · Shift+click ends the line · RMB orbit · Wheel zoom"
             : $"LMB drag: {verb} · RMB orbit · Wheel zoom";
     }
 
@@ -745,7 +745,7 @@ public sealed class DecalViewport(ITextureProvider textureProvider) : IDisposabl
         }
 
         if (Tool(Dalamud.Interface.FontAwesomeIcon.Route, _paintLine,
-                "Line: click points — the stroke follows the body between them, like a drawing guide."u8) && !_paintLine)
+                "Line: click points — the stroke follows the body between them, like a drawing guide.\nShift+click ends the line so the next click starts a new one."u8) && !_paintLine)
         {
             _paintLine     = true;
             _paintLineLast = null;
@@ -933,7 +933,17 @@ public sealed class DecalViewport(ITextureProvider textureProvider) : IDisposabl
 
         if (_paintLine)
         {
-            if (!onCanvas || !Im.Mouse.IsClicked(MouseButton.Left) || _paintCursor is not { } point)
+            if (!onCanvas || !Im.Mouse.IsClicked(MouseButton.Left))
+                return;
+
+            // Shift+click ends the current line — the next click starts a fresh one.
+            if (Im.Io.KeyShift)
+            {
+                _paintLineLast = null;
+                return;
+            }
+
+            if (_paintCursor is not { } point)
                 return;
 
             var lineStart = dabs.Count;
