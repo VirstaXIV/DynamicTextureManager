@@ -443,29 +443,23 @@ public static class ProceduralSurfaceBaker
     }
 
     /// <summary>
-    /// Per-vertex coverage weights: 1 minus the painted erase mask. The face companion
-    /// canvas is its own mesh and takes the face slider uniformly instead (the brush
-    /// paints the body viewport). Null when nothing reduces coverage.
+    /// Per-vertex coverage weights: 1 minus the painted erase mask — evaluated on EVERY
+    /// canvas, so brushing the head erases there too. The face additionally scales by its
+    /// coverage slider. Null when nothing reduces coverage.
     /// </summary>
     private static float[]? ComputeRegionWeights(MaterialMesh mesh, ProceduralSurfaceLayer layer)
     {
-        if (mesh.GamePath.Contains("/obj/face/", StringComparison.OrdinalIgnoreCase))
-        {
-            if (layer.WeightFace >= 1f)
-                return null;
-
-            var uniform = new float[mesh.VertexCount];
-            Array.Fill(uniform, Math.Clamp(layer.WeightFace, 0f, 1f));
-            return uniform;
-        }
-
         var erase = ComputePaintMask(mesh, layer.MaskDabs);
-        if (erase == null)
+        var faceWeight = mesh.GamePath.Contains("/obj/face/", StringComparison.OrdinalIgnoreCase)
+            ? Math.Clamp(layer.WeightFace, 0f, 1f)
+            : 1f;
+
+        if (erase == null && faceWeight >= 1f)
             return null;
 
-        var result = new float[erase.Length];
-        for (var v = 0; v < erase.Length; ++v)
-            result[v] = 1f - erase[v];
+        var result = new float[mesh.VertexCount];
+        for (var v = 0; v < result.Length; ++v)
+            result[v] = faceWeight * (1f - (erase?[v] ?? 0f));
 
         return result;
     }

@@ -96,9 +96,11 @@ public sealed class DecalViewport(ITextureProvider textureProvider) : IDisposabl
     private bool                    _paintRestore;
     private bool                    _paintLine;
     private Vector3?                _paintLineLast;
+    private MaterialMesh?           _paintLineLastMesh;
     private int                     _paintStrokeStart = -1;
     private Vector3?                _paintLastDab;
     private Vector3?                _paintCursor;
+    private MaterialMesh?           _paintCursorMesh;
 
     // Per-session undo/redo: every completed action (one brush stroke, one line click)
     // records where its dabs start; undo moves them onto the redo stack and back.
@@ -214,11 +216,12 @@ public sealed class DecalViewport(ITextureProvider textureProvider) : IDisposabl
         _layer            = null;
         _flowLayer        = null;
         _flowAnchor       = -1;
-        _paintLayer       = layer;
-        _paintChannel     = channel;
-        _paintStrokeStart = -1;
-        _paintLastDab     = null;
-        _paintLineLast    = null;
+        _paintLayer        = layer;
+        _paintChannel      = channel;
+        _paintStrokeStart  = -1;
+        _paintLastDab      = null;
+        _paintLineLast     = null;
+        _paintLineLastMesh = null;
         _paintActionStarts.Clear();
         _paintRedo.Clear();
         _onChanged        = onChanged;
@@ -925,11 +928,15 @@ public sealed class DecalViewport(ITextureProvider textureProvider) : IDisposabl
         if (_paintLayer == null || PaintDabs is not { } dabs)
             return;
 
-        _paintCursor = null;
+        _paintCursor     = null;
+        _paintCursorMesh = null;
         var local = (Im.Mouse.Position - start) / size;
         var onCanvas = hovered && local is { X: >= 0f and <= 1f, Y: >= 0f and <= 1f };
-        if (onCanvas && TryPick(local, out var position, out _, out _))
-            _paintCursor = position;
+        if (onCanvas && TryPickAny(local, out var position, out _, out var pickedMesh))
+        {
+            _paintCursor     = position;
+            _paintCursorMesh = pickedMesh;
+        }
 
         if (_paintLine)
         {
@@ -947,9 +954,14 @@ public sealed class DecalViewport(ITextureProvider textureProvider) : IDisposabl
                 return;
 
             var lineStart = dabs.Count;
-            if (_paintLineLast is { } previous && _mesh != null)
+            if (_paintLineLast is { } previous)
             {
-                var path = SurfaceFlowField.GeodesicPath(_mesh, previous, point);
+                // Same mesh: the stroke follows the surface. Across meshes (body to head)
+                // no shared surface exists — a straight segment bridges the short gap, and
+                // the spherical dabs still hug both sides.
+                var path = _paintCursorMesh != null && ReferenceEquals(_paintCursorMesh, _paintLineLastMesh)
+                    ? SurfaceFlowField.GeodesicPath(_paintCursorMesh, previous, point)
+                    : StraightPath(previous, point);
                 LayDabsAlong(path, dabs);
             }
             else
@@ -957,7 +969,8 @@ public sealed class DecalViewport(ITextureProvider textureProvider) : IDisposabl
                 AddDab(dabs, point);
             }
 
-            _paintLineLast = point;
+            _paintLineLast     = point;
+            _paintLineLastMesh = _paintCursorMesh;
             CompleteAction(lineStart);
             MarkEdited();
             return;
@@ -1023,9 +1036,13 @@ public sealed class DecalViewport(ITextureProvider textureProvider) : IDisposabl
 
     /// <summary> After undo/redo the line tool continues from wherever the stroke now ends. </summary>
     private void SyncLineToLastDab(List<CoverageDab> dabs)
-        => _paintLineLast = _paintLine && dabs.Count > 0
+    {
+        _paintLineLast = _paintLine && dabs.Count > 0
             ? new Vector3(dabs[^1].X, dabs[^1].Y, dabs[^1].Z)
             : null;
+        // Which mesh that dab sat on is no longer known — the next segment bridges straight.
+        _paintLineLastMesh = null;
+    }
 
     private void AddDab(List<CoverageDab> dabs, Vector3 at)
         => dabs.Add(new CoverageDab
@@ -1037,6 +1054,17 @@ public sealed class DecalViewport(ITextureProvider textureProvider) : IDisposabl
             Strength = _paintStrength,
             Restore  = _paintRestore,
         });
+
+    /// <summary> A straight polyline between two points, subdivided finely enough for dab spacing. </summary>
+    private List<Vector3> StraightPath(Vector3 from, Vector3 to)
+    {
+        var length = (to - from).Length();
+        var steps  = Math.Max(1, (int)MathF.Ceiling(length / MathF.Max(0.002f, _paintRadius * 0.2f)));
+        var path   = new List<Vector3>(steps + 1);
+        for (var i = 0; i <= steps; ++i)
+            path.Add(Vector3.Lerp(from, to, i / (float)steps));
+        return path;
+    }
 
     /// <summary> Dabs along a surface path at brush-radius spacing, endpoint included. </summary>
     private void LayDabsAlong(List<Vector3> path, List<CoverageDab> dabs)
@@ -1176,6 +1204,62 @@ public sealed class DecalViewport(ITextureProvider textureProvider) : IDisposabl
         normal   = _mesh.Normals[i0] * bary.X + _mesh.Normals[i1] * bary.Y + _mesh.Normals[i2] * bary.Z;
         normal   = normal.LengthSquared() < 1e-8f ? Vector3.UnitY : Vector3.Normalize(normal);
         part     = _mesh.TriangleParts[bestTri / 3];
+        return true;
+    }
+
+    /// <summary>
+    /// Paint-mode picking: tests the primary mesh AND the overlay meshes (the face renders
+    /// as an overlay — brushes must land on the head too), returning which mesh was hit so
+    /// the line tool can path along it.
+    /// </summary>
+    private bool TryPickAny(Vector2 canvasUv, out Vector3 position, out Vector3 normal, out MaterialMesh? pickedMesh)
+    {
+        position   = default;
+        normal     = default;
+        pickedMesh = null;
+        if (_mesh == null || !Matrix4x4.Invert(_lastViewProjection, out var inverse))
+            return false;
+
+        var ndc = new Vector2(canvasUv.X * 2f - 1f, 1f - canvasUv.Y * 2f);
+        var np  = Unproject(new Vector3(ndc, 0.05f), inverse);
+        var fp  = Unproject(new Vector3(ndc, 0.95f), inverse);
+        if (np == null || fp == null)
+            return false;
+
+        var origin    = np.Value;
+        var direction = Vector3.Normalize(fp.Value - np.Value);
+        var best      = float.MaxValue;
+
+        void PickMesh(MaterialMesh mesh, ref Vector3 pos, ref Vector3 nrm, ref MaterialMesh? hit, ref float bestT)
+        {
+            for (var i = 0; i + 2 < mesh.Indices.Length; i += 3)
+            {
+                if (!mesh.TriangleEditable[i / 3] || (mesh.TriangleAttributeMasks[i / 3] & ~_visibleAttributes) != 0)
+                    continue;
+
+                if (!RayTriangle(origin, direction,
+                        mesh.Positions[mesh.Indices[i]], mesh.Positions[mesh.Indices[i + 1]], mesh.Positions[mesh.Indices[i + 2]],
+                        out var t, out var b) || t >= bestT)
+                    continue;
+
+                bestT = t;
+                hit   = mesh;
+                var i0 = mesh.Indices[i];
+                var i1 = mesh.Indices[i + 1];
+                var i2 = mesh.Indices[i + 2];
+                pos = mesh.Positions[i0] * b.X + mesh.Positions[i1] * b.Y + mesh.Positions[i2] * b.Z;
+                nrm = mesh.Normals[i0] * b.X + mesh.Normals[i1] * b.Y + mesh.Normals[i2] * b.Z;
+            }
+        }
+
+        PickMesh(_mesh, ref position, ref normal, ref pickedMesh, ref best);
+        foreach (var overlay in _overlays)
+            PickMesh(overlay.Mesh, ref position, ref normal, ref pickedMesh, ref best);
+
+        if (pickedMesh == null)
+            return false;
+
+        normal = normal.LengthSquared() < 1e-8f ? Vector3.UnitY : Vector3.Normalize(normal);
         return true;
     }
 
