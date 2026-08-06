@@ -200,7 +200,11 @@ public static class ProceduralSurfaceBaker
         // transitions at all, their only seams the texture's own island borders.
         var worldOnly = MeshExtent(mesh) < 0.35f;
         var charts    = layer.Kind == SurfaceGeneratorKind.Fur && !worldOnly ? SurfaceFlowField.ComputeCharts(mesh, flow, []) : null;
-        var islands   = layer.Kind == SurfaceGeneratorKind.Scales && !worldOnly ? ComputeIslandFrames(mesh, natural, width, height) : null;
+        // Island frames apply on EVERY canvas (face included): the world-cylinder frame
+        // distorts cells on near-horizontal surfaces (collarbone, under the chin), so
+        // plates never fall back to it — where two canvases' plate fields meet at the
+        // neck, small discrete plates changing lattice reads naturally on its own.
+        var islands   = layer.Kind == SurfaceGeneratorKind.Scales ? ComputeIslandFrames(mesh, natural, width, height) : null;
         var boundary  = worldOnly ? null : SurfaceFlowField.BoundaryDistance(mesh);
         var painted   = layer.Markings == FurMarkingStyle.Painted ? ComputePaintMask(mesh, layer.MarkingDabs) : null;
         var fields = new SurfaceFields
@@ -362,12 +366,10 @@ public static class ProceduralSurfaceBaker
                     if (islands != null)
                     {
                         var frame = islands[triangle];
-                        if (frame.MetersPerTexel > 0f)
-                        {
-                            fields.FlowCoordA[index] = new Vector2(Vector2.Dot(p, frame.Across), Vector2.Dot(p, frame.Along))
-                              * frame.MetersPerTexel;
-                            fields.OffsetA[index] = frame.Offset;
-                        }
+                        fields.FlowCoordA[index] = frame.MetersPerTexel > 0f
+                            ? new Vector2(Vector2.Dot(p, frame.Across), Vector2.Dot(p, frame.Along)) * frame.MetersPerTexel
+                            : WorldFrame(fields.Position[index]);
+                        fields.OffsetA[index] = frame.MetersPerTexel > 0f ? frame.Offset : 0f;
                     }
 
                     if (charts != null)
@@ -665,22 +667,10 @@ public static class ProceduralSurfaceBaker
                 (float Height, float AlbedoT, float Coverage) sample;
                 if (layer.Kind == SurfaceGeneratorKind.Scales)
                 {
-                    // Scales never cross-fade (blending two cell patterns ghosts the
-                    // plates): each UV island has ONE rigid frame, so cells are uniform
-                    // with no interior transitions; near canvas seams the shared world
-                    // frame wins instead, the switch sinking into a crevice that reads as
-                    // just another groove between plates.
-                    var seam    = surface.SeamBlend[index];
-                    var crevice = seam is > 0.004f and < 0.996f
-                        ? 1f - ProceduralFields.Smooth(0.04f, 0.14f, MathF.Abs(seam - 0.5f))
-                        : 0f;
-
-                    var (coord, offset) = seam <= 0.5f
-                        ? (WorldFrame(surface.Position[index]), 0f)
-                        : (surface.FlowCoordA[index], surface.OffsetA[index]);
-
-                    sample = EvaluateScales(layer, coord, offset, k);
-                    sample.Height *= 1f - crevice;
+                    // Scales never cross-fade or switch frames (blending ghosts the plates,
+                    // switching stripes them): each UV island carries ONE rigid frame, so
+                    // cells stay uniform everywhere.
+                    sample = EvaluateScales(layer, surface.FlowCoordA[index], surface.OffsetA[index], k);
                 }
                 else if (layer.Kind == SurfaceGeneratorKind.Fur)
                 {
