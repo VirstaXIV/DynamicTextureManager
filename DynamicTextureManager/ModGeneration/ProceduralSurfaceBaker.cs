@@ -41,28 +41,35 @@ public static class ProceduralSurfaceBaker
             case null:
                 ComposeDiffuse(target, generated, layer);
                 break;
-            default:
-                // Relief (normal) and finish (mask) outputs arrive in a later stage.
+            case TextureSlot.Normal when layer.WantsNormalEffect:
+                ComposeNormal(target, generated, layer);
+                break;
+            case TextureSlot.Mask when layer.WantsMaskEffect || FinishMapping.ProceduralMaskWriteCavity:
+                ComposeMask(target, generated, layer);
                 break;
         }
     }
 
     // ------------------------------------------------------------------ generation cache
 
-    /// <summary> The generator's output planes at one resolution. Row-major, parallel arrays. </summary>
+    /// <summary>
+    /// The generator's output planes at one resolution. Row-major parallel arrays, kept
+    /// compact on purpose — a 4K body texture is 16.7M texels and these live in the cache:
+    /// coverage (pattern presence × exclusion weight) quantized to a byte, height to 16 bits,
+    /// color packed. A zero coverage byte doubles as "texel not covered".
+    /// </summary>
     private sealed class GeneratedFields
     {
-        public required bool[]    Covered;
-        public required float[]   Coverage;   // pattern presence 0..1 (already includes region weight)
-        public required float[]   Height;     // relief field 0..1
-        public required Vector3[] Albedo;     // linear-ish display RGB 0..1
-        public required float[]   TexelsPerMeter;
+        public required byte[]   Coverage;
+        public required ushort[] Height;
+        public required uint[]   Albedo;
+        public required float[]  TexelsPerMeter;
     }
 
     // One generation is a pure function of (layer content, skin tone, mesh, W, H). Keyed per
-    // mesh so entries die with the mesh; the small LRU absorbs diffuse + normal + mask
-    // resolutions of the same material without thrashing during slider edits.
-    private const int CachePerMesh = 4;
+    // mesh so entries die with the mesh; two entries absorb the common diffuse resolution
+    // plus a differently-sized normal/mask sibling without thrashing during slider edits.
+    private const int CachePerMesh = 2;
 
     private static readonly System.Runtime.CompilerServices.ConditionalWeakTable<MaterialMesh,
         Dictionary<string, (GeneratedFields Fields, long Seq)>> Cache = new();
@@ -277,10 +284,9 @@ public static class ProceduralSurfaceBaker
         var texels = width * height;
         var result = new GeneratedFields
         {
-            Covered        = surface.Covered,
-            Coverage       = new float[texels],
-            Height         = new float[texels],
-            Albedo         = new Vector3[texels],
+            Coverage       = new byte[texels],
+            Height         = new ushort[texels],
+            Albedo         = new uint[texels],
             TexelsPerMeter = surface.TexelsPerMeter,
         };
 
@@ -314,9 +320,10 @@ public static class ProceduralSurfaceBaker
 
                 heightV = ApplyContrast(heightV, layer.Contrast);
 
-                result.Coverage[index] = coverage * surface.Weight[index];
-                result.Height[index]   = heightV;
-                result.Albedo[index]   = Vector3.Lerp(colorA, colorB, albedoT);
+                result.Coverage[index] = (byte)Math.Clamp((int)MathF.Round(coverage * surface.Weight[index] * 255f), 0, 255);
+                result.Height[index]   = (ushort)Math.Clamp((int)MathF.Round(heightV * 65535f), 0, 65535);
+                var albedo = Vector3.Lerp(colorA, colorB, albedoT);
+                result.Albedo[index] = (uint)(ToByte(albedo.X) | (ToByte(albedo.Y) << 8) | (ToByte(albedo.Z) << 16));
             }
         });
 
@@ -398,19 +405,138 @@ public static class ProceduralSurfaceBaker
                 for (var x = 0; x < row.Length; ++x)
                 {
                     var index = y * accessor.Width + x;
-                    if (!generated.Covered[index])
-                        continue;
-
-                    var alpha = generated.Coverage[index] * opacity;
+                    var alpha = generated.Coverage[index] / 255f * opacity;
                     if (alpha <= 0f)
                         continue;
 
-                    var albedo = generated.Albedo[index] * (1f - cavity * (1f - generated.Height[index]));
+                    var packed = generated.Albedo[index];
+                    var shade  = 1f - cavity * (1f - generated.Height[index] / 65535f);
 
                     ref var pixel = ref row[x];
-                    pixel.R = LerpByte(pixel.R, ToByte(albedo.X), alpha);
-                    pixel.G = LerpByte(pixel.G, ToByte(albedo.Y), alpha);
-                    pixel.B = LerpByte(pixel.B, ToByte(albedo.Z), alpha);
+                    pixel.R = LerpByte(pixel.R, (byte)Math.Clamp((int)MathF.Round((packed & 0xFF) * shade), 0, 255), alpha);
+                    pixel.G = LerpByte(pixel.G, (byte)Math.Clamp((int)MathF.Round(((packed >> 8) & 0xFF) * shade), 0, 255), alpha);
+                    pixel.B = LerpByte(pixel.B, (byte)Math.Clamp((int)MathF.Round(((packed >> 16) & 0xFF) * shade), 0, 255), alpha);
+                }
+            }
+        });
+    }
+
+    /// <summary>
+    /// Bake the height field into the tangent-space normal map: central differences in texel
+    /// space scaled to world units through the texel density, whiteout-blended over the
+    /// existing normal detail (RG only, 128/128 neutral — B and A carry other channels in the
+    /// character shader family and must survive). The relief amplitude scales with the feature
+    /// size so bigger scales get proportionally deeper grooves. Green orientation is
+    /// empirically unverified — <see cref="FinishMapping.ProceduralNormalFlipG"/> flips it
+    /// without a rebuild of the plugin.
+    /// </summary>
+    private static void ComposeNormal(Image<Rgba32> target, GeneratedFields generated, ProceduralSurfaceLayer layer)
+    {
+        // Relief amplitude in meters at full strength: a fraction of the feature size, so
+        // 2 cm scales read ~3 mm deep while fine fur stays subtle.
+        var amplitude = Math.Clamp(layer.HeightStrength, 0f, 1f) * (layer.FeatureSizeCm / 100f) * 0.15f;
+        if (amplitude <= 0f)
+            return;
+
+        var flipG = FinishMapping.ProceduralNormalFlipG ? -1f : 1f;
+
+        target.ProcessPixelRows(accessor =>
+        {
+            var width  = accessor.Width;
+            var height = accessor.Height;
+            for (var y = 0; y < height; ++y)
+            {
+                var row = accessor.GetRowSpan(y);
+                for (var x = 0; x < width; ++x)
+                {
+                    var index = y * width + x;
+                    var cov   = generated.Coverage[index] / 255f;
+                    if (cov <= 0f)
+                        continue;
+
+                    var texelsPerMeter = generated.TexelsPerMeter[index];
+                    if (texelsPerMeter <= 0f)
+                        continue;
+
+                    var h = generated.Height[index] / 65535f;
+
+                    // Neighbors from other UV islands would fake a cliff here; a covered
+                    // neighbor with a wild height jump is treated as flat instead.
+                    float Sample(int nx, int ny)
+                    {
+                        if (nx < 0 || nx >= width || ny < 0 || ny >= height)
+                            return h;
+
+                        var n = ny * width + nx;
+                        if (generated.Coverage[n] == 0)
+                            return h;
+
+                        var hn = generated.Height[n] / 65535f;
+                        return MathF.Abs(hn - h) > 0.5f ? h : hn;
+                    }
+
+                    var texelSize = 1f / texelsPerMeter;
+                    var dx = (Sample(x + 1, y) - Sample(x - 1, y)) * amplitude / (2f * texelSize);
+                    var dy = (Sample(x, y + 1) - Sample(x, y - 1)) * amplitude / (2f * texelSize);
+
+                    var detail = Vector3.Normalize(new Vector3(-dx, -dy * flipG, 1f));
+
+                    ref var pixel = ref row[x];
+                    var bx = pixel.R / 255f * 2f - 1f;
+                    var by = pixel.G / 255f * 2f - 1f;
+                    var bz = MathF.Sqrt(MathF.Max(0f, 1f - bx * bx - by * by));
+
+                    // Whiteout blend keeps both the base detail and the generated relief.
+                    var combined = Vector3.Normalize(new Vector3(bx + detail.X, by + detail.Y, MathF.Max(1e-4f, bz * detail.Z)));
+
+                    pixel.R = LerpByte(pixel.R, (byte)Math.Clamp((int)MathF.Round((combined.X * 0.5f + 0.5f) * 255f), 0, 255), cov);
+                    pixel.G = LerpByte(pixel.G, (byte)Math.Clamp((int)MathF.Round((combined.Y * 0.5f + 0.5f) * 255f), 0, 255), cov);
+                }
+            }
+        });
+    }
+
+    /// <summary>
+    /// Push the layer's roughness shift into the mask map's roughness channel (semantics via
+    /// <see cref="FinishMapping"/>), and optionally darken cavity/spec occlusion in crevices
+    /// behind the runtime toggle — skin mask channels are empirical, one in-game session
+    /// dials them in.
+    /// </summary>
+    private static void ComposeMask(Image<Rgba32> target, GeneratedFields generated, ProceduralSurfaceLayer layer)
+    {
+        var roughDelta = Math.Clamp(layer.RoughnessAmount, -1f, 1f) * (FinishMapping.MaskInvertRoughness ? -1f : 1f);
+        var channel    = FinishMapping.MaskRoughnessChannel;
+        var cavity     = FinishMapping.ProceduralMaskWriteCavity ? Math.Clamp(layer.CavityAmount, 0f, 1f) : 0f;
+
+        target.ProcessPixelRows(accessor =>
+        {
+            for (var y = 0; y < accessor.Height; ++y)
+            {
+                var row = accessor.GetRowSpan(y);
+                for (var x = 0; x < row.Length; ++x)
+                {
+                    var index = y * accessor.Width + x;
+                    var cov   = generated.Coverage[index] / 255f;
+                    if (cov <= 0f)
+                        continue;
+
+                    ref var pixel = ref row[x];
+                    if (roughDelta != 0f)
+                    {
+                        var delta = (int)MathF.Round(roughDelta * 255f * cov);
+                        switch (channel)
+                        {
+                            case 0:  pixel.R = (byte)Math.Clamp(pixel.R + delta, 0, 255); break;
+                            case 2:  pixel.B = (byte)Math.Clamp(pixel.B + delta, 0, 255); break;
+                            default: pixel.G = (byte)Math.Clamp(pixel.G + delta, 0, 255); break;
+                        }
+                    }
+
+                    if (cavity > 0f)
+                    {
+                        var crevice = 1f - generated.Height[index] / 65535f;
+                        pixel.R = (byte)Math.Clamp((int)MathF.Round(pixel.R * (1f - cavity * crevice * cov)), 0, 255);
+                    }
                 }
             }
         });

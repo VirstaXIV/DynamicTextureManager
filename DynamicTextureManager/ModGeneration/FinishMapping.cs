@@ -29,12 +29,20 @@ public static class FinishMapping
     /// <summary> Also scale the mask R channel by the spec multiplier — off until verified useful. </summary>
     public static bool MaskWriteSpec;
 
+    /// <summary> Flip the procedural relief's green channel if it renders inverted in-game. </summary>
+    public static bool ProceduralNormalFlipG;
+
+    /// <summary> Also darken the mask's R (cavity/spec occlusion) in procedural crevices — off until verified. </summary>
+    public static bool ProceduralMaskWriteCavity;
+
     /// <summary> Pull the tunables from the persisted configuration (startup and config-window edits). </summary>
     public static void Sync(Configuration config)
     {
-        MaskRoughnessChannel = Math.Clamp(config.MaskRoughnessChannel, 0, 2);
-        MaskInvertRoughness  = config.MaskInvertRoughness;
-        MaskWriteSpec        = config.MaskWriteSpec;
+        MaskRoughnessChannel      = Math.Clamp(config.MaskRoughnessChannel, 0, 2);
+        MaskInvertRoughness       = config.MaskInvertRoughness;
+        MaskWriteSpec             = config.MaskWriteSpec;
+        ProceduralNormalFlipG     = config.ProceduralNormalFlipG;
+        ProceduralMaskWriteCavity = config.ProceduralMaskWriteCavity;
     }
 
     /// <summary> Continuous values behind the Matte/Glossy presets. </summary>

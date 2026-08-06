@@ -167,7 +167,8 @@ public sealed class ProceduralSurfaceLayer : TextureLayer
         => HeightStrength > 0f;
 
     public override bool WantsMaskEffect
-        => RoughnessAmount != 0f;
+        => RoughnessAmount != 0f
+         || (CavityAmount > 0f && ModGeneration.FinishMapping.ProceduralMaskWriteCavity);
 
     public float UnitWeight(int unit)
         => unit switch
