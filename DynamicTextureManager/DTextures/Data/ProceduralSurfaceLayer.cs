@@ -33,6 +33,7 @@ public enum FurMarkingStyle
     Spots    = 2,
     Marbling = 3,
     Painted  = 4,
+    Custom   = 5,
 }
 
 /// <summary>
@@ -233,6 +234,9 @@ public sealed class ProceduralSurfaceLayer : TextureLayer
     /// <summary> How much of the coat the markings cover. </summary>
     public float MarkingAmount = 0.5f;
 
+    /// <summary> The library pattern sampled as the markings mask when <see cref="Markings"/> is Custom. </summary>
+    public Guid MarkingPatternId;
+
     /// <summary> Per-body-part weights, indexed by MaterialMesh.TriangleUnit (top, legs, hands, feet). </summary>
     public float WeightChest = 1f, WeightLegs = 1f, WeightHands = 1f, WeightFeet = 1f;
 
@@ -316,6 +320,7 @@ public sealed class ProceduralSurfaceLayer : TextureLayer
         json["Markings"]        = (int)Markings;
         json["MarkingScaleCm"]  = MarkingScaleCm;
         json["MarkingAmount"]   = MarkingAmount;
+        json["MarkingPatternId"] = MarkingPatternId;
         json["WeightChest"]     = WeightChest;
         json["WeightLegs"]      = WeightLegs;
         json["WeightHands"]     = WeightHands;
@@ -358,6 +363,7 @@ public sealed class ProceduralSurfaceLayer : TextureLayer
             Markings        = (FurMarkingStyle)(json["Markings"]?.ToObject<int>() ?? 0),
             MarkingScaleCm  = json["MarkingScaleCm"]?.ToObject<float>() ?? 7f,
             MarkingAmount   = json["MarkingAmount"]?.ToObject<float>() ?? 0.5f,
+            MarkingPatternId = json["MarkingPatternId"]?.ToObject<Guid>() ?? Guid.Empty,
             WeightChest     = json["WeightChest"]?.ToObject<float>() ?? 1f,
             WeightLegs      = json["WeightLegs"]?.ToObject<float>() ?? 1f,
             WeightHands     = json["WeightHands"]?.ToObject<float>() ?? 1f,
