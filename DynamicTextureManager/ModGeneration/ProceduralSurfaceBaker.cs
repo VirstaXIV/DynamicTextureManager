@@ -197,9 +197,11 @@ public static class ProceduralSurfaceBaker
         for (var i = 0; i + 2 < indices.Length; i += 3)
         {
             var triangle = i / 3;
+            // Every editable triangle bakes, hidden variants included — full-coverage
+            // patterns must exist wherever the surface can appear, and an attribute mask
+            // captured on ONE canvas (the body) means something entirely different on a
+            // companion canvas (the face) — gating on it once wiped the face bake.
             if (!mesh.TriangleEditable[triangle])
-                continue;
-            if ((mesh.TriangleAttributeMasks[triangle] & ~layer.SurfaceAttributes) != 0)
                 continue;
 
             var i0 = indices[i];
@@ -442,7 +444,7 @@ public static class ProceduralSurfaceBaker
                 (float, float, float) Directional(Vector2 coord, float offset)
                     => layer.Kind == SurfaceGeneratorKind.Scales
                         ? EvaluateScales(layer, coord, offset, k)
-                        : EvaluateFur(layer, surface.Position[index], coord, offset, k);
+                        : EvaluateFur(layer, surface.Position[index], surface.FlowPotential[index], coord, offset, k);
 
                 (float Height, float AlbedoT, float Coverage) sample;
                 if (layer.Kind is SurfaceGeneratorKind.Fur or SurfaceGeneratorKind.Scales)
@@ -633,13 +635,13 @@ public static class ProceduralSurfaceBaker
     /// <summary>
     /// Fur, built the way painted animal fur reads: strands GROUP into clumps (elongated
     /// cellular cells along the flow) separated by dark creases, and each strand is a sharp
-    /// ridged-noise line — thin bright highlights over a dark base, not soft gradients. A
-    /// slow wave warps everything so clumps swing instead of running straight. Color maps
-    /// height base-to-tip with a sharpened tip so only the strand crests catch the light
-    /// color; flecks add sparse extra-bright tips.
+    /// ridged-noise line. The coat wears the MAIN color throughout (dark roots, full color
+    /// at the crests); the highlight color enters only through the coat MARKINGS — tabby
+    /// bands wrapping the body, spots, marbled swirls — evaluated in world space so they
+    /// continue seamlessly over every chart and canvas. Flecks add sparse lighter tips.
     /// </summary>
     private static (float Height, float AlbedoT, float Coverage) EvaluateFur(
-        ProceduralSurfaceLayer layer, Vector3 pos, Vector2 coord, float island, float k)
+        ProceduralSurfaceLayer layer, Vector3 pos, float potential, Vector2 coord, float island, float k)
     {
         var across = coord.X * k;
         var along  = coord.Y * k;
@@ -670,11 +672,12 @@ public static class ProceduralSurfaceBaker
         // rather than cut black holes.
         var height = Math.Clamp((0.3f + 0.7f * separation) * (0.25f + 0.55f * strand + 0.2f * fine), 0f, 1f);
 
-        // The coat stays the base (hair main) color; only true strand crests cross into the
-        // highlight color, thresholded like a hair sheen band. Per-clump tone jitter feeds
-        // the shared variation slider.
-        var tip     = ProceduralFields.Smooth(0.45f, 0.85f, strand) * (0.5f + 0.5f * fine) * (0.25f + 0.75f * separation);
-        var albedoT = Math.Clamp(tip + (clumpTone - 0.5f) * 2f * layer.ColorVariation * 0.35f, 0f, 1f);
+        // The coat wears the main (hair) color; markings paint the highlight color over it.
+        // Per-clump tone jitter feeds the shared variation slider; strands modulate the
+        // marking edge slightly so it grows out of the coat instead of sitting on top.
+        var marking = EvaluateMarkings(layer, pos, potential);
+        var albedoT = Math.Clamp(marking * (0.8f + 0.2f * strand)
+          + (clumpTone - 0.5f) * 2f * layer.ColorVariation * 0.35f, 0f, 1f);
 
         // Sparse brighter flecks, elongated along the flow — stray hairs catching the light.
         if (layer.SpeckDensity > 0f)
@@ -692,6 +695,42 @@ public static class ProceduralSurfaceBaker
         var coverage = 1f - gap * gap * gap * 0.5f;
 
         return (height, albedoT, coverage);
+    }
+
+    /// <summary>
+    /// Coat markings, 0 = main coat, 1 = highlight color: world-space fields at their own
+    /// scale, so they read as the animal's pattern over the strand texture. Stripes band
+    /// the flow potential — tabby rings wrapping the limbs and body.
+    /// </summary>
+    private static float EvaluateMarkings(ProceduralSurfaceLayer layer, Vector3 pos, float potential)
+    {
+        if (layer.Markings == FurMarkingStyle.None || layer.MarkingAmount <= 0f)
+            return 0f;
+
+        var km  = 1f / Math.Max(0.005f, layer.MarkingScaleCm / 100f);
+        var cut = 1f - Math.Clamp(layer.MarkingAmount, 0f, 1f);
+        switch (layer.Markings)
+        {
+            case FurMarkingStyle.Stripes:
+            {
+                var jitter = (ProceduralFields.Fbm3(layer.Seed + 811, pos * km, 3) - 0.5f) * 3f;
+                var band   = (MathF.Sin(potential * km * MathF.PI + jitter) + 1f) * 0.5f;
+                return ProceduralFields.Smooth(cut - 0.15f, cut + 0.15f, band);
+            }
+            case FurMarkingStyle.Spots:
+            {
+                var q = ProceduralFields.DomainWarp3(layer.Seed + 821, pos * (km * 0.5f), 0.35f);
+                var v = ProceduralFields.Fbm3(layer.Seed + 822, q * 2f, 4);
+                return ProceduralFields.Smooth(cut - 0.08f, cut + 0.08f, v);
+            }
+            default: // Marbling
+            {
+                var q     = ProceduralFields.DomainWarp3(layer.Seed + 831, pos * km, 0.6f);
+                var v     = ProceduralFields.Fbm3(layer.Seed + 832, q, 5);
+                var veinW = 0.03f + Math.Clamp(layer.MarkingAmount, 0f, 1f) * 0.2f;
+                return 1f - ProceduralFields.Smooth(veinW * 0.3f, veinW, MathF.Abs(v - 0.5f));
+            }
+        }
     }
 
     private static float ApplyContrast(float v, float contrast)

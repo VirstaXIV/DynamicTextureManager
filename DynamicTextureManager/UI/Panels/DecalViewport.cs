@@ -874,7 +874,10 @@ public sealed class DecalViewport(ITextureProvider textureProvider) : IDisposabl
         var anchor = _flowLayer.Anchors[_flowAnchor];
         if (_flowDragOrigin == null)
         {
-            // Press: the anchor lands here; its direction keeps its previous value until a drag.
+            // Press: the anchor lands here; its direction keeps its previous value until a
+            // drag. Deliberately does NOT capture the visible-attribute mask — the layer
+            // bakes companion canvases (the face) whose attribute bits mean different
+            // things, and a body mask silently wiped their entire bake once.
             _flowDragOrigin = position;
             anchor.PosX     = position.X;
             anchor.PosY     = position.Y;
@@ -882,7 +885,6 @@ public sealed class DecalViewport(ITextureProvider textureProvider) : IDisposabl
             anchor.NormalX  = normal.X;
             anchor.NormalY  = normal.Y;
             anchor.NormalZ  = normal.Z;
-            _flowLayer.SurfaceAttributes = _visibleAttributes;
             MarkEdited();
             return;
         }

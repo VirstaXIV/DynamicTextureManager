@@ -74,6 +74,16 @@ public sealed class ProceduralSurfaceSection
             Im.Tooltip.OnHover("How much of the skin the pattern covers."u8);
         }
 
+        if (layer.Kind == SurfaceGeneratorKind.Fur)
+        {
+            changed |= DrawMarkings(layer);
+            if (layer.Markings != FurMarkingStyle.None)
+            {
+                changed |= DrawSliderClamped("Marking Size (cm)"u8, ref layer.MarkingScaleCm, 2f, 20f, "%.1f"u8);
+                changed |= DrawSliderClamped("Marking Amount"u8, ref layer.MarkingAmount, 0f, 1f);
+            }
+        }
+
         if (Im.Tree.Header("Fine-Tuning"u8))
         {
             using var indent = Im.Indent();
@@ -123,6 +133,40 @@ public sealed class ProceduralSurfaceSection
             }
         }
 
+        return changed;
+    }
+
+    private static readonly FurMarkingStyle[] MarkingStyles =
+        [FurMarkingStyle.None, FurMarkingStyle.Stripes, FurMarkingStyle.Spots, FurMarkingStyle.Marbling];
+
+    private static string MarkingLabel(FurMarkingStyle style)
+        => style switch
+        {
+            FurMarkingStyle.Stripes  => "Stripes (Tabby)",
+            FurMarkingStyle.Spots    => "Spots",
+            FurMarkingStyle.Marbling => "Marbling",
+            _                        => "None",
+        };
+
+    private static bool DrawMarkings(ProceduralSurfaceLayer layer)
+    {
+        var changed = false;
+
+        Im.Item.SetNextWidthScaled(220);
+        using (var combo = Im.Combo.Begin("Markings"u8, MarkingLabel(layer.Markings)))
+        {
+            if (combo)
+                foreach (var style in MarkingStyles)
+                {
+                    if (!Im.Selectable(MarkingLabel(style), style == layer.Markings) || style == layer.Markings)
+                        continue;
+
+                    layer.Markings = style;
+                    changed        = true;
+                }
+        }
+
+        Im.Tooltip.OnHover("Coat markings in the highlight color — stripes wrap the body and limbs like a tabby."u8);
         return changed;
     }
 

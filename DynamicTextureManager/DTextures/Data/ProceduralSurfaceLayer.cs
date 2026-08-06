@@ -22,6 +22,18 @@ public enum SurfacePatternStyle
 }
 
 /// <summary>
+/// Coat markings on fur: where the highlight color interacts with the main coat color —
+/// tabby banding, spots, marbled swirls. None leaves a plain single-color coat.
+/// </summary>
+public enum FurMarkingStyle
+{
+    None     = 0,
+    Stripes  = 1,
+    Spots    = 2,
+    Marbling = 3,
+}
+
+/// <summary>
 /// A guide anchor steering the surface flow field: a point on the mesh with a direction the
 /// pattern should follow there. Flow is geodesically propagated from every anchor and blended
 /// by inverse geodesic distance. Exclusion anchors instead fade the pattern out around them.
@@ -180,6 +192,14 @@ public sealed class ProceduralSurfaceLayer : TextureLayer
     public float Curl         = 0.3f;
     public float SpeckDensity = 0.5f;
 
+    /// <summary> Coat markings rendered in the highlight color over the main coat. </summary>
+    public FurMarkingStyle Markings;
+
+    public float MarkingScaleCm = 7f;
+
+    /// <summary> How much of the coat the markings cover. </summary>
+    public float MarkingAmount = 0.5f;
+
     /// <summary> Per-body-part weights, indexed by MaterialMesh.TriangleUnit (top, legs, hands, feet). </summary>
     public float WeightChest = 1f, WeightLegs = 1f, WeightHands = 1f, WeightFeet = 1f;
 
@@ -254,6 +274,9 @@ public sealed class ProceduralSurfaceLayer : TextureLayer
         json["StrandAspect"]    = StrandAspect;
         json["Curl"]            = Curl;
         json["SpeckDensity"]    = SpeckDensity;
+        json["Markings"]        = (int)Markings;
+        json["MarkingScaleCm"]  = MarkingScaleCm;
+        json["MarkingAmount"]   = MarkingAmount;
         json["WeightChest"]     = WeightChest;
         json["WeightLegs"]      = WeightLegs;
         json["WeightHands"]     = WeightHands;
@@ -291,6 +314,9 @@ public sealed class ProceduralSurfaceLayer : TextureLayer
             StrandAspect    = json["StrandAspect"]?.ToObject<float>() ?? 8f,
             Curl            = json["Curl"]?.ToObject<float>() ?? 0.3f,
             SpeckDensity    = json["SpeckDensity"]?.ToObject<float>() ?? 0.5f,
+            Markings        = (FurMarkingStyle)(json["Markings"]?.ToObject<int>() ?? 0),
+            MarkingScaleCm  = json["MarkingScaleCm"]?.ToObject<float>() ?? 7f,
+            MarkingAmount   = json["MarkingAmount"]?.ToObject<float>() ?? 0.5f,
             WeightChest     = json["WeightChest"]?.ToObject<float>() ?? 1f,
             WeightLegs      = json["WeightLegs"]?.ToObject<float>() ?? 1f,
             WeightHands     = json["WeightHands"]?.ToObject<float>() ?? 1f,
