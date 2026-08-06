@@ -2075,7 +2075,8 @@ public sealed class DecalsTab(
     #region 3D preview shading
 
     private readonly record struct ShadingKey(int DiffuseVersion, int IndexVersion, int RowVersion, bool Placement, uint SkinTone,
-        uint HairColor, uint HairHighlight, int HairMaskVersion, int OverlayVersionHash, ViewportEffect? Effect);
+        uint HairColor, uint HairHighlight, int HairMaskVersion, int OverlayVersionHash, ViewportEffect? Effect,
+        int NormalMapVersion);
 
     // Effect pattern pixels for the live viewport effect and thumbnails, cached per
     // (pattern, library entry) — ViewportEffect compares the array by reference, so the same
@@ -2274,9 +2275,13 @@ public sealed class DecalsTab(
         // matches the built result, including mid-drag.
         var overlayEntries = BuildOverlayEntries(dTexture, placementLayer, boundPath, out var overlayVersionHash);
 
+        // The composited normal map shades the preview's relief (fur strands, scales, decal
+        // smoothing) — hair excluded, its normal already IS the color-shading entry.
+        var normalMapEntry = kind is MaterialKind.Hair ? null : EntryFor(NormalOption());
+
         var key = new ShadingKey(diffuseEntry?.Version ?? -1, indexEntry?.Version ?? -1, _rowDiffuseVersion,
             placementLayer != null, skinTone, hairColor, hairHighlight, maskEntry?.Version ?? -1, overlayVersionHash,
-            viewportEffect);
+            viewportEffect, normalMapEntry?.Version ?? -1);
         if (key == _shadingKey)
             return;
 
@@ -2290,7 +2295,7 @@ public sealed class DecalsTab(
         }
 
         _viewport.UpdateShading(new ViewportShading(PreviewBuffer(diffuseEntry), PreviewBuffer(indexEntry), _rowDiffuse, tone,
-            HairPreviewColors(dTexture, kind), PreviewBuffer(maskEntry), viewportEffect));
+            HairPreviewColors(dTexture, kind), PreviewBuffer(maskEntry), viewportEffect, PreviewBuffer(normalMapEntry)));
         _viewport.SetOverlays(overlayEntries);
     }
 
