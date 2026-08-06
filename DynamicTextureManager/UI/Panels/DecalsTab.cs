@@ -764,7 +764,8 @@ public sealed class DecalsTab(
             using var id = Im.Id.Push(idx);
             if (layer is ProceduralSurfaceLayer proc)
             {
-                DrawProceduralEntry(dTexture, proc, idx, layers.Count, ref remove, ref swap);
+                DrawProceduralEntry(dTexture, proc, idx, layers.Count,
+                    ModelUvReader.IsBodySkinMaterial(option.MaterialGamePath), ref remove, ref swap);
                 continue;
             }
 
@@ -869,7 +870,7 @@ public sealed class DecalsTab(
 
     /// <summary> One procedural surface layer in the layer list: header row plus its settings. </summary>
     private void DrawProceduralEntry(DTexture dTexture, ProceduralSurfaceLayer proc, int idx, int count,
-        ref int remove, ref (int, int) swap)
+        bool bodyRegions, ref int remove, ref (int, int) swap)
     {
         var enabled = proc.Enabled;
         if (Im.Checkbox("##enabled"u8, ref enabled))
@@ -884,7 +885,7 @@ public sealed class DecalsTab(
 
         using var indent = Im.Indent();
 
-        if (_procSection.Draw(proc))
+        if (_procSection.Draw(proc, bodyRegions))
             Save(dTexture);
 
         DrawFlowAnchorList(dTexture, proc);

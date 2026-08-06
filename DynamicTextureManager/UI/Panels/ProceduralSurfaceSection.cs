@@ -23,8 +23,12 @@ public sealed class ProceduralSurfaceSection
     private static readonly SurfaceGeneratorKind[] Kinds =
         [SurfaceGeneratorKind.Pattern, SurfaceGeneratorKind.Scales, SurfaceGeneratorKind.Fur];
 
-    /// <summary> Draw the layer's settings; returns true when anything changed. </summary>
-    public bool Draw(ProceduralSurfaceLayer layer)
+    /// <summary>
+    /// Draw the layer's settings; returns true when anything changed.
+    /// <paramref name="bodyRegions"/> shows the per-body-part coverage sliders — only
+    /// meaningful on the merged body canvas, whose triangles carry model units.
+    /// </summary>
+    public bool Draw(ProceduralSurfaceLayer layer, bool bodyRegions)
     {
         var changed = false;
 
@@ -100,6 +104,18 @@ public sealed class ProceduralSurfaceSection
 
         changed |= DrawSliderClamped("Roughness"u8, ref layer.RoughnessAmount, -1f, 1f);
         Im.Tooltip.OnHover("Shifts the surface finish — negative is glossier, positive more matte."u8);
+
+        if (bodyRegions)
+        {
+            Im.Text("Body Coverage"u8);
+            Im.Tooltip.OnHover("How strongly the pattern covers each part of the body."u8);
+            changed |= DrawSliderClamped("Chest"u8, ref layer.WeightChest, 0f, 1f);
+            changed |= DrawSliderClamped("Legs"u8, ref layer.WeightLegs, 0f, 1f);
+            changed |= DrawSliderClamped("Hands"u8, ref layer.WeightHands, 0f, 1f);
+            changed |= DrawSliderClamped("Feet"u8, ref layer.WeightFeet, 0f, 1f);
+            changed |= DrawSliderClamped("Blend"u8, ref layer.RegionFeather, 0f, 1f);
+            Im.Tooltip.OnHover("Softens the transitions at wrists, waist and ankles."u8);
+        }
 
         return changed;
     }

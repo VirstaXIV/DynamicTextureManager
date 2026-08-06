@@ -47,6 +47,13 @@ public sealed class MaterialMesh
     public required int PartCount { get; init; }
 
     /// <summary>
+    /// Per-triangle source-model index for merged model sets — the body canvas keeps the
+    /// SmallClothes order (0 top/chest, 1 legs, 2 hands, 3 feet) even when a model fails to
+    /// load; single-model reads are all 0. Drives per-body-part weights in procedural bakes.
+    /// </summary>
+    public required byte[] TriangleUnit { get; init; }
+
+    /// <summary>
     /// Shape keys in the model's own order (indices must line up with the game's enabled-
     /// shape mask): index-buffer swaps redirecting triangles to morphed alternate vertices.
     /// Applied at pick time so the ray hits the shaped surface the player actually sees.
@@ -381,22 +388,33 @@ public sealed class ModelUvReader(IDataManager dataManager, PenumbraService penu
 
     private readonly Dictionary<string, (long AtMs, (string GamePath, string Actual)[] Resolved, string Joined)> _bodyResolveCache = [];
 
-    /// <summary> Read and parse the resolved model set — only on cache misses. </summary>
-    private List<MdlFile> LoadBodyModels((string GamePath, string Actual)[] resolved)
+    /// <summary>
+    /// Read and parse the resolved model set — only on cache misses. Units keep the
+    /// SmallClothes slot index (0 top, 1 legs, 2 hands, 3 feet) even when a model fails
+    /// to load, so per-part weights stay stable.
+    /// </summary>
+    private (List<MdlFile> Models, List<byte> Units) LoadBodyModels((string GamePath, string Actual)[] resolved)
     {
         var models = new List<MdlFile>();
-        foreach (var (gamePath, actual) in resolved)
+        var units  = new List<byte>();
+        for (var i = 0; i < resolved.Length; ++i)
         {
+            var (gamePath, actual) = resolved[i];
             var bytes = actual.Length > 0 && Path.IsPathRooted(actual) && File.Exists(actual)
                 ? File.ReadAllBytes(actual)
                 : dataManager.GetFile(gamePath)?.Data;
             if (bytes != null)
+            {
                 models.Add(new MdlFile(bytes));
+                units.Add((byte)i);
+            }
             else
+            {
                 DynamicTextureManager.Log.Warning($"Could not load body model {gamePath} (file \"{actual}\").");
+            }
         }
 
-        return models;
+        return (models, units);
     }
 
     private MaterialMesh? GetBodyMesh(SourcePath source)
@@ -409,7 +427,7 @@ public sealed class ModelUvReader(IDataManager dataManager, PenumbraService penu
         MaterialMesh? mesh = null;
         try
         {
-            var models = LoadBodyModels(resolved);
+            var (models, units) = LoadBodyModels(resolved);
             var (sourceName, _, editableNames) = ComputeEditableBodyMaterials(source, race, models);
 
             // The merged mesh's GamePath is deliberately the material path: it must not look
@@ -417,7 +435,7 @@ public sealed class ModelUvReader(IDataManager dataManager, PenumbraService penu
             // gear's variant mask to the nude body.
             mesh = ReadMeshes(models,
                 material => editableNames.Contains(SubstituteBodyRace(Path.GetFileName(material), race)), sourceName,
-                source.GamePath, includeContext: true);
+                source.GamePath, includeContext: true, modelUnits: units);
             if (mesh != null)
                 DynamicTextureManager.Log.Information(
                     $"Body geometry of {source.GamePath}: {mesh.VertexCount} vertices, {mesh.TriangleCount} triangles "
@@ -488,7 +506,7 @@ public sealed class ModelUvReader(IDataManager dataManager, PenumbraService penu
         try
         {
             var (race, resolved, _) = ResolveBodyModels(source);
-            var models = LoadBodyModels(resolved);
+            var (models, _) = LoadBodyModels(resolved);
             var (_, variant, editableNames) = ComputeEditableBodyMaterials(source, race, models);
 
             foreach (var name in models.SelectMany(m => m.Materials).Select(Path.GetFileName).Distinct(StringComparer.OrdinalIgnoreCase)
@@ -573,7 +591,7 @@ public sealed class ModelUvReader(IDataManager dataManager, PenumbraService penu
     /// marked non-editable — dimmed orientation geometry whose UVs belong to a different texture.
     /// </summary>
     private static MaterialMesh? ReadMeshes(IReadOnlyList<MdlFile> models, Func<string, bool> isEditableMaterial,
-        string materialLabel, string meshGamePath, bool includeContext = false)
+        string materialLabel, string meshGamePath, bool includeContext = false, IReadOnlyList<byte>? modelUnits = null)
     {
         var positions = new List<Vector3>();
         var normals   = new List<Vector3>();
@@ -581,11 +599,14 @@ public sealed class ModelUvReader(IDataManager dataManager, PenumbraService penu
         var indices   = new List<int>();
         var triMasks  = new List<uint>();
         var editable  = new List<bool>();
+        var triUnits  = new List<byte>();
         var shapes    = new List<(string Name, (int IndexPosition, int NewVertex)[] Swaps)>();
         var editableTriangles = 0;
 
-        foreach (var mdl in models)
+        for (var modelIndex = 0; modelIndex < models.Count; ++modelIndex)
         {
+            var mdl  = models[modelIndex];
+            var unit = modelUnits != null && modelIndex < modelUnits.Count ? modelUnits[modelIndex] : (byte)0;
             if (!mdl.Valid || mdl.LodCount == 0)
                 continue;
 
@@ -649,6 +670,7 @@ public sealed class ModelUvReader(IDataManager dataManager, PenumbraService penu
                     indices.Add(vertexOffset + c);
                     triMasks.Add(mask);
                     editable.Add(meshEditable);
+                    triUnits.Add(unit);
                     if (meshEditable)
                         ++editableTriangles;
                 }
@@ -676,6 +698,7 @@ public sealed class ModelUvReader(IDataManager dataManager, PenumbraService penu
             TriangleAttributeMasks = triMasks.ToArray(),
             TriangleParts          = parts,
             TriangleEditable       = editable.ToArray(),
+            TriangleUnit           = triUnits.ToArray(),
             PartCount              = partCount,
             GamePath               = meshGamePath,
         };
