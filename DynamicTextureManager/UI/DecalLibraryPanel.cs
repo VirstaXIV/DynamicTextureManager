@@ -491,6 +491,21 @@ public sealed class DecalLibraryPanel(DecalLibrary decals, ITextureProvider text
         Im.Tooltip.OnHover(
             "Import an image as a marking pattern for fur, scales and skin patterns.\nBright areas take the highlight color; the image should tile cleanly in both directions."u8);
 
+        var missingExamples = ModGeneration.MarkingPatternExamples.Names
+            .Where(n => decals.Patterns.All(p => !string.Equals(p.Name, n, StringComparison.OrdinalIgnoreCase))).ToList();
+        if (missingExamples.Count > 0)
+        {
+            Im.Line.Same();
+            if (Im.Button("Add Examples"u8))
+                foreach (var name in missingExamples)
+                {
+                    using var image = ModGeneration.MarkingPatternExamples.Render(name);
+                    decals.ImportGeneratedPattern(image, name);
+                }
+
+            Im.Tooltip.OnHover("Adds a few ready-made patterns — use them as they are, or as a guide for your own images."u8);
+        }
+
         Im.Separator();
         if (decals.Patterns.Count == 0)
         {
