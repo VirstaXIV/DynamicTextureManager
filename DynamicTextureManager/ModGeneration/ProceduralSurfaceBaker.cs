@@ -313,8 +313,8 @@ public static class ProceduralSurfaceBaker
 
                 var (heightV, albedoT, coverage) = layer.Kind switch
                 {
-                    SurfaceGeneratorKind.Scales => EvaluatePattern(layer, surface, index, k), // placeholder until the scales stage
-                    SurfaceGeneratorKind.Fur    => EvaluatePattern(layer, surface, index, k), // placeholder until the fur stage
+                    SurfaceGeneratorKind.Scales => EvaluateScales(layer, surface, index, k),
+                    SurfaceGeneratorKind.Fur    => EvaluateFur(layer, surface, index, k),
                     _                           => EvaluatePattern(layer, surface, index, k),
                 };
 
@@ -380,6 +380,74 @@ public static class ProceduralSurfaceBaker
         }
 
         return (coverage * 0.5f, albedoT, coverage);
+    }
+
+    /// <summary>
+    /// Scale plates: cellular noise in a flow-aligned anisotropic frame — cells stretch along
+    /// the flow by the elongation factor, so plates lie like they grew with the body. Valid
+    /// because plate size is far below the body's curvature radius; the projection's slow
+    /// frame drift over large distances is invisible at centimeter features. Each plate is a
+    /// beveled plateau (height from the distance to the cell border) with its own color.
+    /// </summary>
+    private static (float Height, float AlbedoT, float Coverage) EvaluateScales(
+        ProceduralSurfaceLayer layer, SurfaceFields surface, int index, float k)
+    {
+        var pos = surface.Position[index];
+        var f   = surface.Flow[index];
+        var n   = surface.Normal[index];
+        var c   = Vector3.Cross(n, f);
+
+        var q = new Vector2(
+            Vector3.Dot(pos, c) * k,
+            Vector3.Dot(pos, f) * k / MathF.Max(0.25f, layer.ScaleElongation));
+
+        var w      = ProceduralFields.Worley(layer.Seed, q);
+        var bevel  = MathF.Max(0.02f, layer.BevelWidth);
+        var height = ProceduralFields.Smooth(0f, bevel, w.EdgeDist);
+
+        var cellT   = (w.CellHash & 0xFFFFFF) / 16777215f;
+        var albedoT = Math.Clamp(0.5f + (cellT - 0.5f) * 2f * layer.ColorVariation, 0f, 1f);
+
+        return (height, albedoT, 1f);
+    }
+
+    /// <summary>
+    /// Fur: elongated noise ridges along the flow — the across-flow coordinate runs at
+    /// strand-aspect frequency (curl-warped so strands wave instead of running straight),
+    /// the along-flow coordinate stays low frequency, and the normal-offset axis decorrelates
+    /// closely layered surfaces. Sparse cellular specks break the strands up into visible
+    /// roots and tips. Color runs base-to-tip between the two layer colors.
+    /// </summary>
+    private static (float Height, float AlbedoT, float Coverage) EvaluateFur(
+        ProceduralSurfaceLayer layer, SurfaceFields surface, int index, float k)
+    {
+        var pos = surface.Position[index];
+        var f   = surface.Flow[index];
+        var n   = surface.Normal[index];
+        var c   = Vector3.Cross(n, f);
+
+        var across = Vector3.Dot(pos, c) * k;
+        var along  = Vector3.Dot(pos, f) * k;
+        var depth  = Vector3.Dot(pos, n) * k;
+
+        var curl = layer.Curl * 8f * (ProceduralFields.Fbm3(layer.Seed + 909, pos * k, 3) - 0.5f);
+        var a    = across * MathF.Max(1f, layer.StrandAspect) + curl;
+
+        var height = ProceduralFields.Fbm3(layer.Seed, new Vector3(a, along * 0.25f, depth), 4);
+
+        // Sparse speck field: cell centers become dark roots/flecks, density-gated.
+        if (layer.SpeckDensity > 0f)
+        {
+            var speck = ProceduralFields.Worley(layer.Seed + 4242, new Vector2(a * 0.5f, along * 2f));
+            var spot  = 1f - ProceduralFields.Smooth(0.05f, 0.25f, speck.F1);
+            height = Math.Clamp(height - spot * layer.SpeckDensity * 0.5f, 0f, 1f);
+        }
+
+        // Base-to-tip gradient plus the shared low-frequency variation.
+        var mix     = ProceduralFields.Fbm3(layer.Seed + 7777, pos * (k * 0.15f), 2);
+        var albedoT = Math.Clamp(height + (mix - 0.5f) * 2f * layer.ColorVariation * 0.5f, 0f, 1f);
+
+        return (height, albedoT, 1f);
     }
 
     private static float ApplyContrast(float v, float contrast)
