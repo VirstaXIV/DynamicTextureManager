@@ -2500,9 +2500,12 @@ public sealed class DecalsTab(
 
         // Body-family companion canvases (face, nails, accents) are painted automatically by
         // the body's own layers — show their textures alongside the body's so the user can
-        // check the continuation without selecting anything.
+        // check the continuation without selecting anything. The face also receives relief
+        // and finish, so all its slots list; overlay parts only take diffuse decals.
         var companionOptions = _overlayOptions is { Count: > 0 } && ModelUvReader.IsBodySkinMaterial(_selectedMaterial)
-            ? _overlayOptions.Where(o => o.Slot is TextureSlot.Diffuse).ToList()
+            ? _overlayOptions.Where(o => ModelUvReader.IsFaceSkinMaterial(o.MaterialGamePath)
+                ? o.Slot is TextureSlot.Diffuse or TextureSlot.Normal or TextureSlot.Mask
+                : o.Slot is TextureSlot.Diffuse).ToList()
             : [];
 
         var generatedIndex = animatedEdit != null ? Array.IndexOf(GeneratedIds, _previewTexturePath) : -1;
@@ -2552,7 +2555,7 @@ public sealed class DecalsTab(
         foreach (var option in companionOptions)
         {
             var entry = previewCache.Get(dTexture, option.GamePath, null);
-            Thumbnail(option.GamePath, $"{option.MaterialLabel} (painted by this canvas's layers)\n{option.GamePath}",
+            Thumbnail(option.GamePath, $"{option.MaterialLabel} {SlotButtonLabel(option)} (painted by this canvas's layers)\n{option.GamePath}",
                 entry.CompositedWrap ?? entry.PristineWrap, entry.Pristine?.Width ?? 0, entry.Pristine?.Height ?? 0,
                 current != null && ReferenceEquals(option, current));
         }
