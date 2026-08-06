@@ -382,20 +382,37 @@ public sealed class SourceTab(
             var race     = EquipmentBodyRace(groups) ?? ModelUvReader.BodyMaterialRace(body[0].Material.GamePath);
             var topModel = ModelUvReader.BodyModelSetForRace(race)[0];
 
-            // The resource tree also surfaces skin materials the body does NOT render with
-            // (e.g. the vanilla _a material while a body mod is active) — those only show on
-            // stray gear-embedded patches, so decals on them are effectively invisible. Keep
-            // the materials the resolved body models actually reference.
-            var active = uvReader.ResolvedBodyMaterialNames(race);
-            var usable = body.Where(e => active.Contains(Path.GetFileName(e.Material.GamePath))).ToList();
-            if (usable.Count == 0)
-                usable = body;
-
-            // Several body materials painting the SAME diffuse texture are one canvas (body
-            // mods split torso/legs into materials sharing one full-body texture, and decals
-            // continue across that seam) — list the shared canvas once.
+            // The body's canvases derive from the materials the resolved SmallClothes models
+            // reference — NOT from tree discovery order. The tree also surfaces skin
+            // materials the body does not render with (the vanilla _a patches gear embeds
+            // while a body mod is active), can miss the real torso material entirely under
+            // covering gear, and lists absolute-pathed materials under their foreign race
+            // code, so names match with the wearer's race substituted on both sides. The
+            // slot bits then separate THE body (torso/legs materials) from part-specific
+            // skin (feet replacements, claws — hands/feet-only): those join the overlay
+            // parts below instead of competing as the main canvas — a feet mod used to be
+            // able to read as the whole body mod. Several materials painting the SAME
+            // diffuse texture are one canvas (body mods split torso/legs into materials
+            // sharing one full-body texture) — the shared canvas lists once.
+            var slots     = uvReader.ResolvedBodyMaterialSlots(race);
             var byDiffuse = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
-            var deduped   = usable.Where(e => e.Diffuse.Length == 0 || byDiffuse.Add(e.Diffuse)).ToList();
+            var deduped   = new List<(ResolvedMaterial Material, string Diffuse)>();
+            foreach (var name in slots.Where(kvp => (kvp.Value & 0b0011) != 0)
+                         .OrderBy(kvp => (kvp.Value & 1) != 0 ? 0 : 1)
+                         .ThenBy(kvp => kvp.Key, StringComparer.OrdinalIgnoreCase)
+                         .Select(kvp => kvp.Key))
+            {
+                var index = body.FindIndex(e => string.Equals(
+                    ModelUvReader.SubstituteBodyRace(Path.GetFileName(e.Material.GamePath), race), name,
+                    StringComparison.OrdinalIgnoreCase));
+                var entry = index >= 0 ? body[index] : SynthesizeBodyMaterial(name, topModel);
+                if (entry is { } e && (e.Diffuse.Length == 0 || byDiffuse.Add(e.Diffuse)))
+                    deduped.Add(e);
+            }
+
+            // Resolved models unreadable (nonstandard bodies) — the tree's view is all there is.
+            if (deduped.Count == 0)
+                deduped = body.Where(e => e.Diffuse.Length == 0 || byDiffuse.Add(e.Diffuse)).ToList();
 
             // The body is ONE unit: its skin canvases plus the overlay parts sharing the same
             // SmallClothes models (nails, claws, accents — materials with their OWN diffuse a
@@ -406,16 +423,21 @@ public sealed class SourceTab(
             // being its own competing canvas. Face materials keep the body's model key so
             // the whole unit lists, selects and removes as one; their real geometry derives
             // from the material path (see ModelUvReader.GetFaceMesh).
-            var bodySource = new SourcePath { GamePath = body[0].Material.GamePath, ActualPath = body[0].Material.ActualPath };
+            var bodySource = new SourcePath { GamePath = deduped[0].Material.GamePath, ActualPath = deduped[0].Material.ActualPath };
             var faceMaterials = groups
                 .Where(g => g.Materials.Count > 0
                  && g.Materials[0].MdlGamePath.Contains("/obj/face/", StringComparison.OrdinalIgnoreCase))
                 .SelectMany(g => g.Materials)
                 .Where(m => ModelUvReader.IsFaceSkinMaterial(m.GamePath) && SkinInfo(m).IsSkin && seen.Add(m.GamePath))
                 .Select(m => m with { MdlGamePath = topModel, MdlActualPath = string.Empty, IsOverlayPart = true, Label = "Face" });
+            var canvasNames = deduped
+                .Select(e => ModelUvReader.SubstituteBodyRace(Path.GetFileName(e.Material.GamePath), race))
+                .ToHashSet(StringComparer.OrdinalIgnoreCase);
             var bodyUnit = deduped
                 .Select(e => e.Material with { MdlGamePath = topModel, MdlActualPath = string.Empty })
-                .Concat(uvReader.GetBodyOverlayMaterials(bodySource).Select(o => ResolveOverlayMaterial(o, topModel)))
+                .Concat(uvReader.GetBodyOverlayMaterials(bodySource)
+                    .Where(o => !canvasNames.Contains(o.Name))
+                    .Select(o => ResolveOverlayMaterial(o, topModel)))
                 .Concat(faceMaterials)
                 .ToList();
             ret.Add(new ResolvedModelGroup("Body", bodyUnit));
@@ -489,6 +511,26 @@ public sealed class SourceTab(
         DynamicTextureManager.Log.Debug(
             $"Hair candidate {material.GamePath}: shader {mtrl.ShaderPackage.Name}, kind {kind}, keys [{string.Join(", ", mtrl.ShaderPackage.ShaderKeys.Select(k => $"0x{k.Key:X8}=0x{k.Value:X8}"))}]");
         return kind is MaterialKind.Hair;
+    }
+
+    /// <summary>
+    /// A body material the resolved models render with but the resource tree never surfaced —
+    /// covering gear can embed no torso skin patch, leaving the real body material without a
+    /// tree node while e.g. a feet replacement's still has one. Rebuilt from its conventional
+    /// path; null when it turns out not to be a skin material.
+    /// </summary>
+    private (ResolvedMaterial Material, string Diffuse)? SynthesizeBodyMaterial(string name, string topModel)
+    {
+        var gamePath = ModelUvReader.BodyMaterialGamePath(name, "v0001");
+        if (gamePath == null)
+            return null;
+
+        var actual   = penumbra.ResolvePlayerPath(gamePath);
+        var mod      = Path.IsPathRooted(actual) ? penumbra.IdentifyModOfFile(actual) : null;
+        var material = new ResolvedMaterial(gamePath, actual, OverlayLabel(name), mod?.ModDirectory ?? string.Empty,
+            mod?.ModName ?? string.Empty, topModel, string.Empty);
+        var (isSkin, diffuse) = SkinInfo(material);
+        return isSkin ? (material, diffuse) : null;
     }
 
     /// <summary> Turn a discovered overlay-part material into a pickable entry, resolving its actual file and owning mod. </summary>

@@ -200,7 +200,7 @@ public sealed class ModelUvReader(IDataManager dataManager, PenumbraService penu
     private static readonly Regex MaterialVariantPattern =
         new(@"/material/(v\d{4})/", RegexOptions.IgnoreCase | RegexOptions.Compiled);
 
-    private static string? BodyMaterialGamePath(string materialFileName, string variant)
+    public static string? BodyMaterialGamePath(string materialFileName, string variant)
     {
         var match = BodyMaterialNamePattern.Match(materialFileName);
         return match.Success
@@ -214,7 +214,7 @@ public sealed class ModelUvReader(IDataManager dataManager, PenumbraService penu
     /// mt_c0201b0001_bibo.mtrl on a c0201 body. Matching must do the same, or the torso of a
     /// mixed-authoring body mod never matches its own material.
     /// </summary>
-    private static string SubstituteBodyRace(string materialFileName, string race)
+    public static string SubstituteBodyRace(string materialFileName, string race)
         => BodyMaterialNamePattern.IsMatch(materialFileName) ? $"mt_{race}{materialFileName[8..]}" : materialFileName;
 
     /// <summary> Resolve and read a game file: recorded actual path, then Penumbra resolution, then vanilla. </summary>
@@ -342,36 +342,43 @@ public sealed class ModelUvReader(IDataManager dataManager, PenumbraService penu
 
     /// <summary>
     /// Material file names the resolved SmallClothes body models reference — i.e. the skin
-    /// materials the character's body actually renders with. A body material outside this set
-    /// (e.g. the vanilla _a material while a body mod is active) only shows on stray gear-
-    /// embedded patches, so decals on it are effectively invisible.
+    /// materials the character's body actually renders with — each mapped to a bitmask of the
+    /// SmallClothes slots referencing it (bit 0 top, 1 legs, 2 hands, 3 feet). Torso/legs bits
+    /// mark THE body canvas; a hands/feet-only material is a part (feet replacements, claws,
+    /// nails). A body material outside this set (e.g. the vanilla _a material while a body mod
+    /// is active) only shows on stray gear-embedded patches, so decals on it are effectively
+    /// invisible.
     /// </summary>
-    public HashSet<string> ResolvedBodyMaterialNames(string race)
+    public Dictionary<string, int> ResolvedBodyMaterialSlots(string race)
     {
-        var names = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
-        foreach (var gamePath in BodyModelSetForRace(race))
+        var slots = new Dictionary<string, int>(StringComparer.OrdinalIgnoreCase);
+        var set   = BodyModelSetForRace(race);
+        for (var i = 0; i < set.Length; ++i)
         {
             try
             {
-                var actual = penumbra.ResolvePlayerPath(gamePath);
+                var actual = penumbra.ResolvePlayerPath(set[i]);
                 var bytes = actual.Length > 0 && Path.IsPathRooted(actual) && File.Exists(actual)
                     ? File.ReadAllBytes(actual)
-                    : dataManager.GetFile(gamePath)?.Data;
+                    : dataManager.GetFile(set[i])?.Data;
                 if (bytes == null)
                     continue;
 
                 // Model material names carry their authoring race — normalize to the wearer's
                 // race, exactly like the game's load-time substitution.
                 foreach (var material in new MdlFile(bytes).Materials)
-                    names.Add(SubstituteBodyRace(Path.GetFileName(material), race));
+                {
+                    var name = SubstituteBodyRace(Path.GetFileName(material), race);
+                    slots[name] = slots.GetValueOrDefault(name) | (1 << i);
+                }
             }
             catch (Exception ex)
             {
-                DynamicTextureManager.Log.Warning($"Could not read materials of body model {gamePath}: {ex.Message}");
+                DynamicTextureManager.Log.Warning($"Could not read materials of body model {set[i]}: {ex.Message}");
             }
         }
 
-        return names;
+        return slots;
     }
 
     /// <summary>
