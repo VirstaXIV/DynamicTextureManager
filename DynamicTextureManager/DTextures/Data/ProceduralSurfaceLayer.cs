@@ -148,6 +148,9 @@ public sealed class ProceduralSurfaceLayer : TextureLayer
     /// <summary> Per-body-part weights, indexed by MaterialMesh.TriangleUnit (top, legs, hands, feet). </summary>
     public float WeightChest = 1f, WeightLegs = 1f, WeightHands = 1f, WeightFeet = 1f;
 
+    /// <summary> Coverage on the face companion canvas (its own mesh, not a body unit). </summary>
+    public float WeightFace = 1f;
+
     /// <summary> Softening of part-boundary transitions (0 = hard cut at the unit seam). </summary>
     public float RegionFeather = 0.5f;
 
@@ -216,6 +219,7 @@ public sealed class ProceduralSurfaceLayer : TextureLayer
         json["WeightLegs"]      = WeightLegs;
         json["WeightHands"]     = WeightHands;
         json["WeightFeet"]      = WeightFeet;
+        json["WeightFace"]      = WeightFace;
         json["RegionFeather"]   = RegionFeather;
         json["SurfaceAttributes"] = SurfaceAttributes;
     }
@@ -250,6 +254,7 @@ public sealed class ProceduralSurfaceLayer : TextureLayer
             WeightLegs      = json["WeightLegs"]?.ToObject<float>() ?? 1f,
             WeightHands     = json["WeightHands"]?.ToObject<float>() ?? 1f,
             WeightFeet      = json["WeightFeet"]?.ToObject<float>() ?? 1f,
+            WeightFace      = json["WeightFace"]?.ToObject<float>() ?? 1f,
             RegionFeather   = json["RegionFeather"]?.ToObject<float>() ?? 0.5f,
             SurfaceAttributes = json["SurfaceAttributes"]?.ToObject<uint>() ?? uint.MaxValue,
         };
