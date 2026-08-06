@@ -2348,7 +2348,9 @@ public sealed class DecalsTab(
             {
                 var source = dTexture.Data.Source.Materials.FirstOrDefault(m
                     => string.Equals(m.GamePath, option.MaterialGamePath, StringComparison.OrdinalIgnoreCase));
-                var mesh = source == null ? null : uvReader.GetMesh(source);
+                // A body mirror IS the body under an alternate material set — rendering it
+                // would draw a duplicate body over the primary mesh.
+                var mesh = source == null || source.BodyMirror ? null : uvReader.GetMesh(source);
                 if (mesh == null)
                     continue;
 

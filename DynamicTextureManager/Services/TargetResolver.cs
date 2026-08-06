@@ -20,6 +20,9 @@ public sealed record ResolvedMaterial(
 {
     /// <summary> Whether this is an overlay-part material (nails, accents) — see DTextures.Data.SourcePath.Overlay. </summary>
     public bool IsOverlayPart { get; init; }
+
+    /// <summary> Whether this is an alternate material set of the same body — see DTextures.Data.SourcePath.BodyMirror. </summary>
+    public bool IsBodyMirror { get; init; }
 }
 
 /// <summary> A group of materials belonging to one model (equipment piece, body part, ...). </summary>
