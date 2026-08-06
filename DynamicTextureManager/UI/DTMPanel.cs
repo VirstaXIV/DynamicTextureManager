@@ -17,10 +17,11 @@ public class DTMPanel : IDisposable
     private readonly EditPreviewer _previewer;
     private readonly SourceTab _sourceTab;
     private readonly DecalsTab _decalsTab;
+    private readonly Configuration _config;
     private readonly PanelHeader _header;
 
     public DTMPanel(DTMFileSystemDrawer selector, OverlayModManager overlayMods, PenumbraService penumbra, EditPreviewer previewer,
-        SourceTab sourceTab, DecalsTab decalsTab)
+        SourceTab sourceTab, DecalsTab decalsTab, Configuration config)
     {
         _selector     = selector;
         _overlayMods  = overlayMods;
@@ -28,10 +29,11 @@ public class DTMPanel : IDisposable
         _previewer    = previewer;
         _sourceTab    = sourceTab;
         _decalsTab    = decalsTab;
+        _config       = config;
         _header       = new PanelHeader(this);
     }
 
-    /// <summary> The split-button header over the panel: build on the left, delete on the right, selection name in the middle. </summary>
+    /// <summary> The split-button header over the panel: build + auto-rebuild toggle on the left, delete on the right, selection name in the middle. </summary>
     private sealed class PanelHeader : SplitButtonHeader
     {
         private readonly DTMPanel _panel;
@@ -42,6 +44,7 @@ public class DTMPanel : IDisposable
         {
             _panel = panel;
             LeftButtons.AddButton(new ApplyButton(panel), 100);
+            LeftButtons.AddButton(new AutoRebuildButton(panel), 90);
             RightButtons.AddButton(new DeleteModButton(panel), 100);
         }
 
@@ -83,6 +86,29 @@ public class DTMPanel : IDisposable
 
         public override void OnClick()
             => panel.Apply();
+    }
+
+    private sealed class AutoRebuildButton(DTMPanel panel) : BaseIconButton<AwesomeIcon>
+    {
+        public override ReadOnlySpan<byte> Label
+            => "##autoRebuild"u8;
+
+        public override AwesomeIcon Icon
+            => panel._config.AutoReload ? FontAwesomeIcon.ToggleOn : FontAwesomeIcon.ToggleOff;
+
+        public override bool HasTooltip
+            => true;
+
+        public override void DrawTooltip()
+            => Im.Text(panel._config.AutoReload
+                ? "Auto-rebuild is ON: edits rebuild the built mod automatically.\nClick to turn off — edits then show only in the preview until you press Build."u8
+                : "Auto-rebuild is OFF: edits show only in the preview.\nClick to turn on, or press Build to bake the current state."u8);
+
+        public override void OnClick()
+        {
+            panel._config.AutoReload = !panel._config.AutoReload;
+            panel._config.Save();
+        }
     }
 
     private sealed class DeleteModButton(DTMPanel panel) : BaseIconButton<AwesomeIcon>

@@ -400,18 +400,27 @@ public sealed class SourceTab(
             // The body is ONE unit: its skin canvases plus the overlay parts sharing the same
             // SmallClothes models (nails, claws, accents — materials with their OWN diffuse a
             // body tattoo can continue onto; colorset-only piercings and hair-shader pieces
-            // stay excluded, see ModelUvReader.GetBodyOverlayMaterials). Adding "Body" adds
-            // everything related to the bare body.
+            // stay excluded, see ModelUvReader.GetBodyOverlayMaterials), plus the FACE skin —
+            // body and face are one continuous surface, so full-coverage patterns and
+            // overlapping tattoos must continue across the neck seam instead of the face
+            // being its own competing canvas. Face materials keep the body's model key so
+            // the whole unit lists, selects and removes as one; their real geometry derives
+            // from the material path (see ModelUvReader.GetFaceMesh).
             var bodySource = new SourcePath { GamePath = body[0].Material.GamePath, ActualPath = body[0].Material.ActualPath };
+            var faceMaterials = groups
+                .Where(g => g.Materials.Count > 0
+                 && g.Materials[0].MdlGamePath.Contains("/obj/face/", StringComparison.OrdinalIgnoreCase))
+                .SelectMany(g => g.Materials)
+                .Where(m => ModelUvReader.IsFaceSkinMaterial(m.GamePath) && SkinInfo(m).IsSkin && seen.Add(m.GamePath))
+                .Select(m => m with { MdlGamePath = topModel, MdlActualPath = string.Empty, IsOverlayPart = true, Label = "Face" });
             var bodyUnit = deduped
                 .Select(e => e.Material with { MdlGamePath = topModel, MdlActualPath = string.Empty })
                 .Concat(uvReader.GetBodyOverlayMaterials(bodySource).Select(o => ResolveOverlayMaterial(o, topModel)))
+                .Concat(faceMaterials)
                 .ToList();
             ret.Add(new ResolvedModelGroup("Body", bodyUnit));
         }
 
-        // Skin means the BODY, one unit — the face is its own category and stays out of this
-        // picker (like hair is just the hair).
         return ret;
     }
 
