@@ -135,7 +135,6 @@ public static class ProceduralSurfaceBaker
         public required float[]   FlowPotential;
         public required float[]   Weight;
         public required float[]   TexelsPerMeter;
-        public required bool      HasAnchorFlow;
     }
 
     /// <summary>
@@ -158,7 +157,6 @@ public static class ProceduralSurfaceBaker
             FlowPotential  = new float[texels],
             Weight         = new float[texels],
             TexelsPerMeter = new float[texels],
-            HasAnchorFlow  = flow != null,
         };
 
         var indices = mesh.Indices;
