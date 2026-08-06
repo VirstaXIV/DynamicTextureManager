@@ -271,6 +271,211 @@ public static class SurfaceFlowField
         };
     }
 
+    // ------------------------------------------------------------------ surface charts
+
+    /// <summary>
+    /// Flow-aligned flattenings of the whole surface, per raw vertex: each chart unfolds the
+    /// mesh around one seed through the transported-frame walk, giving 2D coordinates
+    /// (X across the flow, Y along it, meters) that are CONTINUOUS across UV seams — the
+    /// walk runs on the position-welded graph. Directional patterns sample the two nearest
+    /// charts per texel and cross-fade, so chart boundaries blur instead of cutting.
+    /// </summary>
+    public sealed class SurfaceCharts
+    {
+        /// <summary> Per chart, per raw vertex: flow-aligned flat coordinates in meters. </summary>
+        public required Vector2[][] Local;
+
+        /// <summary> Per chart, per raw vertex: geodesic distance to the chart seed (MaxValue unreached). </summary>
+        public required float[][] Distance;
+
+        /// <summary> Per chart: stable pattern offset decorrelating the charts. </summary>
+        public required float[] Offset;
+
+        public int Count
+            => Local.Length;
+    }
+
+    private const int AutoChartCount = 8;
+
+    private static readonly System.Runtime.CompilerServices.ConditionalWeakTable<MaterialMesh,
+        Dictionary<string, (SurfaceCharts Charts, long Seq)>> ChartCache = new();
+
+    /// <summary>
+    /// Charts seeded from the steering anchors (each anchor combs its chart) topped up with
+    /// automatic seeds via farthest-point sampling, so every part of the mesh — including
+    /// disconnected pieces — lies close to some chart. Deterministic: seed selection
+    /// tie-breaks on vertex index and the walks are tie-stable.
+    /// </summary>
+    public static SurfaceCharts ComputeCharts(MaterialMesh mesh, VertexFlow? flow, IReadOnlyList<FlowAnchor> anchors)
+    {
+        var key = string.Join(";", System.Linq.Enumerable.Select(anchors, a => FormattableString.Invariant(
+            $"{a.PosX:F5},{a.PosY:F5},{a.PosZ:F5},{a.DirX:F4},{a.DirY:F4},{a.DirZ:F4},{a.Exclude}")));
+        var table = ChartCache.GetOrCreateValue(mesh);
+
+        lock (table)
+        {
+            if (table.TryGetValue(key, out var hit))
+            {
+                table[key] = (hit.Charts, ++_walkSeq);
+                return hit.Charts;
+            }
+        }
+
+        var charts = ComputeChartsUncached(mesh, flow, anchors);
+
+        lock (table)
+        {
+            while (table.Count >= 2)
+            {
+                string? oldest = null;
+                var oldestSeq  = long.MaxValue;
+                foreach (var (k, v) in table)
+                    if (v.Seq < oldestSeq)
+                    {
+                        oldestSeq = v.Seq;
+                        oldest    = k;
+                    }
+
+                if (oldest == null)
+                    break;
+
+                table.Remove(oldest);
+            }
+
+            table[key] = (charts, ++_walkSeq);
+        }
+
+        return charts;
+    }
+
+    private static SurfaceCharts ComputeChartsUncached(MaterialMesh mesh, VertexFlow? flow, IReadOnlyList<FlowAnchor> anchors)
+    {
+        var count = mesh.VertexCount;
+        var (canonical, _) = mesh.GetOrBuildAdjacency();
+
+        var locals    = new List<Vector2[]>();
+        var distances = new List<float[]>();
+        var minDist   = new float[count];
+        Array.Fill(minDist, float.MaxValue);
+
+        Vector3 SeedFlow(int vertex)
+        {
+            if (flow != null && flow.HasFlow[vertex])
+                return flow.Direction[vertex];
+
+            var n = mesh.Normals[vertex].LengthSquared() > 1e-8f ? Vector3.Normalize(mesh.Normals[vertex]) : Vector3.UnitY;
+            var down = -Vector3.UnitY - n * Vector3.Dot(-Vector3.UnitY, n);
+            if (down.LengthSquared() < 1e-4f)
+            {
+                down = Vector3.UnitZ - n * Vector3.Dot(Vector3.UnitZ, n);
+                if (down.LengthSquared() < 1e-8f)
+                    return Vector3.UnitZ;
+            }
+
+            return Vector3.Normalize(down);
+        }
+
+        void AddChart(int seedVertex, Vector3 dir)
+        {
+            var normal = mesh.Normals[seedVertex].LengthSquared() > 1e-8f
+                ? Vector3.Normalize(mesh.Normals[seedVertex])
+                : Vector3.UnitY;
+            var planar = dir - normal * Vector3.Dot(dir, normal);
+            if (planar.LengthSquared() < 1e-6f)
+                planar = Vector3.Cross(normal, Vector3.UnitX).LengthSquared() > 1e-4f
+                    ? Vector3.Cross(normal, Vector3.UnitX)
+                    : Vector3.Cross(normal, Vector3.UnitY);
+            // The walk's LOCAL accumulates (tangent, bitangent) displacement = (X, Y); fur
+            // runs +Y along the flow, so the flow direction becomes the bitangent.
+            var bitangent = Vector3.Normalize(planar);
+            var tangent   = Vector3.Cross(bitangent, normal);
+
+            var walk = TransportWalk(mesh, mesh.Positions[seedVertex], normal, tangent, bitangent, float.MaxValue);
+
+            var local = new Vector2[count];
+            var dist  = new float[count];
+            for (var v = 0; v < count; ++v)
+            {
+                var c = canonical[v];
+                local[v] = walk.Local[c];
+                dist[v]  = walk.Reached[c] ? walk.Distance[c] : float.MaxValue;
+                if (dist[v] < minDist[v])
+                    minDist[v] = dist[v];
+            }
+
+            locals.Add(local);
+            distances.Add(dist);
+        }
+
+        foreach (var anchor in anchors)
+        {
+            if (anchor.Exclude)
+                continue;
+
+            var seed = NearestVertex(mesh, new Vector3(anchor.PosX, anchor.PosY, anchor.PosZ));
+            if (seed < 0)
+                continue;
+
+            AddChart(canonical[seed], new Vector3(anchor.DirX, anchor.DirY, anchor.DirZ));
+        }
+
+        // Farthest-point top-up: unreached vertices (other mesh pieces) come first, then the
+        // vertex farthest along the surface from every existing seed. The very first seed
+        // (no anchors at all) is the highest vertex — the top of the piece.
+        while (locals.Count < AutoChartCount)
+        {
+            var seed = -1;
+            if (locals.Count == 0)
+            {
+                var bestY = float.MinValue;
+                for (var v = 0; v < count; ++v)
+                    if (canonical[v] == v && mesh.Positions[v].Y > bestY)
+                    {
+                        bestY = mesh.Positions[v].Y;
+                        seed  = v;
+                    }
+            }
+            else
+            {
+                var best = -1f;
+                for (var v = 0; v < count; ++v)
+                {
+                    if (canonical[v] != v)
+                        continue;
+
+                    var d = minDist[v] >= float.MaxValue ? float.PositiveInfinity : minDist[v];
+                    if (d > best)
+                    {
+                        best = d;
+                        seed = v;
+                        if (float.IsPositiveInfinity(d))
+                            break; // lowest-index unreached vertex wins deterministically
+                    }
+                }
+
+                // Everything already lies within a quarter feature of some seed — done.
+                if (seed < 0 || (!float.IsPositiveInfinity(best) && best < 0.05f))
+                    break;
+            }
+
+            if (seed < 0)
+                break;
+
+            AddChart(seed, SeedFlow(seed));
+        }
+
+        var offsets = new float[locals.Count];
+        for (var i = 0; i < offsets.Length; ++i)
+            offsets[i] = ProceduralFields.Hash01(4177, i, 0, 0) * 173f;
+
+        return new SurfaceCharts
+        {
+            Local    = locals.ToArray(),
+            Distance = distances.ToArray(),
+            Offset   = offsets,
+        };
+    }
+
     private static TransportField GetOrWalk(MaterialMesh mesh, FlowAnchor anchor, Vector3 normal,
         Vector3 tangent, Vector3 bitangent, float maxDist)
     {
