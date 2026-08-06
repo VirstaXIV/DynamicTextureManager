@@ -68,6 +68,7 @@ public sealed class CompositePreviewCache : IService, IDisposable
     private readonly ITextureProvider      _textureProvider;
     private readonly DTextureChanged       _dTextureChanged;
     private readonly Interop.SkinColorReader _skinColors;
+    private readonly Interop.HairColorReader _hairColors;
 
     /// <summary>
     /// Exclude compares by reference — a layer's identity, not its (mutable) values. Path
@@ -87,9 +88,11 @@ public sealed class CompositePreviewCache : IService, IDisposable
 
     public CompositePreviewCache(TextureIO textureIO, TextureCompositor compositor, OverlayModManager overlayMods,
         ModelUvReader uvReader, SourceFileProvider sourceFiles, ShaderHandlerRegistry shaderHandlers,
-        ITextureProvider textureProvider, DTextureChanged dTextureChanged, Interop.SkinColorReader skinColors)
+        ITextureProvider textureProvider, DTextureChanged dTextureChanged, Interop.SkinColorReader skinColors,
+        Interop.HairColorReader hairColors)
     {
         _skinColors      = skinColors;
+        _hairColors      = hairColors;
         _textureIO       = textureIO;
         _compositor      = compositor;
         _overlayMods     = overlayMods;
@@ -209,7 +212,7 @@ public sealed class CompositePreviewCache : IService, IDisposable
         List<DTextures.Data.TextureLayer> effectLayers = [];
         var effectSlot = TextureSlot.Unknown;
         MaterialMesh? mesh = null;
-        System.Numerics.Vector3? skinTone = null;
+        var characterColors = new CharacterColors();
         try
         {
             diskPath = _overlayMods.GetOrCaptureTextureSource(dTexture, gamePath);
@@ -255,10 +258,22 @@ public sealed class CompositePreviewCache : IService, IDisposable
             }
 
             // Live customize state is framework-thread only; the composite below runs in the
-            // background, so the tone is captured here — matching what a build would bake.
-            if (layers.Concat(effectLayers).Any(l => l is DTextures.Data.ProceduralSurfaceLayer { Enabled: true, TintFromSkin: true })
-             && _skinColors.TryGetLocalPlayerSkin(out var liveSkin))
-                skinTone = liveSkin;
+            // background, so the colors are captured here — matching what a build would bake.
+            if (layers.Concat(effectLayers).Any(l => l is DTextures.Data.ProceduralSurfaceLayer { Enabled: true } p
+                 && (p.TintFromSkin || p.UseCharacterColors)))
+            {
+                if (_skinColors.TryGetLocalPlayerSkin(out var liveSkin))
+                    characterColors = characterColors with { Skin = liveSkin };
+                if (_hairColors.TryGetLocalPlayerHair(out var liveHair))
+                    characterColors = characterColors with
+                    {
+                        HairMain = liveHair.Main,
+                        HairHighlight = liveHair.HighlightsEnabled
+                            ? liveHair.Highlight
+                            : System.Numerics.Vector3.Min(liveHair.Main * 1.35f + new System.Numerics.Vector3(0.06f),
+                                System.Numerics.Vector3.One),
+                    };
+            }
         }
         catch (Exception ex)
         {
@@ -294,7 +309,7 @@ public sealed class CompositePreviewCache : IService, IDisposable
                     entry.PristineStampTicks = stamp;
                 }
 
-                entry.Composited = _compositor.CompositeFull(decoded, layers, effectLayers, effectSlot, mesh, skinTone);
+                entry.Composited = _compositor.CompositeFull(decoded, layers, effectLayers, effectSlot, mesh, characterColors);
                 ++entry.Version;
             }
             catch (Exception ex)

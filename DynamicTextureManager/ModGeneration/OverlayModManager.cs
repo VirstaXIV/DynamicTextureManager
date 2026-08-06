@@ -433,19 +433,32 @@ public sealed class OverlayModManager : IService, IDisposable
         }
 
         // Live customize state must be read here on the framework thread, never from the
-        // background build — the baked file freezes the tone captured now.
-        System.Numerics.Vector3? skinTone = null;
+        // background build — the baked file freezes the colors captured now.
+        var characterColors = new CharacterColors();
         if (plan.TextureJobs.Any(j => j.Layers.Concat(j.EffectLayers)
-                .Any(l => l is DTextures.Data.ProceduralSurfaceLayer { Enabled: true, TintFromSkin: true }))
-         && skinColors.TryGetLocalPlayerSkin(out var liveSkin))
-            skinTone = liveSkin;
+                .Any(l => l is DTextures.Data.ProceduralSurfaceLayer { Enabled: true } p
+                 && (p.TintFromSkin || p.UseCharacterColors))))
+        {
+            if (skinColors.TryGetLocalPlayerSkin(out var liveSkin))
+                characterColors = characterColors with { Skin = liveSkin };
+            if (hairColors.TryGetLocalPlayerHair(out var liveHair))
+                characterColors = characterColors with
+                {
+                    HairMain = liveHair.Main,
+                    // Highlights disabled leaves no second color — lighten the main a touch
+                    // so fur crests still separate from the base.
+                    HairHighlight = liveHair.HighlightsEnabled
+                        ? liveHair.Highlight
+                        : System.Numerics.Vector3.Min(liveHair.Main * 1.35f + new System.Numerics.Vector3(0.06f), System.Numerics.Vector3.One),
+                };
+        }
 
         LastResult = plan.TextureJobs.Count > 0 ? "Building textures..." : "Building...";
         _ = Task.Run(async () =>
         {
             try
             {
-                var written = await BuildAndWriteAsync(dTexture, modDirectory, plan, skinTone, commitWhenEmpty: cleaning).ConfigureAwait(false);
+                var written = await BuildAndWriteAsync(dTexture, modDirectory, plan, characterColors, commitWhenEmpty: cleaning).ConfigureAwait(false);
                 await framework.RunOnFrameworkThread(() =>
                 {
                     if (written == 0 && !cleaning)
@@ -927,7 +940,7 @@ public sealed class OverlayModManager : IService, IDisposable
     /// failed to decode — must never commit, or it would wipe a previously good mod.
     /// </summary>
     private async Task<int> BuildAndWriteAsync(DTexture dTexture, string modDirectory, BuildPlan plan,
-        System.Numerics.Vector3? skinTone, bool commitWhenEmpty = false)
+        CharacterColors characterColors, bool commitWhenEmpty = false)
     {
         using var build   = modWriter.StartBuild(modDirectory);
         var       written = 0;
@@ -948,7 +961,7 @@ public sealed class OverlayModManager : IService, IDisposable
                 continue;
 
             DynamicTextureManager.Log.Debug($"Building {job.GamePath} at {decoded.Width}x{decoded.Height} (source {(job.DiskPath == null ? "vanilla" : $"\"{job.DiskPath}\"")}).");
-            var rgba = compositor.CompositeFull(decoded, job.Layers, job.EffectLayers, job.EffectSlot, job.Mesh, skinTone);
+            var rgba = compositor.CompositeFull(decoded, job.Layers, job.EffectLayers, job.EffectSlot, job.Mesh, characterColors);
 
             if (plan.AnimatedJobs.Any(a => string.Equals(a.NormalGamePath, job.GamePath, StringComparison.OrdinalIgnoreCase)
                                         || string.Equals(a.MaskGamePath, job.GamePath, StringComparison.OrdinalIgnoreCase)))
