@@ -568,9 +568,10 @@ public static class ProceduralSurfaceBaker
                 result.Height[index]   = (ushort)Math.Clamp((int)MathF.Round(heightV * 65535f), 0, 65535);
                 var albedo = Vector3.Lerp(colorA, colorB, albedoT);
                 // Fur runs a value ramp on top: darker roots rising past full color at the
-                // crests, centered so the typical coat tone stays the base color.
+                // crests, biased bright so a white coat reads WHITE like the hair it
+                // matches, not gray.
                 if (layer.Kind == SurfaceGeneratorKind.Fur)
-                    albedo *= 0.55f + 0.65f * heightV;
+                    albedo *= 0.65f + 0.45f * heightV;
                 result.Albedo[index] = (uint)(ToByte(albedo.X) | (ToByte(albedo.Y) << 8) | (ToByte(albedo.Z) << 16));
             }
         });
@@ -766,10 +767,11 @@ public static class ProceduralSurfaceBaker
             height  = Math.Clamp(height + fleck * gate * 0.15f, 0f, 1f);
         }
 
-        // The skin stays visible in the deepest clump separations — fur grows FROM the
-        // skin, it doesn't wallpaper over it. Cubed so only the crease floors open up.
+        // A hint of skin in the deepest clump separations — the coat itself stays opaque
+        // like a real pelt (letting more skin through muddied white fur to gray). Opacity
+        // remains the master control for a sparser coat.
         var gap      = 1f - separation;
-        var coverage = 1f - gap * gap * gap * 0.5f;
+        var coverage = 1f - gap * gap * gap * 0.25f;
 
         return (height, albedoT, coverage);
     }
@@ -890,10 +892,11 @@ public static class ProceduralSurfaceBaker
     /// </summary>
     private static void ComposeNormal(Image<Rgba32> target, GeneratedFields generated, ProceduralSurfaceLayer layer)
     {
-        // Relief amplitude in meters at full strength: a fraction of the feature size, so
-        // 2 cm scales read ~1 cm deep at maximum while fine fur stays subtler. BC7 and the
-        // shader both soften the result — authored deliberately hot.
-        var amplitude = Math.Clamp(layer.HeightStrength, 0f, 1f) * (layer.FeatureSizeCm / 100f) * 0.4f;
+        // Depth in ABSOLUTE millimeters (up to ~8 mm at full strength), independent of the
+        // feature size — tying it to the feature size made fine fur (small Size values)
+        // physically incapable of visible relief. BC7 and the shader both soften the
+        // result — authored deliberately hot.
+        var amplitude = Math.Clamp(layer.HeightStrength, 0f, 1f) * 0.008f;
         if (amplitude <= 0f)
             return;
 
