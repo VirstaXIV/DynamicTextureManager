@@ -71,8 +71,24 @@ public sealed class ProceduralSurfaceSection
             changed       = true;
         }
 
-        if (layer.Kind == SurfaceGeneratorKind.Pattern)
-            changed |= DrawPatternSettings(layer);
+        switch (layer.Kind)
+        {
+            case SurfaceGeneratorKind.Pattern:
+                changed |= DrawPatternSettings(layer);
+                break;
+            case SurfaceGeneratorKind.Scales:
+                changed |= DrawSliderClamped("Elongation"u8, ref layer.ScaleElongation, 0.5f, 4f);
+                Im.Tooltip.OnHover("Stretches the plates along the flow direction."u8);
+                changed |= DrawSliderClamped("Bevel"u8, ref layer.BevelWidth, 0.05f, 1f);
+                Im.Tooltip.OnHover("Width of the rounded rim around each plate."u8);
+                break;
+            case SurfaceGeneratorKind.Fur:
+                changed |= DrawSliderClamped("Strand Fineness"u8, ref layer.StrandAspect, 2f, 24f);
+                changed |= DrawSliderClamped("Curl"u8, ref layer.Curl, 0f, 1f);
+                changed |= DrawSliderClamped("Flecks"u8, ref layer.SpeckDensity, 0f, 1f);
+                Im.Tooltip.OnHover("Sparse darker roots and flecks breaking the strands up."u8);
+                break;
+        }
 
         changed |= DrawSliderClamped("Color Variation"u8, ref layer.ColorVariation, 0f, 1f);
         changed |= DrawSliderClamped("Contrast"u8, ref layer.Contrast, 0f, 1f);
