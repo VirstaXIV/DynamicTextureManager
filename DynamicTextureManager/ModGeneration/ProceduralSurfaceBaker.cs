@@ -172,9 +172,6 @@ public static class ProceduralSurfaceBaker
 
         /// <summary> Painted markings mask (0 = base color, 1 = highlight), when the style is Painted. </summary>
         public float[]? MarkingPaint;
-
-        /// <summary> Per-texel flow direction — scales squash their volumetric cells along it. </summary>
-        public Vector3[]? FlowDir;
     }
 
     /// <summary>
@@ -194,13 +191,15 @@ public static class ProceduralSurfaceBaker
         var flow    = (SurfaceFlowField.VertexFlow?)null;
         var natural = SurfaceFlowField.BodyFlow(mesh);
         var region  = ComputeRegionWeights(mesh, layer);
-        // Only FUR needs charts — scales moved to volumetric world-space cells (chart
-        // cross-fading ghosts cellular patterns into smeared ridges, and chart distortion
-        // stretched the plates). Small companion canvases (the face) skip charts and live
-        // in the shared world frame. The seam machinery applies to EVERY kind: the flow
-        // potential (stripe bands, tabby markings) must agree where canvases meet.
+        var directional = layer.Kind is SurfaceGeneratorKind.Fur or SurfaceGeneratorKind.Scales;
+
+        // Small companion canvases (the face) skip charts entirely and live in the shared
+        // world frame — near the body axis that frame IS a good flow chart, and it makes
+        // them match the body at the junction by construction. The seam machinery applies
+        // to EVERY kind: the flow potential (stripe bands, tabby markings) must agree
+        // where canvases meet.
         var worldOnly = MeshExtent(mesh) < 0.35f;
-        var charts    = layer.Kind == SurfaceGeneratorKind.Fur && !worldOnly ? SurfaceFlowField.ComputeCharts(mesh, flow, []) : null;
+        var charts    = directional && !worldOnly ? SurfaceFlowField.ComputeCharts(mesh, flow, []) : null;
         var boundary  = worldOnly ? null : SurfaceFlowField.BoundaryDistance(mesh);
         var painted   = layer.Markings == FurMarkingStyle.Painted ? ComputePaintMask(mesh, layer.MarkingDabs) : null;
         var fields = new SurfaceFields
@@ -221,7 +220,6 @@ public static class ProceduralSurfaceBaker
             OffsetC        = new float[texels],
             SeamBlend      = new float[texels],
             MarkingPaint   = painted != null ? new float[texels] : null,
-            FlowDir        = layer.Kind == SurfaceGeneratorKind.Scales ? new Vector3[texels] : null,
         };
 
         var indices = mesh.Indices;
@@ -388,12 +386,6 @@ public static class ProceduralSurfaceBaker
                     if (painted != null)
                         fields.MarkingPaint![index] = painted[i0] * w0 + painted[i1] * w1 + painted[i2] * w2;
 
-                    if (fields.FlowDir != null)
-                    {
-                        var f = natural.Direction[i0] * w0 + natural.Direction[i1] * w1 + natural.Direction[i2] * w2;
-                        fields.FlowDir[index] = f.LengthSquared() > 1e-8f ? Vector3.Normalize(f) : Vector3.UnitY;
-                    }
-
                     // The potential (stripe/tabby banding coordinate) fades to plain world
                     // descent at seams — both canvases band identically where they meet.
                     var meshPotential = flow != null && (flow.HasFlow[i0] || flow.HasFlow[i1] || flow.HasFlow[i2])
@@ -521,16 +513,50 @@ public static class ProceduralSurfaceBaker
                 if (!surface.Covered[index])
                     continue;
 
-                // Fur runs in the texel's nearest surface charts and cross-fades, so chart
-                // boundaries blur instead of showing a hard seam. (Scales are volumetric —
-                // cross-fading cellular patterns ghosts the plates.)
-                (float, float, float) Directional(Vector2 coord, float offset)
-                    => EvaluateFur(layer, coord, offset, k);
-
                 (float Height, float AlbedoT, float Coverage) sample;
                 if (layer.Kind == SurfaceGeneratorKind.Scales)
                 {
-                    sample = EvaluateScales(layer, surface.Position[index], surface.FlowDir![index], k);
+                    // Scales never cross-fade (blending two cell patterns ghosts the
+                    // plates): one source wins per texel — the world frame near seams,
+                    // else the texel's dominant chart — and every switch line sinks into
+                    // a crevice, reading as just another groove between plates.
+                    var seam    = surface.SeamBlend[index];
+                    var blendB  = surface.BlendB[index];
+                    var blendC  = surface.BlendC[index];
+                    var blendA  = 1f - blendB - blendC;
+                    var crevice = 0f;
+
+                    Vector2 coord;
+                    float offset;
+                    if (seam <= 0.5f)
+                    {
+                        coord  = WorldFrame(surface.Position[index]);
+                        offset = 0f;
+                    }
+                    else if (blendA >= blendB && blendA >= blendC)
+                    {
+                        coord  = surface.FlowCoordA[index];
+                        offset = surface.OffsetA[index];
+                        crevice = MathF.Max(crevice, 1f - ProceduralFields.Smooth(0.03f, 0.12f, blendA - MathF.Max(blendB, blendC)));
+                    }
+                    else if (blendB >= blendC)
+                    {
+                        coord  = surface.FlowCoordB[index];
+                        offset = surface.OffsetB[index];
+                        crevice = MathF.Max(crevice, 1f - ProceduralFields.Smooth(0.03f, 0.12f, blendB - MathF.Max(blendA, blendC)));
+                    }
+                    else
+                    {
+                        coord  = surface.FlowCoordC[index];
+                        offset = surface.OffsetC[index];
+                        crevice = MathF.Max(crevice, 1f - ProceduralFields.Smooth(0.03f, 0.12f, blendC - MathF.Max(blendA, blendB)));
+                    }
+
+                    if (seam is > 0.004f and < 0.996f)
+                        crevice = MathF.Max(crevice, 1f - ProceduralFields.Smooth(0.04f, 0.14f, MathF.Abs(seam - 0.5f)));
+
+                    sample = EvaluateScales(layer, coord, offset, k);
+                    sample.Height *= 1f - crevice;
                 }
                 else if (layer.Kind == SurfaceGeneratorKind.Fur)
                 {
@@ -538,6 +564,9 @@ public static class ProceduralSurfaceBaker
                         => (a.Item1 + (b.Item1 - a.Item1) * t,
                             a.Item2 + (b.Item2 - a.Item2) * t,
                             a.Item3 + (b.Item3 - a.Item3) * t);
+
+                    (float, float, float) Directional(Vector2 coord, float offset)
+                        => EvaluateFur(layer, coord, offset, k);
 
                     // Near the mesh's open boundary (and on world-only canvases like the
                     // face) the pattern lives in a shared world frame — a cylinder around
@@ -730,21 +759,21 @@ public static class ProceduralSurfaceBaker
     }
 
     /// <summary>
-    /// Scale plates: VOLUMETRIC cellular noise on the world position — seamless across UV
-    /// islands and canvases by construction, plates never stretch. Elongation squashes the
-    /// lookup domain along the local flow so cells grow oval with the body; the flow varies
-    /// slowly at plate scale, so the squash stays coherent. Each plate is a beveled plateau
-    /// (height from the distance to the cell border) with its own color.
+    /// Scale plates: cellular noise in the flow-aligned flat coordinates — cells stretch
+    /// along the flow by the elongation factor, so plates lie like they grew with the body.
+    /// Each plate is a beveled plateau (height from the distance to the cell border) with
+    /// its own color. Plates never CROSS-FADE between charts (blending two cell patterns
+    /// ghosts them into smeared ridges) — the caller picks one chart and sinks the switch
+    /// line into a crevice instead.
     /// </summary>
     private static (float Height, float AlbedoT, float Coverage) EvaluateScales(
-        ProceduralSurfaceLayer layer, Vector3 pos, Vector3 flowDir, float k)
+        ProceduralSurfaceLayer layer, Vector2 coord, float offset, float k)
     {
-        var q = pos * k;
-        var elongation = MathF.Max(0.25f, layer.ScaleElongation);
-        if (MathF.Abs(elongation - 1f) > 0.01f && flowDir.LengthSquared() > 1e-8f)
-            q += flowDir * (Vector3.Dot(q, flowDir) * (1f / elongation - 1f));
+        var q = new Vector2(
+            coord.X * k + offset,
+            coord.Y * k / MathF.Max(0.25f, layer.ScaleElongation) + offset);
 
-        var w      = ProceduralFields.Worley3(layer.Seed, q);
+        var w      = ProceduralFields.Worley(layer.Seed, q);
         var bevel  = MathF.Max(0.02f, layer.BevelWidth);
         var height = ProceduralFields.Smooth(0f, bevel, w.EdgeDist);
 
