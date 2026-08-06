@@ -111,6 +111,12 @@ public sealed class ProceduralSurfaceLayer : TextureLayer
     /// <summary> Secondary color, packed Rgba32 (0xAABBGGRR). </summary>
     public uint ColorB = 0xFF406080;
 
+    /// <summary>
+    /// Color like the character: hair main color as the base, the highlight color on the
+    /// crests — read live at bake time (Glamourer included), like the animated hair colors.
+    /// </summary>
+    public bool UseCharacterColors = true;
+
     /// <summary> Shift both colors toward the character's current skin tone at bake time. </summary>
     public bool TintFromSkin;
 
@@ -200,6 +206,7 @@ public sealed class ProceduralSurfaceLayer : TextureLayer
         json["FeatureSizeCm"]   = FeatureSizeCm;
         json["ColorA"]          = ColorA;
         json["ColorB"]          = ColorB;
+        json["UseCharacterColors"] = UseCharacterColors;
         json["TintFromSkin"]    = TintFromSkin;
         json["Opacity"]         = Opacity;
         json["Contrast"]        = Contrast;
@@ -235,6 +242,7 @@ public sealed class ProceduralSurfaceLayer : TextureLayer
             FeatureSizeCm   = json["FeatureSizeCm"]?.ToObject<float>() ?? 2f,
             ColorA          = json["ColorA"]?.ToObject<uint>() ?? 0xFF303030,
             ColorB          = json["ColorB"]?.ToObject<uint>() ?? 0xFF406080,
+            UseCharacterColors = json["UseCharacterColors"]?.ToObject<bool>() ?? true,
             TintFromSkin    = json["TintFromSkin"]?.ToObject<bool>() ?? false,
             Opacity         = json["Opacity"]?.ToObject<float>() ?? 1f,
             Contrast        = json["Contrast"]?.ToObject<float>() ?? 0.5f,

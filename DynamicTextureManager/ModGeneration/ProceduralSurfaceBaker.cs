@@ -27,12 +27,12 @@ public static class ProceduralSurfaceBaker
     /// instead of its colors.
     /// </param>
     public static void Bake(Image<Rgba32> target, MaterialMesh mesh, ProceduralSurfaceLayer layer,
-        TextureSlot? effectSlot = null, Vector3? skinTone = null)
+        TextureSlot? effectSlot = null, CharacterColors characterColors = default)
     {
         if (layer.Opacity <= 0f)
             return;
 
-        var generated = GetOrGenerate(mesh, layer, target.Width, target.Height, skinTone);
+        var generated = GetOrGenerate(mesh, layer, target.Width, target.Height, characterColors);
         if (generated == null)
             return;
 
@@ -77,12 +77,15 @@ public static class ProceduralSurfaceBaker
     private static long _cacheSeq;
 
     private static GeneratedFields? GetOrGenerate(MaterialMesh mesh, ProceduralSurfaceLayer layer,
-        int width, int height, Vector3? skinTone)
+        int width, int height, CharacterColors characterColors)
     {
-        var tone = layer.TintFromSkin && skinTone.HasValue
-            ? $"{skinTone.Value.X:F3},{skinTone.Value.Y:F3},{skinTone.Value.Z:F3}"
+        static string Tone(Vector3? v)
+            => v is { } t ? FormattableString.Invariant($"{t.X:F3},{t.Y:F3},{t.Z:F3}") : "-";
+
+        var tones = layer.TintFromSkin || layer.UseCharacterColors
+            ? $"{Tone(characterColors.Skin)}|{Tone(characterColors.HairMain)}|{Tone(characterColors.HairHighlight)}"
             : "none";
-        var key   = $"{layer.ContentHash()}|{width}x{height}|{tone}";
+        var key   = $"{layer.ContentHash()}|{width}x{height}|{tones}";
         var table = Cache.GetOrCreateValue(mesh);
 
         lock (table)
@@ -94,7 +97,7 @@ public static class ProceduralSurfaceBaker
             }
         }
 
-        var fields = Generate(mesh, layer, width, height, skinTone);
+        var fields = Generate(mesh, layer, width, height, characterColors);
         if (fields == null)
             return null;
 
@@ -351,7 +354,7 @@ public static class ProceduralSurfaceBaker
     // ------------------------------------------------------------------ stage B: generators
 
     private static GeneratedFields? Generate(MaterialMesh mesh, ProceduralSurfaceLayer layer,
-        int width, int height, Vector3? skinTone)
+        int width, int height, CharacterColors characterColors)
     {
         var surface = RasterizeFields(width, height, mesh, layer);
         if (surface == null)
@@ -368,7 +371,17 @@ public static class ProceduralSurfaceBaker
 
         var colorA = Unpack(layer.ColorA);
         var colorB = Unpack(layer.ColorB);
-        if (layer.TintFromSkin && skinTone is { } tone)
+        if (layer.UseCharacterColors)
+        {
+            // Fur/patterns color like the character's hair: main color as the base, the
+            // highlight color on the crests — the same pair the game shades hair with.
+            if (characterColors.HairMain is { } main)
+                colorA = main;
+            if (characterColors.HairHighlight is { } highlight)
+                colorB = highlight;
+        }
+
+        if (layer.TintFromSkin && characterColors.Skin is { } tone)
         {
             colorA = Vector3.Lerp(colorA, tone, 0.5f);
             colorB = Vector3.Lerp(colorB, tone, 0.5f);
@@ -399,6 +412,10 @@ public static class ProceduralSurfaceBaker
                 result.Coverage[index] = (byte)Math.Clamp((int)MathF.Round(coverage * surface.Weight[index] * 255f), 0, 255);
                 result.Height[index]   = (ushort)Math.Clamp((int)MathF.Round(heightV * 65535f), 0, 65535);
                 var albedo = Vector3.Lerp(colorA, colorB, albedoT);
+                // Fur runs a value ramp on top: dark roots rising to full color at the
+                // crests — light hair colors keep their depth instead of washing out.
+                if (layer.Kind == SurfaceGeneratorKind.Fur)
+                    albedo *= 0.45f + 0.55f * heightV;
                 result.Albedo[index] = (uint)(ToByte(albedo.X) | (ToByte(albedo.Y) << 8) | (ToByte(albedo.Z) << 16));
             }
         });
@@ -548,7 +565,12 @@ public static class ProceduralSurfaceBaker
             height  = Math.Clamp(height + fleck * gate * 0.15f, 0f, 1f);
         }
 
-        return (height, albedoT, 1f);
+        // The skin stays visible in the deepest clump separations — fur grows FROM the
+        // skin, it doesn't wallpaper over it. Cubed so only the crease floors open up.
+        var gap      = 1f - separation;
+        var coverage = 1f - gap * gap * gap * 0.5f;
+
+        return (height, albedoT, coverage);
     }
 
     private static float ApplyContrast(float v, float contrast)
@@ -579,12 +601,14 @@ public static class ProceduralSurfaceBaker
                         continue;
 
                     var packed = generated.Albedo[index];
-                    var shade  = 1f - cavity * (1f - generated.Height[index] / 65535f);
+                    // The crevice shade darkens AFTER the blend so skin peeking through the
+                    // pattern's gaps sits in the pattern's shadow instead of glowing through.
+                    var shade = 1f - cavity * (1f - generated.Height[index] / 65535f) * alpha;
 
                     ref var pixel = ref row[x];
-                    pixel.R = LerpByte(pixel.R, (byte)Math.Clamp((int)MathF.Round((packed & 0xFF) * shade), 0, 255), alpha);
-                    pixel.G = LerpByte(pixel.G, (byte)Math.Clamp((int)MathF.Round(((packed >> 8) & 0xFF) * shade), 0, 255), alpha);
-                    pixel.B = LerpByte(pixel.B, (byte)Math.Clamp((int)MathF.Round(((packed >> 16) & 0xFF) * shade), 0, 255), alpha);
+                    pixel.R = ShadedBlend(pixel.R, packed & 0xFF, alpha, shade);
+                    pixel.G = ShadedBlend(pixel.G, (packed >> 8) & 0xFF, alpha, shade);
+                    pixel.B = ShadedBlend(pixel.B, (packed >> 16) & 0xFF, alpha, shade);
                 }
             }
         });
@@ -719,6 +743,9 @@ public static class ProceduralSurfaceBaker
 
     private static byte ToByte(float v)
         => (byte)Math.Clamp((int)MathF.Round(v * 255f), 0, 255);
+
+    private static byte ShadedBlend(byte baseValue, uint layerValue, float alpha, float shade)
+        => (byte)Math.Clamp((int)MathF.Round((baseValue + ((float)layerValue - baseValue) * alpha) * shade), 0, 255);
 
     private static byte LerpByte(byte from, byte to, float t)
         => (byte)Math.Clamp((int)Math.Round(from + (to - from) * t), 0, 255);
