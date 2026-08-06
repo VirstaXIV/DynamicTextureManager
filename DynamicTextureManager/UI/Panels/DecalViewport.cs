@@ -100,6 +100,11 @@ public sealed class DecalViewport(ITextureProvider textureProvider) : IDisposabl
     private Vector3?                _paintLastDab;
     private Vector3?                _paintCursor;
 
+    // Per-session undo/redo: every completed action (one brush stroke, one line click)
+    // records where its dabs start; undo moves them onto the redo stack and back.
+    private readonly List<int>            _paintActionStarts = [];
+    private readonly List<CoverageDab[]>  _paintRedo         = [];
+
     private ViewportShading? _shading;
     private bool             _highlightDecal;
 
@@ -214,6 +219,8 @@ public sealed class DecalViewport(ITextureProvider textureProvider) : IDisposabl
         _paintStrokeStart = -1;
         _paintLastDab     = null;
         _paintLineLast    = null;
+        _paintActionStarts.Clear();
+        _paintRedo.Clear();
         _onChanged        = onChanged;
         _renderDirty      = true;
     }
@@ -403,8 +410,9 @@ public sealed class DecalViewport(ITextureProvider textureProvider) : IDisposabl
         else if (_paintLayer != null)
             DrawPaintControls(_paintLayer);
 
-        var avail = Im.ContentRegion.Available;
-        var size  = MathF.Max(200f, MathF.Min(avail.X, avail.Y));
+        var avail        = Im.ContentRegion.Available;
+        var toolbarWidth = _paintLayer != null ? 34f * Im.Style.GlobalScale : 0f;
+        var size         = MathF.Max(200f, MathF.Min(avail.X - toolbarWidth, avail.Y));
 
         // Camera interaction degrades gracefully instead of re-rasterizing 768² every frame
         // (which tanked game fps): while orbiting/panning/zooming, render at reduced
@@ -433,6 +441,12 @@ public sealed class DecalViewport(ITextureProvider textureProvider) : IDisposabl
             // Animate the effect WITHOUT re-rasterizing: only the scrolling emissive is
             // re-composited over the cached base render.
             PresentFrame();
+        }
+
+        if (_paintLayer != null)
+        {
+            DrawPaintToolbar(size);
+            Im.Line.Same();
         }
 
         var start = Im.Cursor.ScreenPosition;
@@ -682,11 +696,9 @@ public sealed class DecalViewport(ITextureProvider textureProvider) : IDisposabl
         Im.Tooltip.OnHover("Finish placing this decal and return the preview to view mode."u8);
     }
 
+    /// <summary> The compact slider row above the canvas — the tools live in the side toolbar. </summary>
     private void DrawPaintControls(ProceduralSurfaceLayer layer)
     {
-        if (PaintDabs is not { } dabs)
-            return;
-
         Im.Item.SetNextWidthScaled(130);
         var radiusCm = _paintRadius * 100f;
         if (Im.Slider("Brush (cm)"u8, ref radiusCm, "%.1f"u8, 1f, 30f))
@@ -700,44 +712,79 @@ public sealed class DecalViewport(ITextureProvider textureProvider) : IDisposabl
         Im.Tooltip.OnHover(_paintChannel == PaintChannel.Markings
             ? "Full strength places the highlight color solidly; lower tints."u8
             : "Full strength removes the pattern entirely; lower thins it."u8);
+    }
 
-        Im.Line.Same();
-        if (Im.Checkbox("Line"u8, ref _paintLine))
-            _paintLineLast = null;
-        Im.Tooltip.OnHover("Click points instead of brushing — each click continues a stripe along the body from the previous point."u8);
+    private static readonly ImSharp.Rgba32 ToolActiveColor = new(0xFF885522u);
 
-        Im.Line.Same();
-        if (Im.Checkbox(_paintChannel == PaintChannel.Markings ? "Eraser"u8 : "Regrow"u8, ref _paintRestore))
-            _renderDirty = true;
-        Im.Tooltip.OnHover(_paintChannel == PaintChannel.Markings
-            ? "Brush painted markings away again."u8
-            : "Brush the pattern back in where it was removed."u8);
+    /// <summary>
+    /// The editor-style tool column beside the canvas: brush/line tools, the inverse brush,
+    /// undo/redo of whole actions (a stroke, a line point), clear and done — icons stack
+    /// vertically so nothing hides off the row in a narrow window.
+    /// </summary>
+    private void DrawPaintToolbar(float height)
+    {
+        if (PaintDabs is not { } dabs)
+            return;
 
-        Im.Line.Same();
-        if (Im.SmallButton("Undo Stroke"u8)
-         && _paintStrokeStart >= 0 && _paintStrokeStart <= dabs.Count)
+        using var child = Im.Child.Begin("##paintTools"u8, new Vector2(30f * Im.Style.GlobalScale, height), false);
+        if (!child)
+            return;
+
+        bool Tool(Dalamud.Interface.FontAwesomeIcon icon, bool active, ReadOnlySpan<byte> tooltip)
         {
-            dabs.RemoveRange(_paintStrokeStart, dabs.Count - _paintStrokeStart);
-            _paintStrokeStart = -1;
-            _paintLineLast    = null;
-            MarkEdited();
+            bool clicked;
+            using (ImGuiColor.Button.Push(ToolActiveColor, active))
+                clicked = ImEx.Icon.Button((AwesomeIcon)icon, tooltip);
+            return clicked;
         }
 
-        Im.Line.Same();
-        if (Im.SmallButton("Clear"u8) && Im.Io.KeyControl && dabs.Count > 0)
+        if (Tool(Dalamud.Interface.FontAwesomeIcon.PaintBrush, !_paintLine, "Brush: drag over the model to paint."u8) && _paintLine)
+        {
+            _paintLine     = false;
+            _paintLineLast = null;
+        }
+
+        if (Tool(Dalamud.Interface.FontAwesomeIcon.Route, _paintLine,
+                "Line: click points — the stroke follows the body between them, like a drawing guide."u8) && !_paintLine)
+        {
+            _paintLine     = true;
+            _paintLineLast = null;
+        }
+
+        if (Tool(Dalamud.Interface.FontAwesomeIcon.Eraser, _paintRestore, _paintChannel == PaintChannel.Markings
+                ? "Eraser: brush painted markings away."u8
+                : "Regrow: brush the pattern back in."u8))
+            _paintRestore = !_paintRestore;
+
+        Im.Separator();
+
+        using (Im.Disabled(_paintActionStarts.Count == 0))
+        {
+            if (ImEx.Icon.Button((AwesomeIcon)Dalamud.Interface.FontAwesomeIcon.Undo, "Undo the last stroke or line point."u8))
+                UndoPaint(dabs);
+        }
+
+        using (Im.Disabled(_paintRedo.Count == 0))
+        {
+            if (ImEx.Icon.Button((AwesomeIcon)Dalamud.Interface.FontAwesomeIcon.Redo, "Redo."u8))
+                RedoPaint(dabs);
+        }
+
+        if (ImEx.Icon.Button((AwesomeIcon)Dalamud.Interface.FontAwesomeIcon.Trash,
+                "Hold Control and click to remove everything painted on this channel."u8)
+         && Im.Io.KeyControl && dabs.Count > 0)
         {
             dabs.Clear();
-            _paintStrokeStart = -1;
-            _paintLineLast    = null;
+            _paintActionStarts.Clear();
+            _paintRedo.Clear();
+            _paintLineLast = null;
             MarkEdited();
         }
 
-        Im.Tooltip.OnHover("Hold Control and click to remove everything painted on this channel."u8);
+        Im.Separator();
 
-        Im.Line.Same();
-        if (Im.SmallButton("Done"u8))
+        if (ImEx.Icon.Button((AwesomeIcon)Dalamud.Interface.FontAwesomeIcon.Check, "Done painting."u8))
             EndPlacement();
-        Im.Tooltip.OnHover("Finish painting and return the preview to view mode."u8);
     }
 
     private void DrawFlowPlacementControls()
@@ -889,7 +936,7 @@ public sealed class DecalViewport(ITextureProvider textureProvider) : IDisposabl
             if (!onCanvas || !Im.Mouse.IsClicked(MouseButton.Left) || _paintCursor is not { } point)
                 return;
 
-            _paintStrokeStart = dabs.Count;
+            var lineStart = dabs.Count;
             if (_paintLineLast is { } previous && _mesh != null)
             {
                 var path = SurfaceFlowField.GeodesicPath(_mesh, previous, point);
@@ -901,13 +948,18 @@ public sealed class DecalViewport(ITextureProvider textureProvider) : IDisposabl
             }
 
             _paintLineLast = point;
+            CompleteAction(lineStart);
             MarkEdited();
             return;
         }
 
         if (!Im.Mouse.IsDown(MouseButton.Left))
         {
-            _paintLastDab = null;
+            // Stroke ended — it becomes one undoable action.
+            if (_paintLastDab != null && _paintStrokeStart >= 0 && _paintStrokeStart < dabs.Count)
+                CompleteAction(_paintStrokeStart);
+            _paintLastDab     = null;
+            _paintStrokeStart = -1;
             return;
         }
 
@@ -923,6 +975,47 @@ public sealed class DecalViewport(ITextureProvider textureProvider) : IDisposabl
         _paintLastDab = hit;
         MarkEdited();
     }
+
+    private void CompleteAction(int startIndex)
+    {
+        _paintActionStarts.Add(startIndex);
+        _paintRedo.Clear();
+    }
+
+    private void UndoPaint(List<CoverageDab> dabs)
+    {
+        if (_paintActionStarts.Count == 0)
+            return;
+
+        var start = _paintActionStarts[^1];
+        _paintActionStarts.RemoveAt(_paintActionStarts.Count - 1);
+        if (start < 0 || start > dabs.Count)
+            return;
+
+        _paintRedo.Add(dabs.GetRange(start, dabs.Count - start).ToArray());
+        dabs.RemoveRange(start, dabs.Count - start);
+        SyncLineToLastDab(dabs);
+        MarkEdited();
+    }
+
+    private void RedoPaint(List<CoverageDab> dabs)
+    {
+        if (_paintRedo.Count == 0)
+            return;
+
+        var action = _paintRedo[^1];
+        _paintRedo.RemoveAt(_paintRedo.Count - 1);
+        _paintActionStarts.Add(dabs.Count);
+        dabs.AddRange(action);
+        SyncLineToLastDab(dabs);
+        MarkEdited();
+    }
+
+    /// <summary> After undo/redo the line tool continues from wherever the stroke now ends. </summary>
+    private void SyncLineToLastDab(List<CoverageDab> dabs)
+        => _paintLineLast = _paintLine && dabs.Count > 0
+            ? new Vector3(dabs[^1].X, dabs[^1].Y, dabs[^1].Z)
+            : null;
 
     private void AddDab(List<CoverageDab> dabs, Vector3 at)
         => dabs.Add(new CoverageDab
