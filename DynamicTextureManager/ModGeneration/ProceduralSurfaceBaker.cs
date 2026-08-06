@@ -172,6 +172,9 @@ public static class ProceduralSurfaceBaker
 
         /// <summary> Painted markings mask (0 = base color, 1 = highlight), when the style is Painted. </summary>
         public float[]? MarkingPaint;
+
+        /// <summary> Per-texel flow direction — scales squash their volumetric cells along it. </summary>
+        public Vector3[]? FlowDir;
     }
 
     /// <summary>
@@ -191,15 +194,13 @@ public static class ProceduralSurfaceBaker
         var flow    = (SurfaceFlowField.VertexFlow?)null;
         var natural = SurfaceFlowField.BodyFlow(mesh);
         var region  = ComputeRegionWeights(mesh, layer);
-        var directional = layer.Kind is SurfaceGeneratorKind.Fur or SurfaceGeneratorKind.Scales;
-
-        // Small companion canvases (the face) skip charts entirely and live in the shared
-        // world frame — near the body axis that frame IS a good flow chart, and it makes
-        // them match the body at the junction by construction. The seam machinery applies
-        // to EVERY kind: the flow potential (stripe bands, tabby markings) must also agree
-        // where canvases meet.
+        // Only FUR needs charts — scales moved to volumetric world-space cells (chart
+        // cross-fading ghosts cellular patterns into smeared ridges, and chart distortion
+        // stretched the plates). Small companion canvases (the face) skip charts and live
+        // in the shared world frame. The seam machinery applies to EVERY kind: the flow
+        // potential (stripe bands, tabby markings) must agree where canvases meet.
         var worldOnly = MeshExtent(mesh) < 0.35f;
-        var charts    = directional && !worldOnly ? SurfaceFlowField.ComputeCharts(mesh, flow, []) : null;
+        var charts    = layer.Kind == SurfaceGeneratorKind.Fur && !worldOnly ? SurfaceFlowField.ComputeCharts(mesh, flow, []) : null;
         var boundary  = worldOnly ? null : SurfaceFlowField.BoundaryDistance(mesh);
         var painted   = layer.Markings == FurMarkingStyle.Painted ? ComputePaintMask(mesh, layer.MarkingDabs) : null;
         var fields = new SurfaceFields
@@ -220,6 +221,7 @@ public static class ProceduralSurfaceBaker
             OffsetC        = new float[texels],
             SeamBlend      = new float[texels],
             MarkingPaint   = painted != null ? new float[texels] : null,
+            FlowDir        = layer.Kind == SurfaceGeneratorKind.Scales ? new Vector3[texels] : null,
         };
 
         var indices = mesh.Indices;
@@ -386,6 +388,12 @@ public static class ProceduralSurfaceBaker
                     if (painted != null)
                         fields.MarkingPaint![index] = painted[i0] * w0 + painted[i1] * w1 + painted[i2] * w2;
 
+                    if (fields.FlowDir != null)
+                    {
+                        var f = natural.Direction[i0] * w0 + natural.Direction[i1] * w1 + natural.Direction[i2] * w2;
+                        fields.FlowDir[index] = f.LengthSquared() > 1e-8f ? Vector3.Normalize(f) : Vector3.UnitY;
+                    }
+
                     // The potential (stripe/tabby banding coordinate) fades to plain world
                     // descent at seams — both canvases band identically where they meet.
                     var meshPotential = flow != null && (flow.HasFlow[i0] || flow.HasFlow[i1] || flow.HasFlow[i2])
@@ -513,15 +521,18 @@ public static class ProceduralSurfaceBaker
                 if (!surface.Covered[index])
                     continue;
 
-                // Directional generators run in the texel's two nearest surface charts and
-                // cross-fade, so chart boundaries blur instead of showing a hard seam.
+                // Fur runs in the texel's nearest surface charts and cross-fades, so chart
+                // boundaries blur instead of showing a hard seam. (Scales are volumetric —
+                // cross-fading cellular patterns ghosts the plates.)
                 (float, float, float) Directional(Vector2 coord, float offset)
-                    => layer.Kind == SurfaceGeneratorKind.Scales
-                        ? EvaluateScales(layer, coord, offset, k)
-                        : EvaluateFur(layer, coord, offset, k);
+                    => EvaluateFur(layer, coord, offset, k);
 
                 (float Height, float AlbedoT, float Coverage) sample;
-                if (layer.Kind is SurfaceGeneratorKind.Fur or SurfaceGeneratorKind.Scales)
+                if (layer.Kind == SurfaceGeneratorKind.Scales)
+                {
+                    sample = EvaluateScales(layer, surface.Position[index], surface.FlowDir![index], k);
+                }
+                else if (layer.Kind == SurfaceGeneratorKind.Fur)
                 {
                     static (float, float, float) Mix((float, float, float) a, (float, float, float) b, float t)
                         => (a.Item1 + (b.Item1 - a.Item1) * t,
@@ -719,20 +730,21 @@ public static class ProceduralSurfaceBaker
     }
 
     /// <summary>
-    /// Scale plates: cellular noise in a flow-aligned anisotropic frame — cells stretch along
-    /// the flow by the elongation factor, so plates lie like they grew with the body. Valid
-    /// because plate size is far below the body's curvature radius; the projection's slow
-    /// frame drift over large distances is invisible at centimeter features. Each plate is a
-    /// beveled plateau (height from the distance to the cell border) with its own color.
+    /// Scale plates: VOLUMETRIC cellular noise on the world position — seamless across UV
+    /// islands and canvases by construction, plates never stretch. Elongation squashes the
+    /// lookup domain along the local flow so cells grow oval with the body; the flow varies
+    /// slowly at plate scale, so the squash stays coherent. Each plate is a beveled plateau
+    /// (height from the distance to the cell border) with its own color.
     /// </summary>
     private static (float Height, float AlbedoT, float Coverage) EvaluateScales(
-        ProceduralSurfaceLayer layer, Vector2 coord, float offset, float k)
+        ProceduralSurfaceLayer layer, Vector3 pos, Vector3 flowDir, float k)
     {
-        var q = new Vector2(
-            coord.X * k + offset,
-            coord.Y * k / MathF.Max(0.25f, layer.ScaleElongation) + offset);
+        var q = pos * k;
+        var elongation = MathF.Max(0.25f, layer.ScaleElongation);
+        if (MathF.Abs(elongation - 1f) > 0.01f && flowDir.LengthSquared() > 1e-8f)
+            q += flowDir * (Vector3.Dot(q, flowDir) * (1f / elongation - 1f));
 
-        var w      = ProceduralFields.Worley(layer.Seed, q);
+        var w      = ProceduralFields.Worley3(layer.Seed, q);
         var bevel  = MathF.Max(0.02f, layer.BevelWidth);
         var height = ProceduralFields.Smooth(0f, bevel, w.EdgeDist);
 
