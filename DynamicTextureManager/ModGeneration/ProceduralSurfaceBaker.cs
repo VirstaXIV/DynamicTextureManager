@@ -169,10 +169,11 @@ public static class ProceduralSurfaceBaker
     /// </summary>
     private static SurfaceFields? RasterizeFields(int width, int height, MaterialMesh mesh, ProceduralSurfaceLayer layer)
     {
-        var texels = width * height;
-        var flow   = SurfaceFlowField.ComputeVertexFlow(mesh, layer.Anchors);
-        var region = ComputeRegionWeights(mesh, layer);
-        var charts = layer.Kind is SurfaceGeneratorKind.Fur or SurfaceGeneratorKind.Scales
+        var texels  = width * height;
+        var flow    = SurfaceFlowField.ComputeVertexFlow(mesh, layer.Anchors);
+        var natural = SurfaceFlowField.BodyFlow(mesh);
+        var region  = ComputeRegionWeights(mesh, layer);
+        var charts  = layer.Kind is SurfaceGeneratorKind.Fur or SurfaceGeneratorKind.Scales
             ? SurfaceFlowField.ComputeCharts(mesh, flow, layer.Anchors)
             : null;
         var fields = new SurfaceFields
@@ -319,7 +320,7 @@ public static class ProceduralSurfaceBaker
 
                     fields.FlowPotential[index] = flow != null && (flow.HasFlow[i0] || flow.HasFlow[i1] || flow.HasFlow[i2])
                         ? flow.Potential[i0] * w0 + flow.Potential[i1] * w1 + flow.Potential[i2] * w2
-                        : fields.Position[index].Y;
+                        : natural.Potential[i0] * w0 + natural.Potential[i1] * w1 + natural.Potential[i2] * w2;
 
                     any = true;
                 }
@@ -330,15 +331,14 @@ public static class ProceduralSurfaceBaker
     }
 
     /// <summary>
-    /// Per-vertex body-part weights from the merged canvas's model units (chest/legs/hands/
-    /// feet sliders), averaged onto position-welded vertices and Jacobi-smoothed over the
-    /// sorted adjacency so unit seams (wrists, waist, ankles) fade instead of cutting.
-    /// Null when every weight is 1 — the common case pays nothing.
+    /// Per-vertex coverage weights: the painted brush dabs, applied in stroke order — erase
+    /// dabs take the max fade, restore dabs peel it back — each with a smooth falloff band
+    /// around its radius so the thinning transition has room. The face companion canvas is
+    /// its own mesh and takes the face slider uniformly instead (the brush paints the body
+    /// viewport). Null when nothing reduces coverage — the common case pays nothing.
     /// </summary>
     private static float[]? ComputeRegionWeights(MaterialMesh mesh, ProceduralSurfaceLayer layer)
     {
-        // The face companion canvas is its own mesh, not a body unit — it takes the face
-        // weight uniformly and ignores the body-part sliders.
         if (mesh.GamePath.Contains("/obj/face/", StringComparison.OrdinalIgnoreCase))
         {
             if (layer.WeightFace >= 1f)
@@ -349,78 +349,43 @@ public static class ProceduralSurfaceBaker
             return uniform;
         }
 
-        if (layer is { WeightChest: 1f, WeightLegs: 1f, WeightHands: 1f, WeightFeet: 1f })
+        if (layer.MaskDabs.Count == 0)
             return null;
 
         var count = mesh.VertexCount;
-        var (canonical, neighbors) = mesh.GetOrBuildAdjacency();
-
-        var sum = new float[count];
-        var hit = new int[count];
-        for (var t = 0; t < mesh.TriangleCount; ++t)
+        var erase = new float[count];
+        foreach (var dab in layer.MaskDabs)
         {
-            var w = Math.Clamp(layer.UnitWeight(mesh.TriangleUnit[t]), 0f, 1f);
-            for (var k = 0; k < 3; ++k)
-            {
-                var c = canonical[mesh.Indices[t * 3 + k]];
-                sum[c] += w;
-                hit[c] += 1;
-            }
-        }
+            var center   = new Vector3(dab.X, dab.Y, dab.Z);
+            var radius   = MathF.Max(0.005f, dab.Radius);
+            var outer    = radius * 1.4f;
+            var outer2   = outer * outer;
+            var inner    = radius * 0.6f;
+            var strength = Math.Clamp(dab.Strength, 0f, 1f);
 
-        var weights = new float[count];
-        for (var v = 0; v < count; ++v)
-            weights[v] = hit[v] > 0 ? sum[v] / hit[v] : 1f;
-
-        // Feather: plain Jacobi averaging over the welded graph — deterministic with the
-        // sorted neighbor lists, and each iteration widens the transition by roughly one edge.
-        var iterations = (int)MathF.Round(Math.Clamp(layer.RegionFeather, 0f, 1f) * 20f);
-        for (var i = 0; i < iterations; ++i)
-        {
-            var next = new float[count];
             for (var v = 0; v < count; ++v)
             {
-                if (canonical[v] != v)
+                var d2 = (mesh.Positions[v] - center).LengthSquared();
+                if (d2 > outer2)
                     continue;
 
-                var total = weights[v];
-                var n     = 1;
-                foreach (var nb in neighbors[v])
-                {
-                    total += weights[nb];
-                    ++n;
-                }
+                var falloff = strength * (1f - ProceduralFields.Smooth(inner, outer, MathF.Sqrt(d2)));
+                if (falloff <= 0f)
+                    continue;
 
-                next[v] = total / n;
+                erase[v] = dab.Restore ? erase[v] * (1f - falloff) : MathF.Max(erase[v], falloff);
             }
-
-            weights = next;
         }
 
+        var any    = false;
         var result = new float[count];
         for (var v = 0; v < count; ++v)
-            result[v] = weights[canonical[v]];
-
-        return result;
-    }
-
-    /// <summary>
-    /// Flow direction without guide anchors: straight down the body (gravity), projected onto
-    /// the surface. Near-horizontal surfaces (shoulder tops) fall back to forward instead.
-    /// </summary>
-    private static Vector3 DefaultFlow(Vector3 normal)
-    {
-        var down = -Vector3.UnitY;
-        var flow = down - normal * Vector3.Dot(down, normal);
-        if (flow.LengthSquared() < 1e-4f)
         {
-            var forward = Vector3.UnitZ;
-            flow = forward - normal * Vector3.Dot(forward, normal);
-            if (flow.LengthSquared() < 1e-8f)
-                return Vector3.UnitZ;
+            result[v] = 1f - erase[v];
+            any      |= erase[v] > 0f;
         }
 
-        return Vector3.Normalize(flow);
+        return any ? result : null;
     }
 
     // ------------------------------------------------------------------ stage B: generators
@@ -505,7 +470,9 @@ public static class ProceduralSurfaceBaker
                 // Region weights and exclusion fades THIN the pattern instead of ghosting
                 // it: the fading weight becomes a survival threshold against the pattern's
                 // own height, so strands break into sparser, shorter tufts toward bare skin
-                // — a transition zone, not a translucent overlay.
+                // — a transition zone, not a translucent overlay. The threshold outruns the
+                // tallest crest quickly (nothing survives below half weight), so stray
+                // patches never linger deep inside a cleared area.
                 var w = surface.Weight[index];
                 if (w <= 0.001f)
                 {
@@ -513,9 +480,9 @@ public static class ProceduralSurfaceBaker
                 }
                 else if (w < 0.999f)
                 {
-                    var cut = (1f - w) * 1.15f;
-                    coverage *= ProceduralFields.Smooth(cut, cut + 0.25f, heightV);
-                    heightV  *= 0.6f + 0.4f * w;
+                    var cut = (1f - w) * 2.2f;
+                    coverage *= ProceduralFields.Smooth(cut, cut + 0.2f, heightV);
+                    heightV  *= 0.5f + 0.5f * w;
                 }
 
                 result.Coverage[index] = (byte)Math.Clamp((int)MathF.Round(coverage * 255f), 0, 255);

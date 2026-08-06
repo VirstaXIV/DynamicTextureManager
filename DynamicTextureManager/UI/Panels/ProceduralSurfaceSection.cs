@@ -112,21 +112,15 @@ public sealed class ProceduralSurfaceSection
             changed |= DrawSliderClamped("Shading"u8, ref layer.CavityAmount, 0f, 1f);
             Im.Tooltip.OnHover("Darkens the crevices of the pattern."u8);
             changed |= DrawSliderClamped("Relief"u8, ref layer.HeightStrength, 0f, 1f);
-            Im.Tooltip.OnHover("Bakes the pattern's depth into the normal map so light catches it. Only visible in-game."u8);
+            Im.Tooltip.OnHover("Bakes the pattern's depth into the normal map so light catches it."u8);
             changed |= DrawSliderClamped("Roughness"u8, ref layer.RoughnessAmount, -1f, 1f);
             Im.Tooltip.OnHover("Shifts the surface finish — negative is glossier, positive more matte. Only visible in-game."u8);
-        }
 
-        if (bodyRegions && Im.Tree.Header("Coverage"u8))
-        {
-            using var indent = Im.Indent();
-            changed |= DrawSliderClamped("Face"u8, ref layer.WeightFace, 0f, 1f);
-            changed |= DrawSliderClamped("Chest"u8, ref layer.WeightChest, 0f, 1f);
-            changed |= DrawSliderClamped("Legs"u8, ref layer.WeightLegs, 0f, 1f);
-            changed |= DrawSliderClamped("Hands"u8, ref layer.WeightHands, 0f, 1f);
-            changed |= DrawSliderClamped("Feet"u8, ref layer.WeightFeet, 0f, 1f);
-            changed |= DrawSliderClamped("Blend"u8, ref layer.RegionFeather, 0f, 1f);
-            Im.Tooltip.OnHover("Softens the transitions at wrists, waist and ankles."u8);
+            if (bodyRegions)
+            {
+                changed |= DrawSliderClamped("Face Coverage"u8, ref layer.WeightFace, 0f, 1f);
+                Im.Tooltip.OnHover("The face is its own canvas — this fades its pattern; the brush paints the body."u8);
+            }
         }
 
         return changed;
