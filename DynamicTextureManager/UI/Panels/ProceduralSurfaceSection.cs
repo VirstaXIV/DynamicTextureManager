@@ -148,7 +148,7 @@ public sealed class ProceduralSurfaceSection
     }
 
     private static readonly FurMarkingStyle[] MarkingStyles =
-        [FurMarkingStyle.None, FurMarkingStyle.Stripes, FurMarkingStyle.Spots, FurMarkingStyle.Marbling, FurMarkingStyle.Painted];
+        [FurMarkingStyle.None, FurMarkingStyle.Stripes, FurMarkingStyle.Spots, FurMarkingStyle.Marbling, FurMarkingStyle.Custom, FurMarkingStyle.Painted];
 
     private static string MarkingLabel(FurMarkingStyle style)
         => style switch
@@ -156,6 +156,7 @@ public sealed class ProceduralSurfaceSection
             FurMarkingStyle.Stripes  => "Stripes (Tabby)",
             FurMarkingStyle.Spots    => "Spots",
             FurMarkingStyle.Marbling => "Marbling",
+            FurMarkingStyle.Custom   => "Custom Image",
             FurMarkingStyle.Painted  => "Painted",
             _                        => "None",
         };
@@ -178,7 +179,7 @@ public sealed class ProceduralSurfaceSection
                 }
         }
 
-        Im.Tooltip.OnHover("Markings in the highlight color — tabby stripes wrapping the body, spots, marbling, or your own painted design (Paint Markings below)."u8);
+        Im.Tooltip.OnHover("Markings in the highlight color — tabby stripes wrapping the body, spots, marbling, a custom image from the library, or your own painted design (Paint Markings below)."u8);
         return changed;
     }
 

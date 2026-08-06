@@ -888,6 +888,9 @@ public sealed class DecalsTab(
         if (_procSection.Draw(proc, bodyRegions))
             Save(dTexture);
 
+        if (proc.Markings == FurMarkingStyle.Custom)
+            DrawMarkingPatternPicker(dTexture, proc);
+
         var activeChannel = _viewport.ActivePaintChannel(proc);
 
         var erasing = activeChannel == DecalViewport.PaintChannel.Coverage;
@@ -924,6 +927,48 @@ public sealed class DecalsTab(
         Im.Line.Same();
         if (Im.SmallButton("Down"u8) && idx < count - 1)
             swap = (idx, idx + 1);
+    }
+
+    /// <summary> Library pattern selection for Custom markings: combo, manage button and a small preview. </summary>
+    private void DrawMarkingPatternPicker(DTexture dTexture, ProceduralSurfaceLayer proc)
+    {
+        var comboLabel = decals.GetPattern(proc.MarkingPatternId)?.Name
+         ?? (proc.MarkingPatternId == Guid.Empty ? "(choose a pattern)" : "(missing pattern)");
+        Im.Item.SetNextWidthScaled(220);
+        using (var combo = Im.Combo.Begin("Pattern"u8, comboLabel))
+        {
+            if (combo)
+            {
+                if (decals.Patterns.Count == 0)
+                    Im.Text("No patterns in the library yet."u8);
+
+                foreach (var (idx, pattern) in decals.Patterns.Index())
+                {
+                    using var id     = Im.Id.Push(idx);
+                    var       active = proc.MarkingPatternId == pattern.Id;
+                    if (!Im.Selectable(pattern.Name, active) || active)
+                        continue;
+
+                    proc.MarkingPatternId = pattern.Id;
+                    Save(dTexture);
+                }
+            }
+        }
+
+        Im.Tooltip.OnHover("The image used as the markings — bright areas take the highlight color.\nIt wraps around the body; Marking Size sets the tile size."u8);
+
+        Im.Line.Same();
+        if (Im.SmallButton("Manage Patterns..."u8))
+            decalLibraryWindow.OpenPatterns();
+
+        Im.Tooltip.OnHover("Import and manage marking patterns in the Resource Library."u8);
+
+        if (proc.MarkingPatternId == Guid.Empty || decals.GetPattern(proc.MarkingPatternId) == null)
+            return;
+
+        var wrap = textureProvider.GetFromFile(decals.PatternFilePath(proc.MarkingPatternId)).GetWrapOrDefault();
+        if (wrap != null)
+            Im.Image.Draw(wrap.Id, new Vector2(96, 96) * Im.Style.GlobalScale);
     }
 
     /// <summary>

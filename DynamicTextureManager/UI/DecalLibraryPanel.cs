@@ -463,4 +463,89 @@ public sealed class DecalLibraryPanel(DecalLibrary decals, ITextureProvider text
     }
 
     #endregion
+
+    #region Marking patterns
+
+    private Guid   _selectedPattern = Guid.Empty;
+    private string _patternRename   = string.Empty;
+
+    /// <summary>
+    /// The marking-pattern side of the resource library: imported tileable images used as
+    /// custom markings on fur, scales and skin patterns — stored with the decals and
+    /// deletable here.
+    /// </summary>
+    public void DrawPatterns()
+    {
+        _fileDialog.Draw();
+
+        if (Im.Button("Import Pattern..."u8))
+            _fileDialog.OpenFileDialog("Import Marking Pattern", "Images{.png,.jpg,.jpeg,.dds,.bmp,.tga}", (success, path) =>
+            {
+                if (!success)
+                    return;
+
+                var imported = decals.ImportPattern(path);
+                if (imported != null)
+                    _selectedPattern = imported.Id;
+            });
+        Im.Tooltip.OnHover(
+            "Import an image as a marking pattern for fur, scales and skin patterns.\nBright areas take the highlight color; the image should tile cleanly in both directions."u8);
+
+        Im.Separator();
+        if (decals.Patterns.Count == 0)
+        {
+            Im.Text("No patterns imported yet."u8);
+            return;
+        }
+
+        var cell = 72f * Im.Style.GlobalScale;
+        foreach (var (pattern, idx) in decals.Patterns.Select((p, i) => (p, i)))
+        {
+            using var id    = Im.Id.Push(idx);
+            using var group = Im.Group();
+            var wrap     = textureProvider.GetFromFile(decals.PatternFilePath(pattern.Id)).GetWrapOrDefault();
+            var selected = pattern.Id == _selectedPattern;
+            using (ImGuiColor.Button.Push(new Rgba32(0xFF885522u), selected))
+            {
+                var clicked = wrap != null
+                    ? Im.Image.Button(wrap.Id, new Vector2(cell))
+                    : Im.Button("?"u8, new Vector2(cell));
+                if (clicked)
+                {
+                    _selectedPattern = pattern.Id;
+                    _patternRename   = pattern.Name;
+                }
+            }
+
+            var label = pattern.Name.Length > 12 ? pattern.Name[..11] + "…" : pattern.Name;
+            Im.Text(label);
+            group.Dispose();
+            Im.Tooltip.OnHover(HoveredFlags.None,
+                $"{pattern.Name}\nImported {pattern.CreatedDate.ToLocalTime():yyyy-MM-dd} from {pattern.OriginalFile}\nClick to select.");
+            Im.Line.Same();
+        }
+
+        Im.Line.New();
+        if (_selectedPattern == Guid.Empty || decals.GetPattern(_selectedPattern) is not { } selectedEntry)
+            return;
+
+        Im.Separator();
+        Im.Item.SetNextWidthScaled(250);
+        Im.Input.Text("##patternRename"u8, ref _patternRename);
+        Im.Line.Same();
+        if (Im.SmallButton("Rename"u8) && _patternRename.Trim().Length > 0)
+            decals.RenamePattern(selectedEntry.Id, _patternRename.Trim());
+
+        Im.Line.Same();
+        if (Im.SmallButton("Delete"u8) && Im.Io.KeyControl)
+        {
+            decals.DeletePattern(selectedEntry.Id);
+            _selectedPattern = Guid.Empty;
+        }
+
+        Im.Tooltip.OnHover(
+            "Hold Control and click to delete this pattern from the library.\nBuilt mods keep working — they bake the pattern in — but layers referencing it lose their markings on the next build."u8);
+    }
+
+    #endregion
 }

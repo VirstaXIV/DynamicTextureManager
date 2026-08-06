@@ -8,9 +8,10 @@ namespace DynamicTextureManager.UI;
 
 /// <summary>
 /// Standalone window around <see cref="DecalLibraryPanel"/> — the resource library: decal
-/// images plus imported effect patterns, both stored and managed in one place. Normally
-/// opened from the main window's title bar; the Decals tab opens it as a picker, where
-/// clicking a decal (or importing a new one) hands it back to the tab and closes the window.
+/// images plus imported effect and marking patterns, all stored and managed in one place.
+/// Normally opened from the main window's title bar; the Decals tab opens it as a picker,
+/// where clicking a decal (or importing a new one) hands it back to the tab and closes the
+/// window.
 /// </summary>
 public class DecalLibraryWindow : Window
 {
@@ -49,6 +50,17 @@ public class DecalLibraryWindow : Window
         BringToFront();
     }
 
+    private bool _focusPatterns;
+
+    /// <summary> Open the library on the Marking Patterns tab (manage mode). </summary>
+    public void OpenPatterns()
+    {
+        _onPick        = null;
+        _focusPatterns = true;
+        IsOpen         = true;
+        BringToFront();
+    }
+
     public override void Draw()
     {
         // The shared ImSharp context attaches on a framework tick after service
@@ -58,8 +70,10 @@ public class DecalLibraryWindow : Window
 
         if (_onPick == null)
         {
-            var focusEffects = _focusEffects;
-            _focusEffects = false;
+            var focusEffects  = _focusEffects;
+            var focusPatterns = _focusPatterns;
+            _focusEffects  = false;
+            _focusPatterns = false;
             using var tabs = Im.TabBar.Begin("##resourceTabs"u8);
             if (tabs)
             {
@@ -74,6 +88,13 @@ public class DecalLibraryWindow : Window
                 {
                     if (tab)
                         _panel.DrawEffects();
+                }
+
+                using (var tab = tabs.Item("Marking Patterns"u8,
+                           focusPatterns ? TabItemFlags.SetSelected : TabItemFlags.None))
+                {
+                    if (tab)
+                        _panel.DrawPatterns();
                 }
             }
 
