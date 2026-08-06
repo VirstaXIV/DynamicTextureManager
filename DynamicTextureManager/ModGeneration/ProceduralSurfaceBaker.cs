@@ -140,22 +140,35 @@ public static class ProceduralSurfaceBaker
 
         /// <summary>
         /// Flow-aligned flat coordinates in meters (X across the flow, Y along it) from the
-        /// texel's two nearest surface charts — geodesic unfoldings computed on the welded
+        /// texel's three nearest surface charts — geodesic unfoldings computed on the welded
         /// mesh, so they run CONTINUOUSLY across UV seams. Directional patterns evaluate in
-        /// both and cross-fade by <see cref="ChartBlend"/>, blurring chart boundaries
-        /// instead of cutting.
+        /// all contributing charts and cross-fade, blurring chart boundaries instead of
+        /// cutting; three keeps the pick-switch error down where two charts tie.
         /// </summary>
         public required Vector2[] FlowCoordA;
 
         public required Vector2[] FlowCoordB;
 
-        /// <summary> Second-chart share, 0 = chart A only. </summary>
-        public required float[] ChartBlend;
+        public required Vector2[] FlowCoordC;
 
-        /// <summary> Per-texel pattern offsets of the two charts, decorrelating them. </summary>
+        /// <summary> Normalized shares of charts B and C (A takes the rest). </summary>
+        public required float[] BlendB;
+
+        public required float[] BlendC;
+
+        /// <summary> Per-texel pattern offsets of the three charts, decorrelating them. </summary>
         public required float[] OffsetA;
 
         public required float[] OffsetB;
+
+        public required float[] OffsetC;
+
+        /// <summary>
+        /// 1 in the interior, falling to 0 at the mesh's open boundary — directional patterns
+        /// fade to a shared world frame there so separate canvases (body and face) meet with
+        /// the SAME pattern at their junction ring.
+        /// </summary>
+        public required float[] SeamBlend;
     }
 
     /// <summary>
@@ -173,9 +186,9 @@ public static class ProceduralSurfaceBaker
         var flow    = SurfaceFlowField.ComputeVertexFlow(mesh, layer.Anchors);
         var natural = SurfaceFlowField.BodyFlow(mesh);
         var region  = ComputeRegionWeights(mesh, layer);
-        var charts  = layer.Kind is SurfaceGeneratorKind.Fur or SurfaceGeneratorKind.Scales
-            ? SurfaceFlowField.ComputeCharts(mesh, flow, layer.Anchors)
-            : null;
+        var directional = layer.Kind is SurfaceGeneratorKind.Fur or SurfaceGeneratorKind.Scales;
+        var charts   = directional ? SurfaceFlowField.ComputeCharts(mesh, flow, layer.Anchors) : null;
+        var boundary = directional ? SurfaceFlowField.BoundaryDistance(mesh) : null;
         var fields = new SurfaceFields
         {
             Covered        = new bool[texels],
@@ -186,9 +199,13 @@ public static class ProceduralSurfaceBaker
             TexelsPerMeter = new float[texels],
             FlowCoordA     = new Vector2[texels],
             FlowCoordB     = new Vector2[texels],
-            ChartBlend     = new float[texels],
+            FlowCoordC     = new Vector2[texels],
+            BlendB         = new float[texels],
+            BlendC         = new float[texels],
             OffsetA        = new float[texels],
             OffsetB        = new float[texels],
+            OffsetC        = new float[texels],
+            SeamBlend      = new float[texels],
         };
 
         var indices = mesh.Indices;
@@ -224,15 +241,24 @@ public static class ProceduralSurfaceBaker
                 ? MathF.Sqrt(MathF.Abs(area) * 0.5f / worldArea)
                 : 0f;
 
-            // The triangle's two dominant charts by summed inverse-square seed distance,
-            // ties broken by chart index. Adjacent triangles picking a different pair only
-            // matters where the dropped chart's weight was tiny.
+            // The triangle's three dominant charts by summed inverse-square seed distance,
+            // ties broken by chart index. Three keeps the switch error small where two
+            // charts tie. A chart whose coordinates JUMP across this triangle is rejected —
+            // that is its cut locus (geodesic paths meeting around a limb), where its
+            // unfolding is discontinuous and would print a hard line.
             var chartA = 0;
             var chartB = 0;
+            var chartC = 0;
             if (charts != null)
             {
+                var maxEdge = MathF.Max((mesh.Positions[i1] - mesh.Positions[i0]).Length(),
+                    MathF.Max((mesh.Positions[i2] - mesh.Positions[i1]).Length(),
+                        (mesh.Positions[i0] - mesh.Positions[i2]).Length()));
+                var coherent = 4f * maxEdge + 0.02f;
+
                 var bestA = -1f;
                 var bestB = -1f;
+                var bestC = -1f;
                 for (var chart = 0; chart < charts.Count; ++chart)
                 {
                     var d0 = charts.Distance[chart][i0];
@@ -241,23 +267,58 @@ public static class ProceduralSurfaceBaker
                     if (d0 >= float.MaxValue || d1 >= float.MaxValue || d2 >= float.MaxValue)
                         continue;
 
+                    var l0 = charts.Local[chart][i0];
+                    var l1 = charts.Local[chart][i1];
+                    var l2 = charts.Local[chart][i2];
+                    if ((l1 - l0).Length() > coherent || (l2 - l1).Length() > coherent || (l0 - l2).Length() > coherent)
+                        continue;
+
                     var w = 1f / (d0 * d0 + 1e-4f) + 1f / (d1 * d1 + 1e-4f) + 1f / (d2 * d2 + 1e-4f);
                     if (w > bestA)
                     {
-                        bestB  = bestA;
-                        chartB = chartA;
-                        bestA  = w;
-                        chartA = chart;
+                        (bestC, chartC) = (bestB, chartB);
+                        (bestB, chartB) = (bestA, chartA);
+                        (bestA, chartA) = (w, chart);
                     }
                     else if (w > bestB)
                     {
-                        bestB  = w;
-                        chartB = chart;
+                        (bestC, chartC) = (bestB, chartB);
+                        (bestB, chartB) = (w, chart);
+                    }
+                    else if (w > bestC)
+                    {
+                        (bestC, chartC) = (w, chart);
                     }
                 }
 
-                if (bestB < 0f)
+                if (bestA < 0f)
+                {
+                    // Every chart is cut or unreached here (rare) — take the nearest
+                    // reached one anyway rather than sampling garbage from chart 0.
+                    var bestD = float.MaxValue;
+                    for (var chart = 0; chart < charts.Count; ++chart)
+                    {
+                        var d0 = charts.Distance[chart][i0];
+                        if (d0 >= float.MaxValue)
+                            continue;
+
+                        if (d0 < bestD)
+                        {
+                            bestD  = d0;
+                            chartA = chart;
+                        }
+                    }
+
                     chartB = chartA;
+                    chartC = chartA;
+                }
+                else
+                {
+                    if (bestB < 0f)
+                        chartB = chartA;
+                    if (bestC < 0f)
+                        chartC = chartB;
+                }
             }
 
             var minX = Math.Max(0, (int)MathF.Floor(MathF.Min(a.X, MathF.Min(b.X, c.X))));
@@ -301,23 +362,40 @@ public static class ProceduralSurfaceBaker
 
                     if (charts != null)
                     {
-                        var localA = charts.Local[chartA];
-                        var localB = charts.Local[chartB];
-                        fields.FlowCoordA[index] = localA[i0] * w0 + localA[i1] * w1 + localA[i2] * w2;
-                        fields.FlowCoordB[index] = localB[i0] * w0 + localB[i1] * w1 + localB[i2] * w2;
+                        float Interp(float[] plane)
+                            => plane[i0] * w0 + plane[i1] * w1 + plane[i2] * w2;
+
+                        Vector2 InterpV(Vector2[] plane)
+                            => plane[i0] * w0 + plane[i1] * w1 + plane[i2] * w2;
+
+                        fields.FlowCoordA[index] = InterpV(charts.Local[chartA]);
+                        fields.FlowCoordB[index] = InterpV(charts.Local[chartB]);
+                        fields.FlowCoordC[index] = InterpV(charts.Local[chartC]);
                         fields.OffsetA[index]    = charts.Offset[chartA];
                         fields.OffsetB[index]    = charts.Offset[chartB];
+                        fields.OffsetC[index]    = charts.Offset[chartC];
 
-                        if (chartA != chartB)
+                        var wa = 1f;
+                        var wb = 0f;
+                        var wc = 0f;
+                        if (chartB != chartA || chartC != chartA)
                         {
-                            var da = charts.Distance[chartA][i0] * w0 + charts.Distance[chartA][i1] * w1
-                              + charts.Distance[chartA][i2] * w2;
-                            var db = charts.Distance[chartB][i0] * w0 + charts.Distance[chartB][i1] * w1
-                              + charts.Distance[chartB][i2] * w2;
-                            var wa = 1f / (da * da + 1e-4f);
-                            var wb = 1f / (db * db + 1e-4f);
-                            fields.ChartBlend[index] = wb / (wa + wb);
+                            var da = Interp(charts.Distance[chartA]);
+                            var db = Interp(charts.Distance[chartB]);
+                            var dc = Interp(charts.Distance[chartC]);
+                            wa = 1f / (da * da + 1e-4f);
+                            wb = chartB != chartA ? 1f / (db * db + 1e-4f) : 0f;
+                            wc = chartC != chartA && chartC != chartB ? 1f / (dc * dc + 1e-4f) : 0f;
                         }
+
+                        var sum = wa + wb + wc;
+                        fields.BlendB[index] = wb / sum;
+                        fields.BlendC[index] = wc / sum;
+
+                        fields.SeamBlend[index] = boundary != null
+                            ? ProceduralFields.Smooth(0.015f, 0.055f,
+                                boundary[i0] * w0 + boundary[i1] * w1 + boundary[i2] * w2)
+                            : 1f;
                     }
 
                     fields.FlowPotential[index] = flow != null && (flow.HasFlow[i0] || flow.HasFlow[i1] || flow.HasFlow[i2])
@@ -449,15 +527,29 @@ public static class ProceduralSurfaceBaker
                 (float Height, float AlbedoT, float Coverage) sample;
                 if (layer.Kind is SurfaceGeneratorKind.Fur or SurfaceGeneratorKind.Scales)
                 {
+                    static (float, float, float) Mix((float, float, float) a, (float, float, float) b, float t)
+                        => (a.Item1 + (b.Item1 - a.Item1) * t,
+                            a.Item2 + (b.Item2 - a.Item2) * t,
+                            a.Item3 + (b.Item3 - a.Item3) * t);
+
+                    var blendB = surface.BlendB[index];
+                    var blendC = surface.BlendC[index];
                     sample = Directional(surface.FlowCoordA[index], surface.OffsetA[index]);
-                    var blend = surface.ChartBlend[index];
-                    if (blend > 0.004f)
+                    if (blendB > 0.004f)
+                        sample = Mix(sample, Directional(surface.FlowCoordB[index], surface.OffsetB[index]),
+                            blendB / MathF.Max(1e-4f, 1f - blendC));
+                    if (blendC > 0.004f)
+                        sample = Mix(sample, Directional(surface.FlowCoordC[index], surface.OffsetC[index]), blendC);
+
+                    // Near the mesh's open boundary the pattern fades into a shared world
+                    // frame — a cylinder around the body axis — so both canvases meeting
+                    // there (body and face at the neck ring) arrive at the SAME pattern.
+                    var seam = surface.SeamBlend[index];
+                    if (seam < 0.996f)
                     {
-                        var other = Directional(surface.FlowCoordB[index], surface.OffsetB[index]);
-                        sample = (
-                            sample.Item1 + (other.Item1 - sample.Item1) * blend,
-                            sample.Item2 + (other.Item2 - sample.Item2) * blend,
-                            sample.Item3 + (other.Item3 - sample.Item3) * blend);
+                        var pos = surface.Position[index];
+                        var worldCoord = new Vector2(MathF.Atan2(pos.X, pos.Z) * 0.1f, -pos.Y);
+                        sample = Mix(Directional(worldCoord, 0f), sample, seam);
                     }
                 }
                 else

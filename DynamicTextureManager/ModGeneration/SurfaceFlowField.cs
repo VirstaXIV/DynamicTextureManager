@@ -409,6 +409,93 @@ public static class SurfaceFlowField
         return Vector3.Normalize(down);
     }
 
+    // ------------------------------------------------------------------ mesh boundary distance
+
+    private static readonly System.Runtime.CompilerServices.ConditionalWeakTable<MaterialMesh, float[]> BoundaryCache = new();
+
+    /// <summary>
+    /// Per raw vertex: geodesic distance to the mesh's open boundary (edges used by exactly
+    /// one triangle — the neck ring of the body, the rim of the face). float.MaxValue when
+    /// the mesh has no boundary. Directional patterns fade to a shared world frame near it,
+    /// so two separate canvases meeting there (body and face at the neck) agree.
+    /// </summary>
+    public static float[] BoundaryDistance(MaterialMesh mesh)
+    {
+        if (BoundaryCache.TryGetValue(mesh, out var cached))
+            return cached;
+
+        var distance = ComputeBoundaryDistance(mesh);
+        BoundaryCache.AddOrUpdate(mesh, distance);
+        return distance;
+    }
+
+    private static float[] ComputeBoundaryDistance(MaterialMesh mesh)
+    {
+        var count = mesh.VertexCount;
+        var (canonical, neighbors) = mesh.GetOrBuildAdjacency();
+
+        var edgeUse = new Dictionary<(int A, int B), int>();
+        for (var i = 0; i + 2 < mesh.Indices.Length; i += 3)
+        {
+            var c0 = canonical[mesh.Indices[i]];
+            var c1 = canonical[mesh.Indices[i + 1]];
+            var c2 = canonical[mesh.Indices[i + 2]];
+            void Count(int a, int b)
+            {
+                if (a == b)
+                    return;
+                var key = (Math.Min(a, b), Math.Max(a, b));
+                edgeUse[key] = edgeUse.GetValueOrDefault(key) + 1;
+            }
+
+            Count(c0, c1);
+            Count(c1, c2);
+            Count(c2, c0);
+        }
+
+        var distance = new float[count];
+        Array.Fill(distance, float.MaxValue);
+        var queue = new PriorityQueue<int, (float Dist, int Vertex)>();
+        var seeds = new SortedSet<int>();
+        foreach (var ((a, b), uses) in edgeUse)
+        {
+            if (uses != 1)
+                continue;
+
+            seeds.Add(a);
+            seeds.Add(b);
+        }
+
+        foreach (var seed in seeds)
+        {
+            distance[seed] = 0f;
+            queue.Enqueue(seed, (0f, seed));
+        }
+
+        while (queue.TryDequeue(out var u, out var priority))
+        {
+            if (priority.Dist > distance[u])
+                continue;
+
+            var uPos = mesh.Positions[u];
+            foreach (var v in neighbors[u])
+            {
+                var d = priority.Dist + (mesh.Positions[v] - uPos).Length();
+                if (d >= distance[v])
+                    continue;
+
+                distance[v] = d;
+                queue.Enqueue(v, (d, v));
+            }
+        }
+
+        for (var v = 0; v < count; ++v)
+            if (canonical[v] != v)
+                distance[v] = distance[canonical[v]];
+
+        return distance;
+    }
+
     // ------------------------------------------------------------------ surface charts
 
     /// <summary>
