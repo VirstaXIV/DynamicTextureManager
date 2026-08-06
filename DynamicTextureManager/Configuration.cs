@@ -53,7 +53,14 @@ public class Configuration: IPluginConfiguration, ISavable
     public bool MaskInvertRoughness { get; set; } = false;
 
     public bool MaskWriteSpec { get; set; } = false;
-    
+
+    /// <summary> Flip the generated normal's green channel if relief renders inverted in-game. </summary>
+    public bool ProceduralNormalFlipG { get; set; } = false;
+
+    /// <summary> Also darken the mask's R (cavity/spec occlusion) in procedural crevices — off until verified. </summary>
+    public bool ProceduralMaskWriteCavity { get; set; } = false;
+
+
     [JsonConverter(typeof(SortModeConverter))]
     [JsonProperty(Order = int.MaxValue)]
     public ISortMode SortMode { get; set; } = ISortMode.FoldersFirst;

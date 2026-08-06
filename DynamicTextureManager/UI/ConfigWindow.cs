@@ -168,6 +168,20 @@ public class ConfigWindow : Window, IDisposable
                 _configuration.MaskWriteSpec = v;
                 FinishMapping.Sync(_configuration);
             });
+
+        Checkbox("Flip Procedural Normal G"u8, "Flip the generated relief's green channel if fur/scale bumps light from the wrong side in-game."u8,
+            _configuration.ProceduralNormalFlipG, v =>
+            {
+                _configuration.ProceduralNormalFlipG = v;
+                FinishMapping.Sync(_configuration);
+            });
+
+        Checkbox("Procedural Cavity to Mask R"u8, "Also darken the mask's R channel in procedural crevices (cavity/spec occlusion)."u8,
+            _configuration.ProceduralMaskWriteCavity, v =>
+            {
+                _configuration.ProceduralMaskWriteCavity = v;
+                FinishMapping.Sync(_configuration);
+            });
     }
 
     private void DrawOrphanedMods()

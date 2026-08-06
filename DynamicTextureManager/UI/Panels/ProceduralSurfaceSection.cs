@@ -79,6 +79,12 @@ public sealed class ProceduralSurfaceSection
         changed |= DrawSliderClamped("Shading"u8, ref layer.CavityAmount, 0f, 1f);
         Im.Tooltip.OnHover("Darkens the crevices of the pattern."u8);
 
+        changed |= DrawSliderClamped("Relief"u8, ref layer.HeightStrength, 0f, 1f);
+        Im.Tooltip.OnHover("Bakes the pattern's depth into the normal map so light catches it."u8);
+
+        changed |= DrawSliderClamped("Roughness"u8, ref layer.RoughnessAmount, -1f, 1f);
+        Im.Tooltip.OnHover("Shifts the surface finish — negative is glossier, positive more matte."u8);
+
         return changed;
     }
 
