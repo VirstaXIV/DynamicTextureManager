@@ -84,6 +84,29 @@ public static class ProceduralFields
     }
 
     /// <summary>
+    /// Ridged fractal noise in [0,1]: each octave folds the noise around its midpoint and
+    /// squares the result, turning smooth blobs into sharp crease lines — the primitive for
+    /// strand highlights and fibrous detail. Higher octaves add finer ridges.
+    /// </summary>
+    public static float Ridged3(int seed, Vector3 p, int octaves)
+    {
+        octaves = Math.Clamp(octaves, 1, 8);
+        var sum       = 0f;
+        var amplitude = 1f;
+        var total     = 0f;
+        for (var i = 0; i < octaves; ++i)
+        {
+            var ridge = 1f - MathF.Abs(2f * ValueNoise3(seed + i * 1013, p) - 1f);
+            sum       += ridge * ridge * amplitude;
+            total     += amplitude;
+            amplitude *= 0.5f;
+            p         *= 2f;
+        }
+
+        return sum / total;
+    }
+
+    /// <summary>
     /// Displace a sample position by three decorrelated fBm fields — the classic domain warp
     /// that turns blobby value noise into flowing organic shapes (marbling, dapple).
     /// </summary>

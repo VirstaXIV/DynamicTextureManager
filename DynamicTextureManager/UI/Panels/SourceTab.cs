@@ -410,8 +410,20 @@ public sealed class SourceTab(
             ret.Add(new ResolvedModelGroup("Body", bodyUnit));
         }
 
-        // Skin means the BODY, one unit — the face is its own category and stays out of this
-        // picker (like hair is just the hair).
+        // Face models keep their own model node in the tree — offer each narrowed to its
+        // skin materials (the face model also carries iris/brow/occlusion materials that
+        // cannot be painted here).
+        foreach (var group in groups)
+        {
+            if (group.Materials.Count == 0
+             || !group.Materials[0].MdlGamePath.Contains("/obj/face/", StringComparison.OrdinalIgnoreCase))
+                continue;
+
+            var faceMaterials = group.Materials.Where(m => SkinInfo(m).IsSkin && seen.Add(m.GamePath)).ToList();
+            if (faceMaterials.Count > 0)
+                ret.Add(new ResolvedModelGroup("Face", faceMaterials));
+        }
+
         return ret;
     }
 
