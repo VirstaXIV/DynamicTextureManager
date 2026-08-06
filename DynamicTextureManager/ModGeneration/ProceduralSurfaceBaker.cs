@@ -134,17 +134,34 @@ public static class ProceduralSurfaceBaker
         public required bool[]    Covered;
         public required Vector3[] Position;
         public required Vector3[] Normal;
-        public required Vector3[] Flow;
         public required float[]   FlowPotential;
         public required float[]   Weight;
         public required float[]   TexelsPerMeter;
+
+        /// <summary>
+        /// Flow-aligned flat coordinates in meters: X across the flow, Y along it, rigid per
+        /// UV island (one orientation each, from the island's average flow) — directional
+        /// patterns sample these like a flat cloth laid on the skin, so strands comb
+        /// coherently instead of swirling wherever a per-texel frame would rotate.
+        /// </summary>
+        public required Vector2[] FlowCoord;
+
+        /// <summary> Stable per-island offset decorrelating the pattern between islands. </summary>
+        public required float[] IslandOffset;
     }
 
+    private readonly record struct AcceptedTriangle(int I0, int I1, int I2, Vector2 A, Vector2 B, Vector2 C,
+        float Area, float TexelsPerMeter, int UvNode);
+
     /// <summary>
-    /// Rasterize every accepted triangle in texture space, interpolating world position,
-    /// normal and flow per texel. Where UV regions are shared by several triangles the sample
-    /// with the larger weight wins, tie-broken by triangle order — deterministic by
-    /// construction. Single-threaded on purpose: the overlap resolution depends on visit order.
+    /// Rasterize every accepted triangle in texture space in two passes. Pass 1 groups the
+    /// triangles into UV islands (union-find over shared UV corners) and averages each
+    /// island's texel-space flow direction and texel density — one rigid pattern frame per
+    /// island. Pass 2 interpolates world position/normal per texel and lays the flow-aligned
+    /// flat coordinates through the island frame. Where UV regions are shared by several
+    /// triangles the sample with the larger weight wins, tie-broken by triangle order —
+    /// deterministic by construction. Single-threaded on purpose: union-find and the overlap
+    /// resolution depend on visit order.
     /// </summary>
     private static SurfaceFields? RasterizeFields(int width, int height, MaterialMesh mesh, ProceduralSurfaceLayer layer)
     {
@@ -156,14 +173,52 @@ public static class ProceduralSurfaceBaker
             Covered        = new bool[texels],
             Position       = new Vector3[texels],
             Normal         = new Vector3[texels],
-            Flow           = new Vector3[texels],
             FlowPotential  = new float[texels],
             Weight         = new float[texels],
             TexelsPerMeter = new float[texels],
+            FlowCoord      = new Vector2[texels],
+            IslandOffset   = new float[texels],
         };
 
         var indices = mesh.Indices;
-        var any     = false;
+
+        // ---- pass 1: accept triangles, weld their UV corners into islands, and project each
+        // triangle's world flow into texel space for the island average.
+        var accepted = new List<AcceptedTriangle>();
+        var parent   = new List<int>();
+        var uvNodes  = new Dictionary<(int U, int V), int>();
+        var flowSum  = new Dictionary<int, (Vector2 Dir, float Density, float Weight, int MinTriangle)>();
+
+        int Find(int x)
+        {
+            while (parent[x] != x)
+            {
+                parent[x] = parent[parent[x]];
+                x         = parent[x];
+            }
+
+            return x;
+        }
+
+        void Union(int a, int b)
+        {
+            a = Find(a);
+            b = Find(b);
+            if (a != b)
+                parent[Math.Max(a, b)] = Math.Min(a, b);
+        }
+
+        int UvNode(Vector2 uv)
+        {
+            var key = ((int)MathF.Round(uv.X * 16384f), (int)MathF.Round(uv.Y * 16384f));
+            if (uvNodes.TryGetValue(key, out var node))
+                return node;
+
+            node = parent.Count;
+            parent.Add(node);
+            uvNodes[key] = node;
+            return node;
+        }
 
         for (var i = 0; i + 2 < indices.Length; i += 3)
         {
@@ -186,13 +241,86 @@ public static class ProceduralSurfaceBaker
                 continue;
 
             // Texel density of this triangle: how many texels one meter of surface covers,
-            // from the texel-area / world-area ratio. Uniform per triangle is plenty — it
-            // only scales relief gradients, not the pattern itself.
+            // from the texel-area / world-area ratio.
             var worldArea = Vector3.Cross(mesh.Positions[i1] - mesh.Positions[i0],
                 mesh.Positions[i2] - mesh.Positions[i0]).Length() * 0.5f;
             var texelsPerMeter = worldArea > 1e-12f
                 ? MathF.Sqrt(MathF.Abs(area) * 0.5f / worldArea)
                 : 0f;
+
+            var n0 = UvNode(mesh.Uvs[i0]);
+            var n1 = UvNode(mesh.Uvs[i1]);
+            var n2 = UvNode(mesh.Uvs[i2]);
+            Union(n0, n1);
+            Union(n1, n2);
+
+            accepted.Add(new AcceptedTriangle(i0, i1, i2, a, b, c, area, texelsPerMeter, n0));
+        }
+
+        if (accepted.Count == 0)
+            return null;
+
+        // Island flow: each triangle's averaged world flow solved into texel space through
+        // its UV derivatives (least squares — handles mirrored islands by flipping the
+        // across axis with the parametrization), accumulated area-weighted per island.
+        for (var listIndex = 0; listIndex < accepted.Count; ++listIndex)
+        {
+            var tri = accepted[listIndex];
+            var f   = TriangleFlow(mesh, flow, tri.I0, tri.I1, tri.I2);
+
+            var e1   = mesh.Positions[tri.I1] - mesh.Positions[tri.I0];
+            var e2   = mesh.Positions[tri.I2] - mesh.Positions[tri.I0];
+            var duv1 = tri.B - tri.A;
+            var duv2 = tri.C - tri.A;
+            var det  = Cross(duv1, duv2);
+            if (MathF.Abs(det) < 1e-9f)
+                continue;
+
+            var dPdu = (e1 * duv2.Y - e2 * duv1.Y) / det;
+            var dPdv = (e2 * duv1.X - e1 * duv2.X) / det;
+
+            var g11  = Vector3.Dot(dPdu, dPdu);
+            var g12  = Vector3.Dot(dPdu, dPdv);
+            var g22  = Vector3.Dot(dPdv, dPdv);
+            var detG = g11 * g22 - g12 * g12;
+            if (MathF.Abs(detG) < 1e-18f)
+                continue;
+
+            var fu  = (Vector3.Dot(f, dPdu) * g22 - Vector3.Dot(f, dPdv) * g12) / detG;
+            var fv  = (Vector3.Dot(f, dPdv) * g11 - Vector3.Dot(f, dPdu) * g12) / detG;
+            var dir = new Vector2(fu, fv);
+            if (dir.LengthSquared() < 1e-12f)
+                continue;
+
+            dir = Vector2.Normalize(dir);
+
+            var root   = Find(tri.UvNode);
+            var weight = MathF.Abs(tri.Area);
+            flowSum[root] = flowSum.TryGetValue(root, out var sum)
+                ? (sum.Dir + dir * weight, sum.Density + tri.TexelsPerMeter * weight, sum.Weight + weight,
+                    Math.Min(sum.MinTriangle, listIndex))
+                : (dir * weight, tri.TexelsPerMeter * weight, weight, listIndex);
+        }
+
+        var islands = new Dictionary<int, (Vector2 Along, Vector2 Across, float MetersPerTexel, float Offset)>();
+        foreach (var (root, sum) in flowSum)
+        {
+            var along = sum.Dir.LengthSquared() > 1e-8f ? Vector2.Normalize(sum.Dir) : new Vector2(0f, 1f);
+            var density = sum.Weight > 0f ? sum.Density / sum.Weight : 0f;
+            islands[root] = (along, new Vector2(-along.Y, along.X),
+                density > 0f ? 1f / density : 0f,
+                ProceduralFields.Hash01(7331, sum.MinTriangle, 0, 0) * 97f);
+        }
+
+        // ---- pass 2: rasterization.
+        var any = false;
+        foreach (var tri in accepted)
+        {
+            var (i0, i1, i2) = (tri.I0, tri.I1, tri.I2);
+            var (a, b, c)    = (tri.A, tri.B, tri.C);
+
+            var island = islands.GetValueOrDefault(Find(tri.UvNode),
+                (Along: new Vector2(0f, 1f), Across: new Vector2(-1f, 0f), MetersPerTexel: 0f, Offset: 0f));
 
             var minX = Math.Max(0, (int)MathF.Floor(MathF.Min(a.X, MathF.Min(b.X, c.X))));
             var maxX = Math.Min(width - 1, (int)MathF.Ceiling(MathF.Max(a.X, MathF.Max(b.X, c.X))));
@@ -201,7 +329,7 @@ public static class ProceduralSurfaceBaker
             if (minX > maxX || minY > maxY)
                 continue;
 
-            var invArea = 1f / area;
+            var invArea = 1f / tri.Area;
             for (var y = minY; y <= maxY; ++y)
             {
                 for (var x = minX; x <= maxX; ++x)
@@ -231,23 +359,15 @@ public static class ProceduralSurfaceBaker
                     var normal = mesh.Normals[i0] * w0 + mesh.Normals[i1] * w1 + mesh.Normals[i2] * w2;
                     normal = normal.LengthSquared() > 1e-8f ? Vector3.Normalize(normal) : Vector3.UnitY;
                     fields.Normal[index]         = normal;
-                    fields.TexelsPerMeter[index] = texelsPerMeter;
+                    fields.TexelsPerMeter[index] = tri.TexelsPerMeter;
 
-                    // Anchor-driven flow interpolates across the triangle and re-projects onto
-                    // the sampled normal; vertices no anchor reaches (and layers with no
-                    // anchors) flow down the body by default.
-                    if (flow != null && (flow.HasFlow[i0] || flow.HasFlow[i1] || flow.HasFlow[i2]))
-                    {
-                        var d = flow.Direction[i0] * w0 + flow.Direction[i1] * w1 + flow.Direction[i2] * w2;
-                        d -= normal * Vector3.Dot(d, normal);
-                        fields.Flow[index] = d.LengthSquared() > 1e-8f ? Vector3.Normalize(d) : DefaultFlow(normal);
-                        fields.FlowPotential[index] = flow.Potential[i0] * w0 + flow.Potential[i1] * w1 + flow.Potential[i2] * w2;
-                    }
-                    else
-                    {
-                        fields.Flow[index]          = DefaultFlow(normal);
-                        fields.FlowPotential[index] = fields.Position[index].Y;
-                    }
+                    fields.FlowCoord[index] = new Vector2(Vector2.Dot(p, island.Across), Vector2.Dot(p, island.Along))
+                      * island.MetersPerTexel;
+                    fields.IslandOffset[index] = island.Offset;
+
+                    fields.FlowPotential[index] = flow != null && (flow.HasFlow[i0] || flow.HasFlow[i1] || flow.HasFlow[i2])
+                        ? flow.Potential[i0] * w0 + flow.Potential[i1] * w1 + flow.Potential[i2] * w2
+                        : fields.Position[index].Y;
 
                     any = true;
                 }
@@ -255,6 +375,22 @@ public static class ProceduralSurfaceBaker
         }
 
         return any ? fields : null;
+    }
+
+    /// <summary> A triangle's averaged world-space flow: the anchor field where it reaches, down-the-body otherwise. </summary>
+    private static Vector3 TriangleFlow(MaterialMesh mesh, SurfaceFlowField.VertexFlow? flow, int i0, int i1, int i2)
+    {
+        Vector3 VertexFlow(int v)
+        {
+            if (flow != null && flow.HasFlow[v])
+                return flow.Direction[v];
+
+            var n = mesh.Normals[v].LengthSquared() > 1e-8f ? Vector3.Normalize(mesh.Normals[v]) : Vector3.UnitY;
+            return DefaultFlow(n);
+        }
+
+        var sum = VertexFlow(i0) + VertexFlow(i1) + VertexFlow(i2);
+        return sum.LengthSquared() > 1e-8f ? Vector3.Normalize(sum) : Vector3.UnitZ;
     }
 
     /// <summary>
@@ -485,14 +621,12 @@ public static class ProceduralSurfaceBaker
     private static (float Height, float AlbedoT, float Coverage) EvaluateScales(
         ProceduralSurfaceLayer layer, SurfaceFields surface, int index, float k)
     {
-        var pos = surface.Position[index];
-        var f   = surface.Flow[index];
-        var n   = surface.Normal[index];
-        var c   = Vector3.Cross(n, f);
+        var coord  = surface.FlowCoord[index];
+        var island = surface.IslandOffset[index];
 
         var q = new Vector2(
-            Vector3.Dot(pos, c) * k,
-            Vector3.Dot(pos, f) * k / MathF.Max(0.25f, layer.ScaleElongation));
+            coord.X * k + island,
+            coord.Y * k / MathF.Max(0.25f, layer.ScaleElongation) + island);
 
         var w      = ProceduralFields.Worley(layer.Seed, q);
         var bevel  = MathF.Max(0.02f, layer.BevelWidth);
@@ -515,36 +649,34 @@ public static class ProceduralSurfaceBaker
     private static (float Height, float AlbedoT, float Coverage) EvaluateFur(
         ProceduralSurfaceLayer layer, SurfaceFields surface, int index, float k)
     {
-        var pos = surface.Position[index];
-        var f   = surface.Flow[index];
-        var n   = surface.Normal[index];
-        var c   = Vector3.Cross(n, f);
+        var pos    = surface.Position[index];
+        var coord  = surface.FlowCoord[index];
+        var island = surface.IslandOffset[index];
 
-        var across = Vector3.Dot(pos, c) * k;
-        var along  = Vector3.Dot(pos, f) * k;
-        var depth  = Vector3.Dot(pos, n) * k;
+        var across = coord.X * k;
+        var along  = coord.Y * k;
 
         // Slow wave: clumps and strands swing together along their length.
         var wave = layer.Curl * 3f
-          * (ProceduralFields.Fbm3(layer.Seed + 909, new Vector3(across * 0.35f, along * 0.12f, depth * 0.35f), 2) - 0.5f);
+          * (ProceduralFields.Fbm3(layer.Seed + 909, new Vector3(across * 0.35f, along * 0.12f, island), 2) - 0.5f);
         var a = across + wave;
 
         // Clump layer: cells stretched hard along the flow, their lattice broken up by an
         // independent low-frequency warp (unwarped cells read as a diamond grid); the border
         // distance carves the darker separation between neighboring clumps.
-        var warpX = (ProceduralFields.Fbm3(layer.Seed + 71, new Vector3(across * 0.5f, along * 0.2f, depth), 2) - 0.5f) * 1.2f;
-        var warpY = (ProceduralFields.Fbm3(layer.Seed + 72, new Vector3(across * 0.5f, along * 0.2f, depth), 2) - 0.5f) * 0.6f;
-        var clump      = ProceduralFields.Worley(layer.Seed + 1717, new Vector2(a * 1.4f + warpX, along * 0.22f + warpY));
+        var warpX = (ProceduralFields.Fbm3(layer.Seed + 71, new Vector3(across * 0.5f, along * 0.2f, island), 2) - 0.5f) * 1.2f;
+        var warpY = (ProceduralFields.Fbm3(layer.Seed + 72, new Vector3(across * 0.5f, along * 0.2f, island), 2) - 0.5f) * 0.6f;
+        var clump      = ProceduralFields.Worley(layer.Seed + 1717, new Vector2(a * 1.4f + warpX + island, along * 0.22f + warpY + island));
         var separation = ProceduralFields.Smooth(0f, 0.5f, clump.EdgeDist);
         var clumpTone  = (clump.CellHash & 0xFFFFFF) / 16777215f;
 
         // Strand layer: sharp ridged lines at strand-aspect frequency, very elongated, the
-        // normal-offset axis decorrelating layered surfaces.
+        // island offset decorrelating separate UV pieces.
         var aspect = MathF.Max(1f, layer.StrandAspect);
         var strand = ProceduralFields.Ridged3(layer.Seed,
-            new Vector3(a * aspect, along * aspect * 0.06f, depth * 0.5f), 2);
+            new Vector3(a * aspect, along * aspect * 0.06f, island), 2);
         var fine = ProceduralFields.Ridged3(layer.Seed + 31,
-            new Vector3(a * aspect * 2.3f, along * aspect * 0.16f, depth * 0.5f), 2);
+            new Vector3(a * aspect * 2.3f, along * aspect * 0.16f, island), 2);
 
         // Strands carry the height, clump separation recesses it — floored so creases dim
         // rather than cut black holes.
