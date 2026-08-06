@@ -420,10 +420,11 @@ public static class SurfaceFlowField
     private static readonly System.Runtime.CompilerServices.ConditionalWeakTable<MaterialMesh, float[]> BoundaryCache = new();
 
     /// <summary>
-    /// Per raw vertex: geodesic distance to the mesh's open boundary (edges used by exactly
-    /// one triangle — the neck ring of the body, the rim of the face). float.MaxValue when
-    /// the mesh has no boundary. Directional patterns fade to a shared world frame near it,
-    /// so two separate canvases meeting there (body and face at the neck) agree.
+    /// Per raw vertex: geodesic distance to the mesh's TOP open boundary — the neck ring,
+    /// where another canvas (the face) attaches. float.MaxValue when there is none. Only
+    /// boundary edges near the mesh's highest point count: bodies carry many INTERNAL open
+    /// edges (unwelded part splits on the legs and elsewhere), and treating those as canvas
+    /// junctions once wrapped half the legs in the world-frame blend, smearing the bands.
     /// </summary>
     public static float[] BoundaryDistance(MaterialMesh mesh)
     {
@@ -459,6 +460,10 @@ public static class SurfaceFlowField
             Count(c2, c0);
         }
 
+        var maxY = float.MinValue;
+        foreach (var p in mesh.Positions)
+            maxY = MathF.Max(maxY, p.Y);
+
         var distance = new float[count];
         Array.Fill(distance, float.MaxValue);
         var queue = new PriorityQueue<int, (float Dist, int Vertex)>();
@@ -466,6 +471,9 @@ public static class SurfaceFlowField
         foreach (var ((a, b), uses) in edgeUse)
         {
             if (uses != 1)
+                continue;
+
+            if (mesh.Positions[a].Y < maxY - 0.15f || mesh.Positions[b].Y < maxY - 0.15f)
                 continue;
 
             seeds.Add(a);
