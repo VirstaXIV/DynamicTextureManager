@@ -888,14 +888,32 @@ public sealed class DecalsTab(
         if (_procSection.Draw(proc, bodyRegions))
             Save(dTexture);
 
-        var painting = _viewport.IsPaintingFor(proc);
-        if (Im.SmallButton(painting ? "Painting..."u8 : "Paint Coverage"u8) && !painting)
-            _viewport.BeginCoveragePaint(proc, () => Save(dTexture));
-        Im.Tooltip.OnHover("Brush over the 3D preview to thin the pattern away where you don't want it — it tapers into bare skin. The Restore brush paints it back."u8);
-        if (proc.MaskDabs.Count > 0)
+        var activeChannel = _viewport.ActivePaintChannel(proc);
+
+        var erasing = activeChannel == DecalViewport.PaintChannel.Coverage;
+        if (Im.SmallButton(erasing ? "Erasing..."u8 : "Erase Areas"u8) && !erasing)
+            _viewport.BeginCoveragePaint(proc, DecalViewport.PaintChannel.Coverage, () => Save(dTexture));
+        Im.Tooltip.OnHover("Brush (or click Line points) over the 3D preview to remove the pattern where you don't want it — it tapers into bare skin."u8);
+
+        Im.Line.Same();
+        var marking = activeChannel == DecalViewport.PaintChannel.Markings;
+        if (Im.SmallButton(marking ? "Marking..."u8 : "Paint Markings"u8) && !marking)
+        {
+            if (proc.Markings != FurMarkingStyle.Painted)
+            {
+                proc.Markings = FurMarkingStyle.Painted;
+                Save(dTexture);
+            }
+
+            _viewport.BeginCoveragePaint(proc, DecalViewport.PaintChannel.Markings, () => Save(dTexture));
+        }
+
+        Im.Tooltip.OnHover("Paint the highlight color onto the coat — brush freely, or use Line to click a stripe along the back. Switches Markings to Painted."u8);
+
+        if (proc.MaskDabs.Count > 0 || proc.MarkingDabs.Count > 0)
         {
             Im.Line.Same();
-            Im.Text($"({proc.MaskDabs.Count} dabs)");
+            Im.Text($"({proc.MaskDabs.Count} erase, {proc.MarkingDabs.Count} marking dabs)");
         }
 
         if (Im.SmallButton("Remove"u8))
