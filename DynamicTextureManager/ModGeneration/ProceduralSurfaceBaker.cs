@@ -505,15 +505,70 @@ public static class ProceduralSurfaceBaker
                 result.Coverage[index] = (byte)Math.Clamp((int)MathF.Round(coverage * surface.Weight[index] * 255f), 0, 255);
                 result.Height[index]   = (ushort)Math.Clamp((int)MathF.Round(heightV * 65535f), 0, 65535);
                 var albedo = Vector3.Lerp(colorA, colorB, albedoT);
-                // Fur runs a value ramp on top: dark roots rising to full color at the
-                // crests — light hair colors keep their depth instead of washing out.
+                // Fur runs a value ramp on top: darker roots rising past full color at the
+                // crests, centered so the typical coat tone stays the base color.
                 if (layer.Kind == SurfaceGeneratorKind.Fur)
-                    albedo *= 0.45f + 0.55f * heightV;
+                    albedo *= 0.55f + 0.65f * heightV;
                 result.Albedo[index] = (uint)(ToByte(albedo.X) | (ToByte(albedo.Y) << 8) | (ToByte(albedo.Z) << 16));
             }
         });
 
+        Dilate(result, surface.Covered, width, height);
         return result;
+    }
+
+    /// <summary>
+    /// Pad the bake outward into the unbaked gutter between UV islands: texels no triangle
+    /// covers copy their nearest baked neighbor for a few rings. Without this, bilinear and
+    /// mip sampling at an island's edge mixes in raw gutter texels — a one-pixel line of
+    /// bare skin along every UV seam. Gated on the rasterizer's own coverage so legitimate
+    /// zero-coverage texels INSIDE the canvas (the skin between spots) are never inflated.
+    /// </summary>
+    private static void Dilate(GeneratedFields fields, bool[] covered, int width, int height)
+    {
+        const int rings = 4;
+
+        covered = (bool[])covered.Clone();
+        var added = new List<(int Index, int From)>();
+        for (var ring = 0; ring < rings; ++ring)
+        {
+            added.Clear();
+            for (var y = 0; y < height; ++y)
+            {
+                var row = y * width;
+                for (var x = 0; x < width; ++x)
+                {
+                    var index = row + x;
+                    if (covered[index])
+                        continue;
+
+                    var from = -1;
+                    if (x > 0 && covered[index - 1])
+                        from = index - 1;
+                    else if (x + 1 < width && covered[index + 1])
+                        from = index + 1;
+                    else if (y > 0 && covered[index - width])
+                        from = index - width;
+                    else if (y + 1 < height && covered[index + width])
+                        from = index + width;
+
+                    if (from >= 0)
+                        added.Add((index, from));
+                }
+            }
+
+            if (added.Count == 0)
+                break;
+
+            foreach (var (index, from) in added)
+            {
+                covered[index]               = true;
+                fields.Coverage[index]       = fields.Coverage[from];
+                fields.Height[index]         = fields.Height[from];
+                fields.Albedo[index]         = fields.Albedo[from];
+                fields.TexelsPerMeter[index] = fields.TexelsPerMeter[from];
+            }
+        }
     }
 
     /// <summary>
@@ -632,9 +687,10 @@ public static class ProceduralSurfaceBaker
         // rather than cut black holes.
         var height = Math.Clamp((0.3f + 0.7f * separation) * (0.25f + 0.55f * strand + 0.2f * fine), 0f, 1f);
 
-        // Only strand crests take the tip color: sharpen so thin bright lines emerge from
-        // the dark base, per-clump tone jitter feeding the shared variation slider.
-        var tip     = strand * strand * (0.6f + 0.4f * fine) * (0.25f + 0.75f * separation);
+        // The coat stays the base (hair main) color; only true strand crests cross into the
+        // highlight color, thresholded like a hair sheen band. Per-clump tone jitter feeds
+        // the shared variation slider.
+        var tip     = ProceduralFields.Smooth(0.45f, 0.85f, strand) * (0.5f + 0.5f * fine) * (0.25f + 0.75f * separation);
         var albedoT = Math.Clamp(tip + (clumpTone - 0.5f) * 2f * layer.ColorVariation * 0.35f, 0f, 1f);
 
         // Sparse brighter flecks, elongated along the flow — stray hairs catching the light.
@@ -708,8 +764,9 @@ public static class ProceduralSurfaceBaker
     private static void ComposeNormal(Image<Rgba32> target, GeneratedFields generated, ProceduralSurfaceLayer layer)
     {
         // Relief amplitude in meters at full strength: a fraction of the feature size, so
-        // 2 cm scales read ~3 mm deep while fine fur stays subtle.
-        var amplitude = Math.Clamp(layer.HeightStrength, 0f, 1f) * (layer.FeatureSizeCm / 100f) * 0.15f;
+        // 2 cm scales read ~1 cm deep at maximum while fine fur stays subtler. BC7 and the
+        // shader both soften the result — authored deliberately hot.
+        var amplitude = Math.Clamp(layer.HeightStrength, 0f, 1f) * (layer.FeatureSizeCm / 100f) * 0.4f;
         if (amplitude <= 0f)
             return;
 
