@@ -316,6 +316,32 @@ public sealed class DecalLibrary : IService
         }
     }
 
+    /// <summary> Import a generated in-memory image (e.g. an example pattern) as a marking pattern. </summary>
+    public PatternEntry? ImportGeneratedPattern(Image<SixLabors.ImageSharp.PixelFormats.Rgba32> image, string name)
+    {
+        try
+        {
+            var id = Guid.NewGuid();
+            Directory.CreateDirectory(StorageDirectory);
+            image.SaveAsPng(PatternFilePath(id));
+
+            var entry = new PatternEntry
+            {
+                Id          = id,
+                Name        = name,
+                CreatedDate = DateTimeOffset.UtcNow,
+            };
+            _patterns.Add(entry);
+            Save();
+            return entry;
+        }
+        catch (Exception ex)
+        {
+            DynamicTextureManager.Log.Error($"Could not import generated marking pattern \"{name}\":\n{ex}");
+            return null;
+        }
+    }
+
     public void RenamePattern(Guid id, string newName)
     {
         if (GetPattern(id) is not { } entry)
