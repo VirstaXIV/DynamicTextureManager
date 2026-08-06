@@ -191,15 +191,16 @@ public static class ProceduralSurfaceBaker
         var flow    = (SurfaceFlowField.VertexFlow?)null;
         var natural = SurfaceFlowField.BodyFlow(mesh);
         var region  = ComputeRegionWeights(mesh, layer);
-        var directional = layer.Kind is SurfaceGeneratorKind.Fur or SurfaceGeneratorKind.Scales;
-
         // Small companion canvases (the face) skip charts entirely and live in the shared
         // world frame — near the body axis that frame IS a good flow chart, and it makes
         // them match the body at the junction by construction. The seam machinery applies
         // to EVERY kind: the flow potential (stripe bands, tabby markings) must agree
-        // where canvases meet.
+        // where canvases meet. Charts suit only NOISE patterns (fur); cellular scales use
+        // one RIGID frame per UV island instead — uniform cells with no interior
+        // transitions at all, their only seams the texture's own island borders.
         var worldOnly = MeshExtent(mesh) < 0.35f;
-        var charts    = directional && !worldOnly ? SurfaceFlowField.ComputeCharts(mesh, flow, []) : null;
+        var charts    = layer.Kind == SurfaceGeneratorKind.Fur && !worldOnly ? SurfaceFlowField.ComputeCharts(mesh, flow, []) : null;
+        var islands   = layer.Kind == SurfaceGeneratorKind.Scales && !worldOnly ? ComputeIslandFrames(mesh, natural, width, height) : null;
         var boundary  = worldOnly ? null : SurfaceFlowField.BoundaryDistance(mesh);
         var painted   = layer.Markings == FurMarkingStyle.Painted ? ComputePaintMask(mesh, layer.MarkingDabs) : null;
         var fields = new SurfaceFields
@@ -358,6 +359,17 @@ public static class ProceduralSurfaceBaker
                             : 1f;
                     fields.SeamBlend[index] = seam;
 
+                    if (islands != null)
+                    {
+                        var frame = islands[triangle];
+                        if (frame.MetersPerTexel > 0f)
+                        {
+                            fields.FlowCoordA[index] = new Vector2(Vector2.Dot(p, frame.Across), Vector2.Dot(p, frame.Along))
+                              * frame.MetersPerTexel;
+                            fields.OffsetA[index] = frame.Offset;
+                        }
+                    }
+
                     if (charts != null)
                     {
                         Vector2 InterpV(Vector2[] plane)
@@ -400,6 +412,143 @@ public static class ProceduralSurfaceBaker
         }
 
         return any ? fields : null;
+    }
+
+    private readonly record struct IslandFrame(Vector2 Along, Vector2 Across, float MetersPerTexel, float Offset);
+
+    /// <summary>
+    /// One rigid pattern frame per UV island for cellular patterns: triangles weld into
+    /// islands over shared UV corners, and each island averages its texel-space flow
+    /// direction (world flow solved through the UV derivatives — mirrored islands flip
+    /// with the parametrization) and texel density. Indexed per triangle; entries with
+    /// zero MetersPerTexel are unusable (degenerate islands).
+    /// </summary>
+    private static IslandFrame[] ComputeIslandFrames(MaterialMesh mesh, SurfaceFlowField.NaturalFlow natural,
+        int width, int height)
+    {
+        var indices = mesh.Indices;
+        var frames  = new IslandFrame[mesh.TriangleCount];
+
+        var parent  = new List<int>();
+        var uvNodes = new Dictionary<(int U, int V), int>();
+        var triNode = new int[mesh.TriangleCount];
+        Array.Fill(triNode, -1);
+
+        int Find(int x)
+        {
+            while (parent[x] != x)
+            {
+                parent[x] = parent[parent[x]];
+                x         = parent[x];
+            }
+
+            return x;
+        }
+
+        void Union(int a, int b)
+        {
+            a = Find(a);
+            b = Find(b);
+            if (a != b)
+                parent[Math.Max(a, b)] = Math.Min(a, b);
+        }
+
+        int UvNode(Vector2 uv)
+        {
+            var key = ((int)MathF.Round(uv.X * 16384f), (int)MathF.Round(uv.Y * 16384f));
+            if (uvNodes.TryGetValue(key, out var node))
+                return node;
+
+            node = parent.Count;
+            parent.Add(node);
+            uvNodes[key] = node;
+            return node;
+        }
+
+        // Pass 1: weld islands and accumulate each triangle's texel-space flow.
+        var flowSum = new Dictionary<int, (Vector2 Dir, float Density, float Weight, int MinTriangle)>();
+        for (var i = 0; i + 2 < indices.Length; i += 3)
+        {
+            var triangle = i / 3;
+            if (!mesh.TriangleEditable[triangle])
+                continue;
+
+            var i0 = indices[i];
+            var i1 = indices[i + 1];
+            var i2 = indices[i + 2];
+
+            var a = new Vector2(mesh.Uvs[i0].X * width, mesh.Uvs[i0].Y * height);
+            var b = new Vector2(mesh.Uvs[i1].X * width, mesh.Uvs[i1].Y * height);
+            var c = new Vector2(mesh.Uvs[i2].X * width, mesh.Uvs[i2].Y * height);
+
+            var area = Cross(b - a, c - a);
+            if (MathF.Abs(area) < 1e-6f)
+                continue;
+
+            var n0 = UvNode(mesh.Uvs[i0]);
+            Union(n0, UvNode(mesh.Uvs[i1]));
+            Union(n0, UvNode(mesh.Uvs[i2]));
+            triNode[triangle] = n0;
+
+            var worldArea = Vector3.Cross(mesh.Positions[i1] - mesh.Positions[i0],
+                mesh.Positions[i2] - mesh.Positions[i0]).Length() * 0.5f;
+            var texelsPerMeter = worldArea > 1e-12f ? MathF.Sqrt(MathF.Abs(area) * 0.5f / worldArea) : 0f;
+
+            var f = natural.Direction[i0] + natural.Direction[i1] + natural.Direction[i2];
+            if (f.LengthSquared() < 1e-8f)
+                continue;
+
+            f = Vector3.Normalize(f);
+
+            var e1   = mesh.Positions[i1] - mesh.Positions[i0];
+            var e2   = mesh.Positions[i2] - mesh.Positions[i0];
+            var duv1 = b - a;
+            var duv2 = c - a;
+            var det  = Cross(duv1, duv2);
+            if (MathF.Abs(det) < 1e-9f)
+                continue;
+
+            var dPdu = (e1 * duv2.Y - e2 * duv1.Y) / det;
+            var dPdv = (e2 * duv1.X - e1 * duv2.X) / det;
+            var g11  = Vector3.Dot(dPdu, dPdu);
+            var g12  = Vector3.Dot(dPdu, dPdv);
+            var g22  = Vector3.Dot(dPdv, dPdv);
+            var detG = g11 * g22 - g12 * g12;
+            if (MathF.Abs(detG) < 1e-18f)
+                continue;
+
+            var fu  = (Vector3.Dot(f, dPdu) * g22 - Vector3.Dot(f, dPdv) * g12) / detG;
+            var fv  = (Vector3.Dot(f, dPdv) * g11 - Vector3.Dot(f, dPdu) * g12) / detG;
+            var dir = new Vector2(fu, fv);
+            if (dir.LengthSquared() < 1e-12f)
+                continue;
+
+            dir = Vector2.Normalize(dir);
+
+            var root   = Find(n0);
+            var weight = MathF.Abs(area);
+            flowSum[root] = flowSum.TryGetValue(root, out var sum)
+                ? (sum.Dir + dir * weight, sum.Density + texelsPerMeter * weight, sum.Weight + weight,
+                    Math.Min(sum.MinTriangle, triangle))
+                : (dir * weight, texelsPerMeter * weight, weight, triangle);
+        }
+
+        // Pass 2: one frame per island, written to each of its triangles.
+        var islandFrames = new Dictionary<int, IslandFrame>();
+        foreach (var (root, sum) in flowSum)
+        {
+            var along   = sum.Dir.LengthSquared() > 1e-8f ? Vector2.Normalize(sum.Dir) : new Vector2(0f, 1f);
+            var density = sum.Weight > 0f ? sum.Density / sum.Weight : 0f;
+            islandFrames[root] = new IslandFrame(along, new Vector2(-along.Y, along.X),
+                density > 0f ? 1f / density : 0f,
+                ProceduralFields.Hash01(7331, sum.MinTriangle, 0, 0) * 97f);
+        }
+
+        for (var t = 0; t < mesh.TriangleCount; ++t)
+            if (triNode[t] >= 0 && islandFrames.TryGetValue(Find(triNode[t]), out var frame))
+                frames[t] = frame;
+
+        return frames;
     }
 
     /// <summary>
@@ -517,43 +666,18 @@ public static class ProceduralSurfaceBaker
                 if (layer.Kind == SurfaceGeneratorKind.Scales)
                 {
                     // Scales never cross-fade (blending two cell patterns ghosts the
-                    // plates): one source wins per texel — the world frame near seams,
-                    // else the texel's dominant chart — and every switch line sinks into
-                    // a crevice, reading as just another groove between plates.
+                    // plates): each UV island has ONE rigid frame, so cells are uniform
+                    // with no interior transitions; near canvas seams the shared world
+                    // frame wins instead, the switch sinking into a crevice that reads as
+                    // just another groove between plates.
                     var seam    = surface.SeamBlend[index];
-                    var blendB  = surface.BlendB[index];
-                    var blendC  = surface.BlendC[index];
-                    var blendA  = 1f - blendB - blendC;
-                    var crevice = 0f;
+                    var crevice = seam is > 0.004f and < 0.996f
+                        ? 1f - ProceduralFields.Smooth(0.04f, 0.14f, MathF.Abs(seam - 0.5f))
+                        : 0f;
 
-                    Vector2 coord;
-                    float offset;
-                    if (seam <= 0.5f)
-                    {
-                        coord  = WorldFrame(surface.Position[index]);
-                        offset = 0f;
-                    }
-                    else if (blendA >= blendB && blendA >= blendC)
-                    {
-                        coord  = surface.FlowCoordA[index];
-                        offset = surface.OffsetA[index];
-                        crevice = MathF.Max(crevice, 1f - ProceduralFields.Smooth(0.03f, 0.12f, blendA - MathF.Max(blendB, blendC)));
-                    }
-                    else if (blendB >= blendC)
-                    {
-                        coord  = surface.FlowCoordB[index];
-                        offset = surface.OffsetB[index];
-                        crevice = MathF.Max(crevice, 1f - ProceduralFields.Smooth(0.03f, 0.12f, blendB - MathF.Max(blendA, blendC)));
-                    }
-                    else
-                    {
-                        coord  = surface.FlowCoordC[index];
-                        offset = surface.OffsetC[index];
-                        crevice = MathF.Max(crevice, 1f - ProceduralFields.Smooth(0.03f, 0.12f, blendC - MathF.Max(blendA, blendB)));
-                    }
-
-                    if (seam is > 0.004f and < 0.996f)
-                        crevice = MathF.Max(crevice, 1f - ProceduralFields.Smooth(0.04f, 0.14f, MathF.Abs(seam - 0.5f)));
+                    var (coord, offset) = seam <= 0.5f
+                        ? (WorldFrame(surface.Position[index]), 0f)
+                        : (surface.FlowCoordA[index], surface.OffsetA[index]);
 
                     sample = EvaluateScales(layer, coord, offset, k);
                     sample.Height *= 1f - crevice;
