@@ -284,6 +284,12 @@ public sealed class ModelUvReader(IDataManager dataManager, PenumbraService penu
         if (IsFaceSkinMaterial(source.GamePath) && GetFaceMesh(source) is { } faceMesh)
             return faceMesh;
 
+        // A body-family skin material the body models never reference renders on the WORN
+        // GEAR models recorded for it (false-nail hands, toe feet riding a compat material):
+        // its geometry is every recorded model merged, only its own meshes editable.
+        if (source.MdlGamePath.Contains(';'))
+            return GetGearSkinMesh(source);
+
         if (source.MdlGamePath.Length == 0)
             return null;
 
@@ -546,6 +552,55 @@ public sealed class ModelUvReader(IDataManager dataManager, PenumbraService penu
         {
             DynamicTextureManager.Log.Warning($"Could not align the face to the body race: {ex.Message}");
         }
+    }
+
+    /// <summary>
+    /// The merged geometry of several recorded models (';'-joined in MdlGamePath) for a
+    /// skin material only worn gear renders — see the gear-skin branch in
+    /// <see cref="GetMesh"/>. Material names match with the wearer's race substituted on
+    /// both sides, like the body set; the mesh's GamePath stays the material path, like
+    /// <see cref="GetBodyMesh"/>.
+    /// </summary>
+    private MaterialMesh? GetGearSkinMesh(SourcePath source)
+    {
+        var key = CacheKey(source);
+        if (_meshCache.TryGetValue(key, out var cached))
+            return cached;
+
+        MaterialMesh? mesh = null;
+        try
+        {
+            var models = new List<MdlFile>();
+            foreach (var gamePath in source.MdlGamePath.Split(';', StringSplitOptions.RemoveEmptyEntries))
+            {
+                var bytes = LoadGameFile(gamePath);
+                if (bytes == null)
+                    DynamicTextureManager.Log.Warning($"Could not load model {gamePath} for {source.GamePath}.");
+                else
+                    models.Add(new MdlFile(bytes));
+            }
+
+            if (models.Count > 0)
+            {
+                var race     = BodyMaterialRace(source.GamePath);
+                var fileName = Path.GetFileName(source.GamePath);
+                mesh = ReadMeshes(models, material => string.Equals(
+                        SubstituteBodyRace(Path.GetFileName(material), race), fileName, StringComparison.OrdinalIgnoreCase),
+                    fileName, source.GamePath, includeContext: true);
+            }
+
+            if (mesh != null)
+                DynamicTextureManager.Log.Information(
+                    $"Gear-skin geometry of {source.GamePath}: {mesh.VertexCount} vertices, {mesh.TriangleCount} triangles "
+                  + $"({mesh.TriangleEditable.Count(e => e)} editable) from {models.Count} model(s).");
+        }
+        catch (Exception ex)
+        {
+            DynamicTextureManager.Log.Warning($"Could not read gear-skin geometry for {source.GamePath}: {ex.Message}");
+        }
+
+        _meshCache[key] = mesh;
+        return mesh;
     }
 
     private MaterialMesh? GetBodyMesh(SourcePath source)
