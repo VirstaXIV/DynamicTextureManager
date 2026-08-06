@@ -28,7 +28,8 @@ namespace DynamicTextureManager.UI.Panels;
 /// to a flat silhouette.
 /// </summary>
 public sealed record ViewportShading(DecodedTexture? Diffuse, DecodedTexture? IdMap, Vector3[]? RowDiffuse, Vector3? SkinTone = null,
-    (Vector3 Main, Vector3 Highlight)? HairColors = null, DecodedTexture? HairMask = null, ViewportEffect? Effect = null);
+    (Vector3 Main, Vector3 Highlight)? HairColors = null, DecodedTexture? HairMask = null, ViewportEffect? Effect = null,
+    DecodedTexture? NormalMap = null);
 
 /// <summary>
 /// A live stand-in for the animated-effect conversion, following the shader-verified math:
@@ -209,7 +210,8 @@ public sealed class DecalViewport(ITextureProvider textureProvider) : IDisposabl
          && Nullable.Equals(_shading?.SkinTone, shading?.SkinTone)
          && Nullable.Equals(_shading?.HairColors, shading?.HairColors)
          && ReferenceEquals(_shading?.HairMask, shading?.HairMask)
-         && Equals(_shading?.Effect, shading?.Effect))
+         && Equals(_shading?.Effect, shading?.Effect)
+         && ReferenceEquals(_shading?.NormalMap, shading?.NormalMap))
             return;
 
         _shading     = shading;
@@ -921,6 +923,14 @@ public sealed class DecalViewport(ITextureProvider textureProvider) : IDisposabl
             return table;
         });
 
+    private static (float X, float Y) SampleNormalRg(DecodedTexture texture, Vector2 uv)
+    {
+        var x = Math.Clamp((int)(uv.X * texture.Width), 0, texture.Width - 1);
+        var y = Math.Clamp((int)(uv.Y * texture.Height), 0, texture.Height - 1);
+        var o = (y * texture.Width + x) * 4;
+        return (texture.Rgba[o] / 255f * 2f - 1f, texture.Rgba[o + 1] / 255f * 2f - 1f);
+    }
+
     private static byte SampleAlpha(DecodedTexture texture, Vector2 uv)
     {
         var x = Math.Clamp((int)(uv.X * texture.Width), 0, texture.Width - 1);
@@ -1035,7 +1045,8 @@ public sealed class DecalViewport(ITextureProvider textureProvider) : IDisposabl
         // (same as the primary), which would duplicate-render it — only their own editable
         // (real) geometry is new here, the body itself already came from the primary pass.
         void RasterizeMesh(MaterialMesh mesh, DecodedTexture? meshDiffuse, DecodedTexture? meshIdMap, Vector3? meshSkinTone,
-            (Vector3 Main, Vector3 Highlight)? meshHairColors, DecodedTexture? meshHairMask, bool skipContext)
+            (Vector3 Main, Vector3 Highlight)? meshHairColors, DecodedTexture? meshHairMask, bool skipContext,
+            DecodedTexture? meshNormalMap = null)
         {
             // Hair renders as alpha-tested cutout cards: fully transparent texels of the hair
             // normal's alpha must not write depth or color at all, or the empty regions of a
@@ -1120,6 +1131,40 @@ public sealed class DecalViewport(ITextureProvider textureProvider) : IDisposabl
                     if (minX > maxX || minY > maxY)
                         continue;
 
+                    // Tangent frame for normal-map shading, from the triangle's UV/position
+                    // derivatives — computed once per triangle, only where a normal map is
+                    // actually shaded (editable geometry of the primary mesh).
+                    var triNormalMap = meshNormalMap != null && !dimmed;
+                    Vector3 triTangent = default, triBitangent = default;
+                    if (triNormalMap)
+                    {
+                        var e1   = mesh.Positions[i1] - mesh.Positions[i0];
+                        var e2   = mesh.Positions[i2] - mesh.Positions[i0];
+                        var duv1 = mesh.Uvs[i1] - mesh.Uvs[i0];
+                        var duv2 = mesh.Uvs[i2] - mesh.Uvs[i0];
+                        var det  = duv1.X * duv2.Y - duv2.X * duv1.Y;
+                        if (MathF.Abs(det) > 1e-12f)
+                        {
+                            triTangent   = (e1 * duv2.Y - e2 * duv1.Y) / det;
+                            triBitangent = (e2 * duv1.X - e1 * duv2.X) / det;
+                            var lenT = triTangent.Length();
+                            var lenB = triBitangent.Length();
+                            if (lenT > 1e-9f && lenB > 1e-9f)
+                            {
+                                triTangent   /= lenT;
+                                triBitangent /= lenB;
+                            }
+                            else
+                            {
+                                triNormalMap = false;
+                            }
+                        }
+                        else
+                        {
+                            triNormalMap = false;
+                        }
+                    }
+
                     // Curvature-following projection reached all three corners — same gate the bake
                     // uses; triangles outside the walk radius never receive the decal.
                     var triProjected = !dimmed && anchored && layer != null && projection != null
@@ -1172,10 +1217,25 @@ public sealed class DecalViewport(ITextureProvider textureProvider) : IDisposabl
                                 _editableTouched[index] = true;
 
                             var pixelNormal = mesh.Normals[i0] * w0 + mesh.Normals[i1] * w1 + mesh.Normals[i2] * w2;
-                            var facing = pixelNormal.LengthSquared() > 1e-8f
-                                ? MathF.Abs(Vector3.Dot(Vector3.Normalize(pixelNormal), eyeDirection))
-                                : 0.4f;
-                            var light = 0.35f + 0.65f * facing;
+                            var shadingNormal = pixelNormal.LengthSquared() > 1e-8f
+                                ? Vector3.Normalize(pixelNormal)
+                                : eyeDirection;
+
+                            // Normal-map relief: perturb the mesh normal through the triangle's
+                            // tangent frame so baked detail (fur strands, scales) shades in the
+                            // preview the way it will in game.
+                            if (triNormalMap)
+                            {
+                                var nmUv = mesh.Uvs[i0] * w0 + mesh.Uvs[i1] * w1 + mesh.Uvs[i2] * w2;
+                                var (nx, ny) = SampleNormalRg(meshNormalMap!, nmUv);
+                                var nz = MathF.Sqrt(MathF.Max(0f, 1f - nx * nx - ny * ny));
+                                var perturbed = shadingNormal * nz + triTangent * nx + triBitangent * ny;
+                                if (perturbed.LengthSquared() > 1e-8f)
+                                    shadingNormal = Vector3.Normalize(perturbed);
+                            }
+
+                            var facing = MathF.Abs(Vector3.Dot(shadingNormal, eyeDirection));
+                            var light  = 0.35f + 0.65f * facing;
 
                             // Dimmed/context geometry belongs to a DIFFERENT material than the one
                             // shaded here — its UVs point into a texture this pass never loaded, so
@@ -1297,6 +1357,7 @@ public sealed class DecalViewport(ITextureProvider textureProvider) : IDisposabl
         }
 
         RasterizeMesh(_mesh, _shading?.Diffuse, _shading?.IdMap, _shading?.SkinTone, _shading?.HairColors, _shading?.HairMask,
+            meshNormalMap: _shading?.NormalMap,
             skipContext: false);
         foreach (var overlay in _overlays)
             RasterizeMesh(overlay.Mesh, overlay.Diffuse, null, overlay.ApplySkinTone ? _shading?.SkinTone : null,

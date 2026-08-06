@@ -502,7 +502,23 @@ public static class ProceduralSurfaceBaker
 
                 heightV = ApplyContrast(heightV, layer.Contrast);
 
-                result.Coverage[index] = (byte)Math.Clamp((int)MathF.Round(coverage * surface.Weight[index] * 255f), 0, 255);
+                // Region weights and exclusion fades THIN the pattern instead of ghosting
+                // it: the fading weight becomes a survival threshold against the pattern's
+                // own height, so strands break into sparser, shorter tufts toward bare skin
+                // — a transition zone, not a translucent overlay.
+                var w = surface.Weight[index];
+                if (w <= 0.001f)
+                {
+                    coverage = 0f;
+                }
+                else if (w < 0.999f)
+                {
+                    var cut = (1f - w) * 1.15f;
+                    coverage *= ProceduralFields.Smooth(cut, cut + 0.25f, heightV);
+                    heightV  *= 0.6f + 0.4f * w;
+                }
+
+                result.Coverage[index] = (byte)Math.Clamp((int)MathF.Round(coverage * 255f), 0, 255);
                 result.Height[index]   = (ushort)Math.Clamp((int)MathF.Round(heightV * 65535f), 0, 65535);
                 var albedo = Vector3.Lerp(colorA, colorB, albedoT);
                 // Fur runs a value ramp on top: darker roots rising past full color at the
