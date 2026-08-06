@@ -271,6 +271,144 @@ public static class SurfaceFlowField
         };
     }
 
+    // ------------------------------------------------------------------ natural body flow
+
+    /// <summary> The mesh's natural fur flow, see <see cref="BodyFlow"/>. </summary>
+    public sealed class NaturalFlow
+    {
+        /// <summary> Per raw vertex: unit flow direction in the tangent plane. </summary>
+        public required Vector3[] Direction;
+
+        /// <summary> Per raw vertex: geodesic distance from the crown — the along-flow potential. </summary>
+        public required float[] Potential;
+    }
+
+    private static readonly System.Runtime.CompilerServices.ConditionalWeakTable<MaterialMesh, NaturalFlow> BodyFlowCache = new();
+
+    /// <summary>
+    /// How fur naturally lies on a body: away from the crown, following the surface — down
+    /// the torso AND down each limb, regardless of the bind pose (a plain world-down
+    /// direction runs ACROSS the outstretched arms of a T-pose). Computed as the gradient of
+    /// the geodesic distance from each connected piece's highest point, on the welded graph —
+    /// smooth, seam-free, and deterministic. Anchors override it where they reach.
+    /// </summary>
+    public static NaturalFlow BodyFlow(MaterialMesh mesh)
+    {
+        if (BodyFlowCache.TryGetValue(mesh, out var cached))
+            return cached;
+
+        var flow = ComputeBodyFlow(mesh);
+        BodyFlowCache.AddOrUpdate(mesh, flow);
+        return flow;
+    }
+
+    private static NaturalFlow ComputeBodyFlow(MaterialMesh mesh)
+    {
+        var count = mesh.VertexCount;
+        var (canonical, neighbors) = mesh.GetOrBuildAdjacency();
+
+        // One crown per connected piece: its highest vertex (ties → lowest index).
+        var componentOf = new int[count];
+        Array.Fill(componentOf, -1);
+        var crowns = new List<int>();
+        var stack  = new Stack<int>();
+        for (var v = 0; v < count; ++v)
+        {
+            if (canonical[v] != v || componentOf[v] >= 0)
+                continue;
+
+            var component = crowns.Count;
+            var crown     = v;
+            componentOf[v] = component;
+            stack.Push(v);
+            while (stack.Count > 0)
+            {
+                var u = stack.Pop();
+                if (mesh.Positions[u].Y > mesh.Positions[crown].Y)
+                    crown = u;
+                foreach (var n in neighbors[u])
+                    if (componentOf[n] < 0)
+                    {
+                        componentOf[n] = component;
+                        stack.Push(n);
+                    }
+            }
+
+            crowns.Add(crown);
+        }
+
+        // Multi-source Dijkstra from every crown, tie-stable like the transport walk.
+        var distance = new float[count];
+        Array.Fill(distance, float.MaxValue);
+        var queue = new PriorityQueue<int, (float Dist, int Vertex)>();
+        foreach (var crown in crowns)
+        {
+            distance[crown] = 0f;
+            queue.Enqueue(crown, (0f, crown));
+        }
+
+        while (queue.TryDequeue(out var u, out var priority))
+        {
+            if (priority.Dist > distance[u])
+                continue;
+
+            var uPos = mesh.Positions[u];
+            foreach (var v in neighbors[u])
+            {
+                var d = priority.Dist + (mesh.Positions[v] - uPos).Length();
+                if (d >= distance[v])
+                    continue;
+
+                distance[v] = d;
+                queue.Enqueue(v, (d, v));
+            }
+        }
+
+        // Flow = tangent-plane gradient of the crown distance, estimated from the edges.
+        var direction = new Vector3[count];
+        var potential = new float[count];
+        for (var v = 0; v < count; ++v)
+        {
+            var c = canonical[v];
+            potential[v] = distance[c] >= float.MaxValue ? mesh.Positions[v].Y : distance[c];
+
+            var g = Vector3.Zero;
+            var cPos = mesh.Positions[c];
+            foreach (var u in neighbors[c])
+            {
+                if (distance[u] >= float.MaxValue || distance[c] >= float.MaxValue)
+                    continue;
+
+                var edge = mesh.Positions[u] - cPos;
+                var len  = edge.Length();
+                if (len < 1e-9f)
+                    continue;
+
+                g += edge / len * ((distance[u] - distance[c]) / len);
+            }
+
+            var normal = mesh.Normals[v].LengthSquared() > 1e-8f ? Vector3.Normalize(mesh.Normals[v]) : Vector3.UnitY;
+            g -= normal * Vector3.Dot(g, normal);
+            direction[v] = g.LengthSquared() > 1e-8f ? Vector3.Normalize(g) : FallbackFlow(normal);
+        }
+
+        return new NaturalFlow { Direction = direction, Potential = potential };
+    }
+
+    /// <summary> Last-resort flow where the gradient degenerates: world-down projected onto the surface. </summary>
+    public static Vector3 FallbackFlow(Vector3 normal)
+    {
+        var down = -Vector3.UnitY - normal * Vector3.Dot(-Vector3.UnitY, normal);
+        if (down.LengthSquared() < 1e-4f)
+        {
+            down = Vector3.UnitZ - normal * Vector3.Dot(Vector3.UnitZ, normal);
+            if (down.LengthSquared() < 1e-8f)
+                return Vector3.UnitZ;
+        }
+
+        return Vector3.Normalize(down);
+    }
+
     // ------------------------------------------------------------------ surface charts
 
     /// <summary>
@@ -358,22 +496,10 @@ public static class SurfaceFlowField
         var minDist   = new float[count];
         Array.Fill(minDist, float.MaxValue);
 
+        var natural = BodyFlow(mesh);
+
         Vector3 SeedFlow(int vertex)
-        {
-            if (flow != null && flow.HasFlow[vertex])
-                return flow.Direction[vertex];
-
-            var n = mesh.Normals[vertex].LengthSquared() > 1e-8f ? Vector3.Normalize(mesh.Normals[vertex]) : Vector3.UnitY;
-            var down = -Vector3.UnitY - n * Vector3.Dot(-Vector3.UnitY, n);
-            if (down.LengthSquared() < 1e-4f)
-            {
-                down = Vector3.UnitZ - n * Vector3.Dot(Vector3.UnitZ, n);
-                if (down.LengthSquared() < 1e-8f)
-                    return Vector3.UnitZ;
-            }
-
-            return Vector3.Normalize(down);
-        }
+            => flow != null && flow.HasFlow[vertex] ? flow.Direction[vertex] : natural.Direction[vertex];
 
         void AddChart(int seedVertex, Vector3 dir)
         {

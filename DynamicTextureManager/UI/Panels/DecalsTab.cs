@@ -888,6 +888,16 @@ public sealed class DecalsTab(
         if (_procSection.Draw(proc, bodyRegions))
             Save(dTexture);
 
+        var painting = _viewport.IsPaintingFor(proc);
+        if (Im.SmallButton(painting ? "Painting..."u8 : "Paint Coverage"u8) && !painting)
+            _viewport.BeginCoveragePaint(proc, () => Save(dTexture));
+        Im.Tooltip.OnHover("Brush over the 3D preview to thin the pattern away where you don't want it — it tapers into bare skin. The Restore brush paints it back."u8);
+        if (proc.MaskDabs.Count > 0)
+        {
+            Im.Line.Same();
+            Im.Text($"({proc.MaskDabs.Count} dabs)");
+        }
+
         DrawFlowAnchorList(dTexture, proc);
 
         if (Im.SmallButton("Remove"u8))

@@ -87,6 +87,35 @@ public sealed class FlowAnchor
 }
 
 /// <summary>
+/// One brush dab of the coverage paint: a sphere in bind-pose model space that fades the
+/// pattern out (or back in, for restore dabs) with a soft falloff band around its radius.
+/// Strokes serialize as their dabs, so the painted mask rebuilds on any mesh.
+/// </summary>
+public sealed class CoverageDab
+{
+    public float X, Y, Z;
+    public float Radius   = 0.05f;
+    public float Strength = 1f;
+    public bool  Restore;
+
+    public JArray Serialize()
+        => [X, Y, Z, Radius, Strength, Restore ? 1 : 0];
+
+    public static CoverageDab? Load(JArray json)
+        => json.Count < 6
+            ? null
+            : new CoverageDab
+            {
+                X        = json[0].ToObject<float>(),
+                Y        = json[1].ToObject<float>(),
+                Z        = json[2].ToObject<float>(),
+                Radius   = json[3].ToObject<float>(),
+                Strength = json[4].ToObject<float>(),
+                Restore  = json[5].ToObject<int>() != 0,
+            };
+}
+
+/// <summary>
 /// A procedural full-surface layer: fur, scales or a skin pattern generated over the whole
 /// editable mesh surface, oriented by a guide-anchor flow field. Evaluated in world space on
 /// the mesh, so the result is seamless across UV islands and material splits. Also drives
@@ -156,6 +185,9 @@ public sealed class ProceduralSurfaceLayer : TextureLayer
 
     /// <summary> Coverage on the face companion canvas (its own mesh, not a body unit). </summary>
     public float WeightFace = 1f;
+
+    /// <summary> The painted coverage mask, as its brush dabs in stroke order. </summary>
+    public List<CoverageDab> MaskDabs = [];
 
     /// <summary> Softening of part-boundary transitions (0 = hard cut at the unit seam). </summary>
     public float RegionFeather = 0.5f;
@@ -228,6 +260,7 @@ public sealed class ProceduralSurfaceLayer : TextureLayer
         json["WeightFeet"]      = WeightFeet;
         json["WeightFace"]      = WeightFace;
         json["RegionFeather"]   = RegionFeather;
+        json["MaskDabs"]        = new JArray(MaskDabs.Select(d => d.Serialize()));
         json["SurfaceAttributes"] = SurfaceAttributes;
     }
 
@@ -264,6 +297,9 @@ public sealed class ProceduralSurfaceLayer : TextureLayer
             WeightFeet      = json["WeightFeet"]?.ToObject<float>() ?? 1f,
             WeightFace      = json["WeightFace"]?.ToObject<float>() ?? 1f,
             RegionFeather   = json["RegionFeather"]?.ToObject<float>() ?? 0.5f,
+            MaskDabs        = json["MaskDabs"] is JArray dabs
+                ? dabs.OfType<JArray>().Select(CoverageDab.Load).OfType<CoverageDab>().ToList()
+                : [],
             SurfaceAttributes = json["SurfaceAttributes"]?.ToObject<uint>() ?? uint.MaxValue,
         };
 }
