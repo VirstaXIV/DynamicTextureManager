@@ -730,7 +730,7 @@ public static class ProceduralSurfaceBaker
                 {
                     FurMarkingStyle.None    => 0f,
                     FurMarkingStyle.Painted => surface.MarkingPaint?[index] ?? 0f,
-                    FurMarkingStyle.Custom  => EvaluateCustomMarkings(layer, markingPattern, surface.Position[index]),
+                    FurMarkingStyle.Custom  => EvaluateCustomMarkings(layer, markingPattern, surface.Position[index], surface.Normal[index]),
                     _                       => EvaluateMarkings(layer, surface.Position[index], surface.FlowPotential[index]),
                 };
 
@@ -1006,22 +1006,34 @@ public static class ProceduralSurfaceBaker
     }
 
     /// <summary>
-    /// Custom markings: a user-imported tileable image sampled in the shared cylinder world
-    /// frame, so the pattern is continuous across canvases like the generated markings. The
-    /// tile count around the azimuth is rounded to an integer so the frame's ±π wrap lands on
-    /// a tile boundary; the slight aspect distortion that costs is invisible next to a seam.
+    /// Custom markings: a user-imported tileable image sampled triplanar — three axis-aligned
+    /// world-space projections blended by the surface normal — so the pattern keeps its aspect
+    /// on every surface orientation (a single cylinder projection stretched wherever the
+    /// surface turns horizontal: shoulders, chest, around the limbs) and stays continuous
+    /// across canvases. Sharpened weights keep the blend bands narrow, and the threshold below
+    /// re-sharpens the shapes they soften.
     /// </summary>
-    private static float EvaluateCustomMarkings(ProceduralSurfaceLayer layer, MarkingPatternImage? pattern, Vector3 pos)
+    private static float EvaluateCustomMarkings(ProceduralSurfaceLayer layer, MarkingPatternImage? pattern,
+        Vector3 pos, Vector3 normal)
     {
         if (pattern == null || layer.MarkingAmount <= 0f)
             return 0f;
 
-        var frame = WorldFrame(pos);
-        var tile  = MathF.Max(0.005f, layer.MarkingScaleCm / 100f);
+        var tile = MathF.Max(0.005f, layer.MarkingScaleCm / 100f);
 
-        const float period = MathF.PI * 2f * 0.1f;
-        var tilesAround = MathF.Max(1f, MathF.Round(period / tile));
-        var value = SampleWrapped(pattern, frame.X * (tilesAround / period), frame.Y / tile);
+        var w = new Vector3(MathF.Abs(normal.X), MathF.Abs(normal.Y), MathF.Abs(normal.Z));
+        w *= w;
+        w *= w;
+        var sum = w.X + w.Y + w.Z;
+        if (sum <= 1e-6f)
+        {
+            w   = Vector3.UnitY;
+            sum = 1f;
+        }
+
+        var value = (w.X * SampleWrapped(pattern, pos.Z / tile, -pos.Y / tile)
+          + w.Y * SampleWrapped(pattern, pos.X / tile, pos.Z / tile)
+          + w.Z * SampleWrapped(pattern, pos.X / tile, -pos.Y / tile)) / sum;
 
         var cut = 1f - Math.Clamp(layer.MarkingAmount, 0f, 1f);
         return ProceduralFields.Smooth(cut - 0.08f, cut + 0.08f, value);
