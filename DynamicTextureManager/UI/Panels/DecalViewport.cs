@@ -28,7 +28,8 @@ namespace DynamicTextureManager.UI.Panels;
 /// to a flat silhouette.
 /// </summary>
 public sealed record ViewportShading(DecodedTexture? Diffuse, DecodedTexture? IdMap, Vector3[]? RowDiffuse, Vector3? SkinTone = null,
-    (Vector3 Main, Vector3 Highlight)? HairColors = null, DecodedTexture? HairMask = null, ViewportEffect? Effect = null);
+    (Vector3 Main, Vector3 Highlight)? HairColors = null, DecodedTexture? HairMask = null, ViewportEffect? Effect = null,
+    DecodedTexture? NormalMap = null);
 
 /// <summary>
 /// A live stand-in for the animated-effect conversion, following the shader-verified math:
@@ -70,6 +71,22 @@ public sealed class DecalViewport(ITextureProvider textureProvider) : IDisposabl
     private MaterialMesh? _mesh;
     private uint          _visibleAttributes = uint.MaxValue;
     private Action?       _onChanged;
+
+    // Flow-anchor placement (procedural surface layers): click sets the anchor, dragging
+    // combs its direction along the surface. Mutually exclusive with decal placement.
+    private ProceduralSurfaceLayer? _flowLayer;
+    private int                     _flowAnchor = -1;
+    private Vector3?                _flowDragOrigin;
+
+    // Coverage painting (procedural surface layers): brush strokes append dabs that fade
+    // the pattern out (or restore it). Mutually exclusive with the other placement modes.
+    private ProceduralSurfaceLayer? _paintLayer;
+    private float                   _paintRadius   = 0.06f;
+    private float                   _paintStrength = 1f;
+    private bool                    _paintRestore;
+    private int                     _paintStrokeStart = -1;
+    private Vector3?                _paintLastDab;
+    private Vector3?                _paintCursor;
 
     private ViewportShading? _shading;
     private bool             _highlightDecal;
@@ -114,12 +131,15 @@ public sealed class DecalViewport(ITextureProvider textureProvider) : IDisposabl
             _renderDirty = true;
         _visibleAttributes = visibleAttributes;
 
-        if (dTextureChanged && _layer != null)
+        if (dTextureChanged && (_layer != null || _flowLayer != null || _paintLayer != null))
         {
             // A different project: the placement binding belongs to its layers, drop it.
             DynamicTextureManager.Log.Debug("Viewport placement unbound — the selected dTexture changed.");
-            _layer     = null;
-            _onChanged = null;
+            _layer      = null;
+            _flowLayer  = null;
+            _flowAnchor = -1;
+            _paintLayer = null;
+            _onChanged  = null;
         }
 
         if (meshChanged)
@@ -146,11 +166,50 @@ public sealed class DecalViewport(ITextureProvider textureProvider) : IDisposabl
     /// <summary> Bind a decal layer for interactive placement on the currently shown mesh. </summary>
     public void BeginPlacement(DecalLayer layer, string decalPath, Action onChanged)
     {
+        _flowLayer   = null;
+        _flowAnchor  = -1;
         _layer       = layer;
         _onChanged   = onChanged;
         _renderDirty = true;
         LoadDecal(decalPath);
     }
+
+    /// <summary>
+    /// Bind one flow anchor of a procedural surface layer: clicking the mesh sets the anchor,
+    /// dragging combs its direction along the surface.
+    /// </summary>
+    public void BeginFlowPlacement(ProceduralSurfaceLayer layer, int anchorIndex, Action onChanged)
+    {
+        _layer          = null;
+        _flowLayer      = layer;
+        _flowAnchor     = anchorIndex;
+        _flowDragOrigin = null;
+        _onChanged      = onChanged;
+        _renderDirty    = true;
+    }
+
+    public bool IsOpenForFlow(ProceduralSurfaceLayer layer)
+        => _open && ReferenceEquals(_flowLayer, layer);
+
+    /// <summary> Bind a procedural layer for coverage painting: brushing the mesh fades its pattern out or back in. </summary>
+    public void BeginCoveragePaint(ProceduralSurfaceLayer layer, Action onChanged)
+    {
+        _layer            = null;
+        _flowLayer        = null;
+        _flowAnchor       = -1;
+        _paintLayer       = layer;
+        _paintStrokeStart = -1;
+        _paintLastDab     = null;
+        _onChanged        = onChanged;
+        _renderDirty      = true;
+    }
+
+    public bool IsPaintingFor(ProceduralSurfaceLayer layer)
+        => _open && ReferenceEquals(_paintLayer, layer);
+
+    /// <summary> The anchor index currently bound for flow placement, -1 when none. </summary>
+    public int FlowAnchorIndex(ProceduralSurfaceLayer layer)
+        => IsOpenForFlow(layer) ? _flowAnchor : -1;
 
     /// <summary> Return to view mode, committing any pending placement edit. </summary>
     public void EndPlacement()
@@ -161,9 +220,15 @@ public sealed class DecalViewport(ITextureProvider textureProvider) : IDisposabl
             _onChanged?.Invoke();
         }
 
-        _layer       = null;
-        _onChanged   = null;
-        _renderDirty = true;
+        _layer          = null;
+        _flowLayer      = null;
+        _flowAnchor     = -1;
+        _flowDragOrigin = null;
+        _paintLayer     = null;
+        _paintLastDab   = null;
+        _paintCursor    = null;
+        _onChanged      = null;
+        _renderDirty    = true;
     }
 
     /// <summary> Swap in new shading buffers; re-renders only when something actually changed. </summary>
@@ -175,7 +240,8 @@ public sealed class DecalViewport(ITextureProvider textureProvider) : IDisposabl
          && Nullable.Equals(_shading?.SkinTone, shading?.SkinTone)
          && Nullable.Equals(_shading?.HairColors, shading?.HairColors)
          && ReferenceEquals(_shading?.HairMask, shading?.HairMask)
-         && Equals(_shading?.Effect, shading?.Effect))
+         && Equals(_shading?.Effect, shading?.Effect)
+         && ReferenceEquals(_shading?.NormalMap, shading?.NormalMap))
             return;
 
         _shading     = shading;
@@ -313,6 +379,10 @@ public sealed class DecalViewport(ITextureProvider textureProvider) : IDisposabl
 
         if (_layer != null)
             DrawPlacementControls(_layer);
+        else if (_flowLayer != null)
+            DrawFlowPlacementControls();
+        else if (_paintLayer != null)
+            DrawPaintControls(_paintLayer);
 
         var avail = Im.ContentRegion.Available;
         var size  = MathF.Max(200f, MathF.Min(avail.X, avail.Y));
@@ -376,7 +446,11 @@ public sealed class DecalViewport(ITextureProvider textureProvider) : IDisposabl
                 (keyControl ? "Ctrl+Wheel: resizing decal" : "Ctrl+Wheel: resize decal", keyControl ? hotColor : dimColor),
                 (keyShift ? "Shift+Wheel: rotating decal" : "Shift+Wheel: rotate decal", keyShift ? hotColor : dimColor),
             ]
-            : [("RMB orbit · MMB pan · Wheel zoom", dimColor)];
+            : _flowLayer != null
+                ? [("LMB drag: place anchor + comb direction · RMB orbit · Wheel zoom", dimColor)]
+                : _paintLayer != null
+                    ? [(_paintRestore ? "LMB drag: restore coverage · RMB orbit · Wheel zoom" : "LMB drag: paint coverage away · RMB orbit · Wheel zoom", dimColor)]
+                    : [("RMB orbit · MMB pan · Wheel zoom", dimColor)];
 
         var pad       = 6f * Im.Style.GlobalScale;
         var lineStep  = Im.Style.TextHeight + 2f;
@@ -412,6 +486,102 @@ public sealed class DecalViewport(ITextureProvider textureProvider) : IDisposabl
         Axis(Vector3.UnitX, 0xFF4040E0, "X");
         Axis(Vector3.UnitY, 0xFF40C040, "Y");
         Axis(Vector3.UnitZ, 0xFFE07050, "Z");
+
+        DrawFlowAnchors(draw, start, size);
+        DrawPaintCursor(draw, start, size);
+    }
+
+    /// <summary> The brush cursor: the dab radius projected around the hovered surface point. </summary>
+    private void DrawPaintCursor(Im.DrawList draw, Vector2 start, float size)
+    {
+        if (_paintLayer == null || _paintCursor is not { } cursor)
+            return;
+
+        Vector2? Project(Vector3 world)
+        {
+            var v = Vector4.Transform(new Vector4(world, 1f), _lastViewProjection);
+            if (v.W <= 1e-6f)
+                return null;
+
+            var ndc = new Vector2(v.X, v.Y) / v.W;
+            return start + new Vector2((ndc.X + 1f) * 0.5f, (1f - ndc.Y) * 0.5f) * size;
+        }
+
+        var center = Project(cursor);
+        if (center == null)
+            return;
+
+        var offset   = CameraOffset();
+        var right    = Vector3.Normalize(Vector3.Cross(Vector3.Normalize(-offset), Vector3.UnitY));
+        var rim      = Project(cursor + right * _paintRadius);
+        var radiusPx = rim != null ? MathF.Max(3f, (rim.Value - center.Value).Length()) : 8f;
+        draw.Shape.Circle(center.Value, radiusPx, _paintRestore ? 0xFF40C040u : 0xFF5050FFu, thickness: 2f);
+    }
+
+    /// <summary>
+    /// The bound procedural layer's anchors projected into the canvas: steering anchors as
+    /// arrows along their combed direction, exclusion anchors as circles. The anchor being
+    /// placed is highlighted.
+    /// </summary>
+    private void DrawFlowAnchors(Im.DrawList draw, Vector2 start, float size)
+    {
+        if (_flowLayer == null)
+            return;
+
+        Vector2? Project(Vector3 world)
+        {
+            var v = Vector4.Transform(new Vector4(world, 1f), _lastViewProjection);
+            if (v.W <= 1e-6f)
+                return null;
+
+            var ndc = new Vector2(v.X, v.Y) / v.W;
+            return start + new Vector2((ndc.X + 1f) * 0.5f, (1f - ndc.Y) * 0.5f) * size;
+        }
+
+        for (var i = 0; i < _flowLayer.Anchors.Count; ++i)
+        {
+            var anchor = _flowLayer.Anchors[i];
+            var pos    = new Vector3(anchor.PosX, anchor.PosY, anchor.PosZ);
+            if (pos == Vector3.Zero)
+                continue; // not placed yet
+
+            var screen = Project(pos);
+            if (screen == null)
+                continue;
+
+            var active = i == _flowAnchor;
+            var color  = anchor.Exclude
+                ? active ? 0xFF5050FFu : 0xB04040C0u
+                : active ? 0xFF53D7FFu : 0xB0C0A040u;
+
+            if (anchor.Exclude)
+            {
+                // Geodesic radius approximated as a screen circle through a point offset
+                // along the surface — cosmetic only.
+                var rim       = Project(pos + new Vector3(anchor.NormalZ, anchor.NormalX, anchor.NormalY) * anchor.Radius);
+                var radiusPx  = rim != null ? MathF.Max(4f, (rim.Value - screen.Value).Length()) : 10f;
+                draw.Shape.Circle(screen.Value, radiusPx, color, thickness: 2f);
+                draw.Shape.CircleFilled(screen.Value, 3f, color);
+                continue;
+            }
+
+            var dir = new Vector3(anchor.DirX, anchor.DirY, anchor.DirZ);
+            var tip = Project(pos + (dir.LengthSquared() > 1e-8f ? Vector3.Normalize(dir) : Vector3.UnitY) * 0.06f);
+            draw.Shape.CircleFilled(screen.Value, active ? 5f : 4f, color);
+            if (tip == null)
+                continue;
+
+            draw.Shape.Line(screen.Value, tip.Value, color, active ? 3f : 2f);
+            // Arrowhead: two short strokes back from the tip.
+            var along = tip.Value - screen.Value;
+            if (along.LengthSquared() > 1f)
+            {
+                along = Vector2.Normalize(along);
+                var side = new Vector2(-along.Y, along.X);
+                draw.Shape.Line(tip.Value, tip.Value - along * 7f + side * 4f, color, 2f);
+                draw.Shape.Line(tip.Value, tip.Value - along * 7f - side * 4f, color, 2f);
+            }
+        }
     }
 
     private void DrawPlacementControls(DecalLayer layer)
@@ -469,6 +639,65 @@ public sealed class DecalViewport(ITextureProvider textureProvider) : IDisposabl
         if (Im.SmallButton("Done"u8))
             EndPlacement();
         Im.Tooltip.OnHover("Finish placing this decal and return the preview to view mode."u8);
+    }
+
+    private void DrawPaintControls(ProceduralSurfaceLayer layer)
+    {
+        Im.Item.SetNextWidthScaled(130);
+        var radiusCm = _paintRadius * 100f;
+        if (Im.Slider("Brush (cm)"u8, ref radiusCm, "%.1f"u8, 1f, 30f))
+            _paintRadius = Math.Clamp(radiusCm, 1f, 30f) / 100f;
+
+        Im.Line.Same();
+        Im.Item.SetNextWidthScaled(130);
+        var strength = _paintStrength;
+        if (Im.Slider("Strength"u8, ref strength, "%.2f"u8, 0.1f, 1f))
+            _paintStrength = Math.Clamp(strength, 0.1f, 1f);
+        Im.Tooltip.OnHover("Full strength clears the pattern entirely; lower thins it."u8);
+
+        Im.Line.Same();
+        if (Im.Checkbox("Restore"u8, ref _paintRestore))
+            _renderDirty = true;
+        Im.Tooltip.OnHover("Brush the pattern back in where it was painted away."u8);
+
+        Im.Line.Same();
+        if (Im.SmallButton("Undo Stroke"u8)
+         && _paintStrokeStart >= 0 && _paintStrokeStart <= layer.MaskDabs.Count)
+        {
+            layer.MaskDabs.RemoveRange(_paintStrokeStart, layer.MaskDabs.Count - _paintStrokeStart);
+            _paintStrokeStart = -1;
+            MarkEdited();
+        }
+
+        Im.Line.Same();
+        if (Im.SmallButton("Clear"u8) && Im.Io.KeyControl && layer.MaskDabs.Count > 0)
+        {
+            layer.MaskDabs.Clear();
+            _paintStrokeStart = -1;
+            MarkEdited();
+        }
+
+        Im.Tooltip.OnHover("Hold Control and click to remove ALL painted coverage."u8);
+
+        Im.Line.Same();
+        if (Im.SmallButton("Done"u8))
+            EndPlacement();
+        Im.Tooltip.OnHover("Finish painting and return the preview to view mode."u8);
+    }
+
+    private void DrawFlowPlacementControls()
+    {
+        var anchor = _flowLayer != null && _flowAnchor >= 0 && _flowAnchor < _flowLayer.Anchors.Count
+            ? _flowLayer.Anchors[_flowAnchor]
+            : null;
+        Im.Text(anchor is { Exclude: true }
+            ? "Click where the pattern should fade out."u8
+            : "Click the body, then drag the way the pattern should flow."u8);
+
+        Im.Line.Same();
+        if (Im.SmallButton("Done"u8))
+            EndPlacement();
+        Im.Tooltip.OnHover("Finish placing this anchor and return the preview to view mode."u8);
     }
 
     private void MarkEdited()
@@ -571,6 +800,106 @@ public sealed class DecalViewport(ITextureProvider textureProvider) : IDisposabl
                 MarkEdited();
             }
         }
+
+        HandleFlowInput(start, size, hovered);
+        HandlePaintInput(start, size, hovered);
+    }
+
+    /// <summary>
+    /// Coverage brush: while the button is held, dabs land along the drag at a spacing tied
+    /// to the brush radius. Commit rides the shared edit-dirty flow on release.
+    /// </summary>
+    private void HandlePaintInput(Vector2 start, float size, bool hovered)
+    {
+        if (_paintLayer == null)
+            return;
+
+        _paintCursor = null;
+        var local = (Im.Mouse.Position - start) / size;
+        var onCanvas = hovered && local is { X: >= 0f and <= 1f, Y: >= 0f and <= 1f };
+        if (onCanvas && TryPick(local, out var position, out _, out _))
+            _paintCursor = position;
+
+        if (!Im.Mouse.IsDown(MouseButton.Left))
+        {
+            _paintLastDab = null;
+            return;
+        }
+
+        if (_paintCursor is not { } hit)
+            return;
+
+        if (_paintLastDab == null)
+            _paintStrokeStart = _paintLayer.MaskDabs.Count;
+        else if ((_paintLastDab.Value - hit).Length() < _paintRadius * 0.35f)
+            return;
+
+        _paintLayer.MaskDabs.Add(new CoverageDab
+        {
+            X        = hit.X,
+            Y        = hit.Y,
+            Z        = hit.Z,
+            Radius   = _paintRadius,
+            Strength = _paintStrength,
+            Restore  = _paintRestore,
+        });
+        _paintLastDab = hit;
+        MarkEdited();
+    }
+
+    /// <summary>
+    /// Flow-anchor interaction: pressing on the mesh drops the bound anchor there; dragging
+    /// combs its direction — the vector from the press point to the current surface point,
+    /// projected into the anchor's tangent plane. Commit rides the shared edit-dirty flow.
+    /// </summary>
+    private void HandleFlowInput(Vector2 start, float size, bool hovered)
+    {
+        if (_flowLayer == null || _flowAnchor < 0 || _flowAnchor >= _flowLayer.Anchors.Count)
+            return;
+
+        if (!Im.Mouse.IsDown(MouseButton.Left))
+        {
+            _flowDragOrigin = null;
+            return;
+        }
+
+        if (!hovered && _flowDragOrigin == null)
+            return;
+
+        var local = (Im.Mouse.Position - start) / size;
+        if (local is not { X: >= 0f and <= 1f, Y: >= 0f and <= 1f }
+         || !TryPick(local, out var position, out var normal, out _))
+            return;
+
+        var anchor = _flowLayer.Anchors[_flowAnchor];
+        if (_flowDragOrigin == null)
+        {
+            // Press: the anchor lands here; its direction keeps its previous value until a
+            // drag. Deliberately does NOT capture the visible-attribute mask — the layer
+            // bakes companion canvases (the face) whose attribute bits mean different
+            // things, and a body mask silently wiped their entire bake once.
+            _flowDragOrigin = position;
+            anchor.PosX     = position.X;
+            anchor.PosY     = position.Y;
+            anchor.PosZ     = position.Z;
+            anchor.NormalX  = normal.X;
+            anchor.NormalY  = normal.Y;
+            anchor.NormalZ  = normal.Z;
+            MarkEdited();
+            return;
+        }
+
+        var drag = position - _flowDragOrigin.Value;
+        var anchorNormal = new Vector3(anchor.NormalX, anchor.NormalY, anchor.NormalZ);
+        drag -= anchorNormal * Vector3.Dot(drag, anchorNormal);
+        if (drag.Length() < 0.005f)
+            return; // half a centimeter of dead zone before the comb takes over
+
+        drag = Vector3.Normalize(drag);
+        anchor.DirX = drag.X;
+        anchor.DirY = drag.Y;
+        anchor.DirZ = drag.Z;
+        MarkEdited();
     }
 
     private Vector3 CameraOffset()
@@ -745,6 +1074,14 @@ public sealed class DecalViewport(ITextureProvider textureProvider) : IDisposabl
             return table;
         });
 
+    private static (float X, float Y) SampleNormalRg(DecodedTexture texture, Vector2 uv)
+    {
+        var x = Math.Clamp((int)(uv.X * texture.Width), 0, texture.Width - 1);
+        var y = Math.Clamp((int)(uv.Y * texture.Height), 0, texture.Height - 1);
+        var o = (y * texture.Width + x) * 4;
+        return (texture.Rgba[o] / 255f * 2f - 1f, texture.Rgba[o + 1] / 255f * 2f - 1f);
+    }
+
     private static byte SampleAlpha(DecodedTexture texture, Vector2 uv)
     {
         var x = Math.Clamp((int)(uv.X * texture.Width), 0, texture.Width - 1);
@@ -859,7 +1196,8 @@ public sealed class DecalViewport(ITextureProvider textureProvider) : IDisposabl
         // (same as the primary), which would duplicate-render it — only their own editable
         // (real) geometry is new here, the body itself already came from the primary pass.
         void RasterizeMesh(MaterialMesh mesh, DecodedTexture? meshDiffuse, DecodedTexture? meshIdMap, Vector3? meshSkinTone,
-            (Vector3 Main, Vector3 Highlight)? meshHairColors, DecodedTexture? meshHairMask, bool skipContext)
+            (Vector3 Main, Vector3 Highlight)? meshHairColors, DecodedTexture? meshHairMask, bool skipContext,
+            DecodedTexture? meshNormalMap = null)
         {
             // Hair renders as alpha-tested cutout cards: fully transparent texels of the hair
             // normal's alpha must not write depth or color at all, or the empty regions of a
@@ -944,6 +1282,40 @@ public sealed class DecalViewport(ITextureProvider textureProvider) : IDisposabl
                     if (minX > maxX || minY > maxY)
                         continue;
 
+                    // Tangent frame for normal-map shading, from the triangle's UV/position
+                    // derivatives — computed once per triangle, only where a normal map is
+                    // actually shaded (editable geometry of the primary mesh).
+                    var triNormalMap = meshNormalMap != null && !dimmed;
+                    Vector3 triTangent = default, triBitangent = default;
+                    if (triNormalMap)
+                    {
+                        var e1   = mesh.Positions[i1] - mesh.Positions[i0];
+                        var e2   = mesh.Positions[i2] - mesh.Positions[i0];
+                        var duv1 = mesh.Uvs[i1] - mesh.Uvs[i0];
+                        var duv2 = mesh.Uvs[i2] - mesh.Uvs[i0];
+                        var det  = duv1.X * duv2.Y - duv2.X * duv1.Y;
+                        if (MathF.Abs(det) > 1e-12f)
+                        {
+                            triTangent   = (e1 * duv2.Y - e2 * duv1.Y) / det;
+                            triBitangent = (e2 * duv1.X - e1 * duv2.X) / det;
+                            var lenT = triTangent.Length();
+                            var lenB = triBitangent.Length();
+                            if (lenT > 1e-9f && lenB > 1e-9f)
+                            {
+                                triTangent   /= lenT;
+                                triBitangent /= lenB;
+                            }
+                            else
+                            {
+                                triNormalMap = false;
+                            }
+                        }
+                        else
+                        {
+                            triNormalMap = false;
+                        }
+                    }
+
                     // Curvature-following projection reached all three corners — same gate the bake
                     // uses; triangles outside the walk radius never receive the decal.
                     var triProjected = !dimmed && anchored && layer != null && projection != null
@@ -996,10 +1368,25 @@ public sealed class DecalViewport(ITextureProvider textureProvider) : IDisposabl
                                 _editableTouched[index] = true;
 
                             var pixelNormal = mesh.Normals[i0] * w0 + mesh.Normals[i1] * w1 + mesh.Normals[i2] * w2;
-                            var facing = pixelNormal.LengthSquared() > 1e-8f
-                                ? MathF.Abs(Vector3.Dot(Vector3.Normalize(pixelNormal), eyeDirection))
-                                : 0.4f;
-                            var light = 0.35f + 0.65f * facing;
+                            var shadingNormal = pixelNormal.LengthSquared() > 1e-8f
+                                ? Vector3.Normalize(pixelNormal)
+                                : eyeDirection;
+
+                            // Normal-map relief: perturb the mesh normal through the triangle's
+                            // tangent frame so baked detail (fur strands, scales) shades in the
+                            // preview the way it will in game.
+                            if (triNormalMap)
+                            {
+                                var nmUv = mesh.Uvs[i0] * w0 + mesh.Uvs[i1] * w1 + mesh.Uvs[i2] * w2;
+                                var (nx, ny) = SampleNormalRg(meshNormalMap!, nmUv);
+                                var nz = MathF.Sqrt(MathF.Max(0f, 1f - nx * nx - ny * ny));
+                                var perturbed = shadingNormal * nz + triTangent * nx + triBitangent * ny;
+                                if (perturbed.LengthSquared() > 1e-8f)
+                                    shadingNormal = Vector3.Normalize(perturbed);
+                            }
+
+                            var facing = MathF.Abs(Vector3.Dot(shadingNormal, eyeDirection));
+                            var light  = 0.35f + 0.65f * facing;
 
                             // Dimmed/context geometry belongs to a DIFFERENT material than the one
                             // shaded here — its UVs point into a texture this pass never loaded, so
@@ -1121,6 +1508,7 @@ public sealed class DecalViewport(ITextureProvider textureProvider) : IDisposabl
         }
 
         RasterizeMesh(_mesh, _shading?.Diffuse, _shading?.IdMap, _shading?.SkinTone, _shading?.HairColors, _shading?.HairMask,
+            meshNormalMap: _shading?.NormalMap,
             skipContext: false);
         foreach (var overlay in _overlays)
             RasterizeMesh(overlay.Mesh, overlay.Diffuse, null, overlay.ApplySkinTone ? _shading?.SkinTone : null,

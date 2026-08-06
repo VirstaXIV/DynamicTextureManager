@@ -96,6 +96,8 @@ public sealed class DecalsTab(
 
     private readonly DecalViewport _viewport = new(textureProvider);
 
+    private readonly ProceduralSurfaceSection _procSection = new();
+
     private string                             _statsTexture = string.Empty;
     private readonly HashSet<int>              _usedRowPairs = [];
     private readonly Dictionary<int, int>      _rowUsageCounts = [];
@@ -311,6 +313,7 @@ public sealed class DecalsTab(
 
             Im.Separator();
             DrawDecalLibrary(dTexture);
+            DrawProceduralAdd(dTexture);
             Im.Separator();
             DrawLayers(dTexture);
         }
@@ -554,6 +557,32 @@ public sealed class DecalsTab(
         Im.Tooltip.OnHover("Import an image into the decal library and stamp it onto the selected material right away.\nTo import without stamping, use the Decal Library window (title-bar button)."u8);
     }
 
+    /// <summary>
+    /// Procedural surface layers cover the whole skin canvas (fur, scales, patterns) instead
+    /// of stamping one image — offered on skin materials only, whose bodies/faces are uniquely
+    /// unwrapped (card hair shares texels between strands and stays excluded).
+    /// </summary>
+    private void DrawProceduralAdd(DTexture dTexture)
+    {
+        if (SelectedKind() is not MaterialKind.Skin || DiffuseOption() is not { } target)
+            return;
+
+        if (Im.Button("Add Fur / Scales / Pattern"u8))
+        {
+            if (!dTexture.Data.Textures.TryGetValue(target.GamePath, out var layers))
+            {
+                layers                                  = [];
+                dTexture.Data.Textures[target.GamePath] = layers;
+            }
+
+            CaptureTextureSource(dTexture, target.GamePath);
+            layers.Add(new ProceduralSurfaceLayer());
+            Save(dTexture);
+        }
+
+        Im.Tooltip.OnHover("Generates a full-body surface texture — fur, scales or a skin pattern — following the shape of the body."u8);
+    }
+
     private void AddLayer(DTexture dTexture, Guid decalId, DecalPreset? preset)
     {
         // The colorset id map is the preferred target: the decal is quantized and each of
@@ -733,6 +762,13 @@ public sealed class DecalsTab(
         foreach (var (idx, layer) in layers.Index())
         {
             using var id = Im.Id.Push(idx);
+            if (layer is ProceduralSurfaceLayer proc)
+            {
+                DrawProceduralEntry(dTexture, proc, idx, layers.Count,
+                    ModelUvReader.IsBodySkinMaterial(option.MaterialGamePath), ref remove, ref swap);
+                continue;
+            }
+
             if (layer is not DecalLayer decal)
                 continue;
 
@@ -830,6 +866,46 @@ public sealed class DecalsTab(
             (layers[swap.Item1], layers[swap.Item2]) = (layers[swap.Item2], layers[swap.Item1]);
             Save(dTexture);
         }
+    }
+
+    /// <summary> One procedural surface layer in the layer list: header row plus its settings. </summary>
+    private void DrawProceduralEntry(DTexture dTexture, ProceduralSurfaceLayer proc, int idx, int count,
+        bool bodyRegions, ref int remove, ref (int, int) swap)
+    {
+        var enabled = proc.Enabled;
+        if (Im.Checkbox("##enabled"u8, ref enabled))
+        {
+            proc.Enabled = enabled;
+            Save(dTexture);
+        }
+
+        Im.Line.Same();
+        if (!Im.Tree.Header($"{idx + 1}: {ProceduralSurfaceSection.KindLabel(proc.Kind)}###layer{idx}"))
+            return;
+
+        using var indent = Im.Indent();
+
+        if (_procSection.Draw(proc, bodyRegions))
+            Save(dTexture);
+
+        var painting = _viewport.IsPaintingFor(proc);
+        if (Im.SmallButton(painting ? "Painting..."u8 : "Paint Coverage"u8) && !painting)
+            _viewport.BeginCoveragePaint(proc, () => Save(dTexture));
+        Im.Tooltip.OnHover("Brush over the 3D preview to thin the pattern away where you don't want it — it tapers into bare skin. The Restore brush paints it back."u8);
+        if (proc.MaskDabs.Count > 0)
+        {
+            Im.Line.Same();
+            Im.Text($"({proc.MaskDabs.Count} dabs)");
+        }
+
+        if (Im.SmallButton("Remove"u8))
+            remove = idx;
+        Im.Line.Same();
+        if (Im.SmallButton("Up"u8) && idx > 0)
+            swap = (idx, idx - 1);
+        Im.Line.Same();
+        if (Im.SmallButton("Down"u8) && idx < count - 1)
+            swap = (idx, idx + 1);
     }
 
     /// <summary>
@@ -1923,7 +1999,8 @@ public sealed class DecalsTab(
     #region 3D preview shading
 
     private readonly record struct ShadingKey(int DiffuseVersion, int IndexVersion, int RowVersion, bool Placement, uint SkinTone,
-        uint HairColor, uint HairHighlight, int HairMaskVersion, int OverlayVersionHash, ViewportEffect? Effect);
+        uint HairColor, uint HairHighlight, int HairMaskVersion, int OverlayVersionHash, ViewportEffect? Effect,
+        int NormalMapVersion);
 
     // Effect pattern pixels for the live viewport effect and thumbnails, cached per
     // (pattern, library entry) — ViewportEffect compares the array by reference, so the same
@@ -2122,9 +2199,13 @@ public sealed class DecalsTab(
         // matches the built result, including mid-drag.
         var overlayEntries = BuildOverlayEntries(dTexture, placementLayer, boundPath, out var overlayVersionHash);
 
+        // The composited normal map shades the preview's relief (fur strands, scales, decal
+        // smoothing) — hair excluded, its normal already IS the color-shading entry.
+        var normalMapEntry = kind is MaterialKind.Hair ? null : EntryFor(NormalOption());
+
         var key = new ShadingKey(diffuseEntry?.Version ?? -1, indexEntry?.Version ?? -1, _rowDiffuseVersion,
             placementLayer != null, skinTone, hairColor, hairHighlight, maskEntry?.Version ?? -1, overlayVersionHash,
-            viewportEffect);
+            viewportEffect, normalMapEntry?.Version ?? -1);
         if (key == _shadingKey)
             return;
 
@@ -2138,7 +2219,7 @@ public sealed class DecalsTab(
         }
 
         _viewport.UpdateShading(new ViewportShading(PreviewBuffer(diffuseEntry), PreviewBuffer(indexEntry), _rowDiffuse, tone,
-            HairPreviewColors(dTexture, kind), PreviewBuffer(maskEntry), viewportEffect));
+            HairPreviewColors(dTexture, kind), PreviewBuffer(maskEntry), viewportEffect, PreviewBuffer(normalMapEntry)));
         _viewport.SetOverlays(overlayEntries);
     }
 
@@ -2346,10 +2427,21 @@ public sealed class DecalsTab(
             ? a
             : null;
 
+        // Body-family companion canvases (face, nails, accents) are painted automatically by
+        // the body's own layers — show their textures alongside the body's so the user can
+        // check the continuation without selecting anything. The face also receives relief
+        // and finish, so all its slots list; overlay parts only take diffuse decals.
+        var companionOptions = _overlayOptions is { Count: > 0 } && ModelUvReader.IsBodySkinMaterial(_selectedMaterial)
+            ? _overlayOptions.Where(o => ModelUvReader.IsFaceSkinMaterial(o.MaterialGamePath)
+                ? o.Slot is TextureSlot.Diffuse or TextureSlot.Normal or TextureSlot.Mask
+                : o.Slot is TextureSlot.Diffuse).ToList()
+            : [];
+
         var generatedIndex = animatedEdit != null ? Array.IndexOf(GeneratedIds, _previewTexturePath) : -1;
         var current = generatedIndex >= 0
             ? null
-            : options.Find(o => string.Equals(o.GamePath, _previewTexturePath, StringComparison.OrdinalIgnoreCase))
+            : options.Concat(companionOptions)
+                 .FirstOrDefault(o => string.Equals(o.GamePath, _previewTexturePath, StringComparison.OrdinalIgnoreCase))
              ?? DefaultTargetOption() ?? options[0];
 
         // --- thumbnail strip: the material's textures, then the generated companions.
@@ -2385,6 +2477,14 @@ public sealed class DecalsTab(
         {
             var entry = previewCache.Get(dTexture, option.GamePath, null);
             Thumbnail(option.GamePath, $"{SlotButtonLabel(option)}\n{option.GamePath}",
+                entry.CompositedWrap ?? entry.PristineWrap, entry.Pristine?.Width ?? 0, entry.Pristine?.Height ?? 0,
+                current != null && ReferenceEquals(option, current));
+        }
+
+        foreach (var option in companionOptions)
+        {
+            var entry = previewCache.Get(dTexture, option.GamePath, null);
+            Thumbnail(option.GamePath, $"{option.MaterialLabel} {SlotButtonLabel(option)} (painted by this canvas's layers)\n{option.GamePath}",
                 entry.CompositedWrap ?? entry.PristineWrap, entry.Pristine?.Width ?? 0, entry.Pristine?.Height ?? 0,
                 current != null && ReferenceEquals(option, current));
         }

@@ -38,13 +38,15 @@ public sealed class OverlayModManager : IService, IDisposable
     private readonly Shaders.ShaderHandlerRegistry shaderHandlers;
     private readonly ModelUvReader         uvReader;
     private readonly Interop.HairColorReader hairColors;
+    private readonly Interop.SkinColorReader skinColors;
     private readonly DecalLibrary          decals;
 
     public OverlayModManager(PenumbraService penumbra, SourceFileProvider sourceFiles, ModWriter modWriter, SaveService saveService,
         Configuration config, DTextureStorage storage, DTextureChanged dTextureChanged, IFramework framework, TextureIO textureIO,
         TextureCompositor compositor, Shaders.ShaderHandlerRegistry shaderHandlers, ModelUvReader uvReader,
-        Interop.HairColorReader hairColors, DecalLibrary decals)
+        Interop.HairColorReader hairColors, Interop.SkinColorReader skinColors, DecalLibrary decals)
     {
+        this.skinColors = skinColors;
         this.decals = decals;
         this.penumbra        = penumbra;
         this.sourceFiles     = sourceFiles;
@@ -430,12 +432,33 @@ public sealed class OverlayModManager : IService, IDisposable
             return Fail($"Build failed: {ex.Message}");
         }
 
+        // Live customize state must be read here on the framework thread, never from the
+        // background build — the baked file freezes the colors captured now.
+        var characterColors = new CharacterColors();
+        if (plan.TextureJobs.Any(j => j.Layers.Concat(j.EffectLayers)
+                .Any(l => l is DTextures.Data.ProceduralSurfaceLayer { Enabled: true } p
+                 && (p.TintFromSkin || p.UseCharacterColors))))
+        {
+            if (skinColors.TryGetLocalPlayerSkin(out var liveSkin))
+                characterColors = characterColors with { Skin = liveSkin };
+            if (hairColors.TryGetLocalPlayerHair(out var liveHair))
+                characterColors = characterColors with
+                {
+                    HairMain = liveHair.Main,
+                    // Highlights disabled leaves no second color — lighten the main a touch
+                    // so fur crests still separate from the base.
+                    HairHighlight = liveHair.HighlightsEnabled
+                        ? liveHair.Highlight
+                        : System.Numerics.Vector3.Min(liveHair.Main * 1.35f + new System.Numerics.Vector3(0.06f), System.Numerics.Vector3.One),
+                };
+        }
+
         LastResult = plan.TextureJobs.Count > 0 ? "Building textures..." : "Building...";
         _ = Task.Run(async () =>
         {
             try
             {
-                var written = await BuildAndWriteAsync(dTexture, modDirectory, plan, commitWhenEmpty: cleaning).ConfigureAwait(false);
+                var written = await BuildAndWriteAsync(dTexture, modDirectory, plan, characterColors, commitWhenEmpty: cleaning).ConfigureAwait(false);
                 await framework.RunOnFrameworkThread(() =>
                 {
                     if (written == 0 && !cleaning)
@@ -554,7 +577,7 @@ public sealed class OverlayModManager : IService, IDisposable
 
             // Surface-projected layers bake through the material's bind-pose mesh.
             MaterialMesh? mesh = null;
-            if (layers.Any(l => l is DTextures.Data.DecalLayer { Surface: true, Enabled: true }))
+            if (layers.Any(l => l.Enabled && l.NeedsMeshGeometry))
             {
                 var owner = CompositePlanner.FindTextureOwner(dTexture.Data, gamePath, shaderHandlers, sourceFiles);
                 mesh = owner != null ? uvReader.GetMesh(owner) : null;
@@ -601,7 +624,7 @@ public sealed class OverlayModManager : IService, IDisposable
             var layers   = dTexture.Data.Textures.GetValueOrDefault(gamePath) ?? [];
             var diskPath = GetOrCaptureTextureSource(dTexture, gamePath);
             MaterialMesh? mesh = null;
-            if (layers.Any(l => l is DTextures.Data.DecalLayer { Surface: true, Enabled: true }))
+            if (layers.Any(l => l.Enabled && l.NeedsMeshGeometry))
             {
                 var owner = CompositePlanner.FindTextureOwner(dTexture.Data, gamePath, shaderHandlers, sourceFiles);
                 mesh = owner != null ? uvReader.GetMesh(owner) : null;
@@ -916,7 +939,8 @@ public sealed class OverlayModManager : IService, IDisposable
     /// cleanup that deletes the mod's stale files); an ACCIDENTALLY empty result — every job
     /// failed to decode — must never commit, or it would wipe a previously good mod.
     /// </summary>
-    private async Task<int> BuildAndWriteAsync(DTexture dTexture, string modDirectory, BuildPlan plan, bool commitWhenEmpty = false)
+    private async Task<int> BuildAndWriteAsync(DTexture dTexture, string modDirectory, BuildPlan plan,
+        CharacterColors characterColors, bool commitWhenEmpty = false)
     {
         using var build   = modWriter.StartBuild(modDirectory);
         var       written = 0;
@@ -937,7 +961,7 @@ public sealed class OverlayModManager : IService, IDisposable
                 continue;
 
             DynamicTextureManager.Log.Debug($"Building {job.GamePath} at {decoded.Width}x{decoded.Height} (source {(job.DiskPath == null ? "vanilla" : $"\"{job.DiskPath}\"")}).");
-            var rgba = compositor.CompositeFull(decoded, job.Layers, job.EffectLayers, job.EffectSlot, job.Mesh);
+            var rgba = compositor.CompositeFull(decoded, job.Layers, job.EffectLayers, job.EffectSlot, job.Mesh, characterColors);
 
             if (plan.AnimatedJobs.Any(a => string.Equals(a.NormalGamePath, job.GamePath, StringComparison.OrdinalIgnoreCase)
                                         || string.Equals(a.MaskGamePath, job.GamePath, StringComparison.OrdinalIgnoreCase)))

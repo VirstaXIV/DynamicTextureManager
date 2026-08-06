@@ -12,6 +12,14 @@ using SixLabors.ImageSharp.Processing;
 
 namespace DynamicTextureManager.ModGeneration;
 
+/// <summary>
+/// The character's live customize colors a composite may bake with (procedural surface
+/// layers): captured on the framework thread before the composite runs in the background.
+/// Null components mean the character was unreadable — layer colors are used as stored.
+/// </summary>
+public readonly record struct CharacterColors(System.Numerics.Vector3? Skin, System.Numerics.Vector3? HairMain,
+    System.Numerics.Vector3? HairHighlight);
+
 /// <summary> Composites decal layers onto a base texture in RGBA space. </summary>
 public sealed class TextureCompositor(DecalLibrary decals) : IService
 {
@@ -19,7 +27,8 @@ public sealed class TextureCompositor(DecalLibrary decals) : IService
     /// Apply all enabled layers onto the base texture. Returns the composited RGBA buffer.
     /// Surface-projected layers need the material's mesh geometry; without it they are skipped.
     /// </summary>
-    private byte[] Composite(DecodedTexture baseTexture, IEnumerable<TextureLayer> layers, MaterialMesh? mesh)
+    private byte[] Composite(DecodedTexture baseTexture, IEnumerable<TextureLayer> layers, MaterialMesh? mesh,
+        CharacterColors characterColors)
     {
         if (!layers.Any(l => l.Enabled))
             return (byte[])baseTexture.Rgba.Clone();
@@ -39,6 +48,12 @@ public sealed class TextureCompositor(DecalLibrary decals) : IService
                 case HairShineLayer shine:
                     HairAdjust.ApplyShine(image, shine);
                     break;
+                case ProceduralSurfaceLayer proc:
+                    if (mesh != null)
+                        ProceduralSurfaceBaker.Bake(image, mesh, proc, characterColors: characterColors);
+                    else
+                        DynamicTextureManager.Log.Warning("Procedural surface layer skipped — no mesh geometry available for this texture's material.");
+                    break;
                 default:
                     DynamicTextureManager.Log.Warning($"Unknown layer type {layer.LayerType}, skipped.");
                     break;
@@ -56,12 +71,13 @@ public sealed class TextureCompositor(DecalLibrary decals) : IService
     /// previews stay pixel-identical to built files by construction.
     /// </summary>
     public byte[] CompositeFull(DecodedTexture baseTexture, IEnumerable<TextureLayer> layers,
-        IReadOnlyList<TextureLayer> effectLayers, TextureSlot effectSlot, MaterialMesh? mesh)
+        IReadOnlyList<TextureLayer> effectLayers, TextureSlot effectSlot, MaterialMesh? mesh,
+        CharacterColors characterColors = default)
     {
-        var rgba = Composite(baseTexture, layers, mesh);
+        var rgba = Composite(baseTexture, layers, mesh, characterColors);
         if (effectLayers.Count > 0)
             rgba = CompositeSiblingEffects(new DecodedTexture(rgba, baseTexture.Width, baseTexture.Height),
-                effectLayers, effectSlot, mesh);
+                effectLayers, effectSlot, mesh, characterColors);
         return rgba;
     }
 
@@ -71,19 +87,27 @@ public sealed class TextureCompositor(DecalLibrary decals) : IService
     /// UV-normalized, so resolution differences between the siblings do not matter.
     /// </summary>
     private byte[] CompositeSiblingEffects(DecodedTexture baseTexture, IEnumerable<TextureLayer> layers, TextureSlot slot,
-        MaterialMesh? mesh)
+        MaterialMesh? mesh, CharacterColors characterColors)
     {
-        if (!layers.OfType<DecalLayer>().Any(l => l.Enabled && l.HasMaterialEffects))
+        if (!layers.Any(l => l.Enabled && l.HasSiblingEffects))
             return baseTexture.Rgba;
 
         using var image = Image.LoadPixelData<Rgba32>(baseTexture.Rgba, baseTexture.Width, baseTexture.Height);
 
-        foreach (var layer in layers.OfType<DecalLayer>())
+        foreach (var layer in layers)
         {
-            if (!layer.Enabled || !layer.HasMaterialEffects)
+            if (!layer.Enabled || !layer.HasSiblingEffects)
                 continue;
 
-            ApplyDecal(image, layer, mesh, effectSlot: slot);
+            switch (layer)
+            {
+                case DecalLayer decal:
+                    ApplyDecal(image, decal, mesh, effectSlot: slot);
+                    break;
+                case ProceduralSurfaceLayer proc when mesh != null:
+                    ProceduralSurfaceBaker.Bake(image, mesh, proc, effectSlot: slot, characterColors: characterColors);
+                    break;
+            }
         }
 
         var result = new byte[image.Width * image.Height * 4];

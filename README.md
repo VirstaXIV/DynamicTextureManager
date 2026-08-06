@@ -2,8 +2,9 @@
 
 A companion plugin for [Penumbra](https://github.com/xivdev/Penumbra) that manages **overlay
 mods**: pick a target — gear you are wearing, your body, or your hair — stamp decals onto it,
-recolor them, tune the surface finish, convert hair and tails to an animated glowing effect,
-and apply the result as a plugin-managed persistent mod in Penumbra.
+recolor them, tune the surface finish, generate fur, scales or skin patterns that follow the
+flow of the body, convert hair and tails to an animated glowing effect, and apply the result
+as a plugin-managed persistent mod in Penumbra.
 
 ## Status
 
@@ -38,6 +39,9 @@ Requires [Penumbra](https://github.com/xivdev/Penumbra) to be installed and enab
   its colorset edits. Each dTexture builds into exactly one Penumbra mod.
 - **Decal** — an image from your library, stamped onto a material. Placed directly on the 3D
   model, it conforms to the surface and carries per-layer colors, finish, and size.
+- **Surface pattern** — a generated fur, scales or skin-pattern layer covering the whole body
+  or face. Guide anchors placed on the 3D model steer its direction; relief bakes into the
+  normal map so light catches it.
 - **Generated mod** — pressing **Build** writes a real, self-contained mod into Penumbra.
   Built mods bake everything in: they keep working with the plugin unloaded.
 
