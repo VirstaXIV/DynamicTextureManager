@@ -148,6 +148,7 @@ public static class ProceduralSurfaceBaker
     {
         var texels = width * height;
         var flow   = SurfaceFlowField.ComputeVertexFlow(mesh, layer.Anchors);
+        var region = ComputeRegionWeights(mesh, layer);
         var fields = new SurfaceFields
         {
             Covered        = new bool[texels],
@@ -213,11 +214,13 @@ public static class ProceduralSurfaceBaker
 
                     var index = y * width + x;
 
-                    // The overlap tie-break compares final weights, so exclusion fades are
-                    // part of the weight before the comparison.
+                    // The overlap tie-break compares final weights, so exclusion fades and
+                    // region weights are part of the weight before the comparison.
                     var weight = flow != null
                         ? flow.Exclusion[i0] * w0 + flow.Exclusion[i1] * w1 + flow.Exclusion[i2] * w2
                         : 1f;
+                    if (region != null)
+                        weight *= region[i0] * w0 + region[i1] * w1 + region[i2] * w2;
                     if (fields.Covered[index] && fields.Weight[index] >= weight)
                         continue;
 
@@ -251,6 +254,69 @@ public static class ProceduralSurfaceBaker
         }
 
         return any ? fields : null;
+    }
+
+    /// <summary>
+    /// Per-vertex body-part weights from the merged canvas's model units (chest/legs/hands/
+    /// feet sliders), averaged onto position-welded vertices and Jacobi-smoothed over the
+    /// sorted adjacency so unit seams (wrists, waist, ankles) fade instead of cutting.
+    /// Null when every weight is 1 — the common case pays nothing.
+    /// </summary>
+    private static float[]? ComputeRegionWeights(MaterialMesh mesh, ProceduralSurfaceLayer layer)
+    {
+        if (layer is { WeightChest: 1f, WeightLegs: 1f, WeightHands: 1f, WeightFeet: 1f })
+            return null;
+
+        var count = mesh.VertexCount;
+        var (canonical, neighbors) = mesh.GetOrBuildAdjacency();
+
+        var sum = new float[count];
+        var hit = new int[count];
+        for (var t = 0; t < mesh.TriangleCount; ++t)
+        {
+            var w = Math.Clamp(layer.UnitWeight(mesh.TriangleUnit[t]), 0f, 1f);
+            for (var k = 0; k < 3; ++k)
+            {
+                var c = canonical[mesh.Indices[t * 3 + k]];
+                sum[c] += w;
+                hit[c] += 1;
+            }
+        }
+
+        var weights = new float[count];
+        for (var v = 0; v < count; ++v)
+            weights[v] = hit[v] > 0 ? sum[v] / hit[v] : 1f;
+
+        // Feather: plain Jacobi averaging over the welded graph — deterministic with the
+        // sorted neighbor lists, and each iteration widens the transition by roughly one edge.
+        var iterations = (int)MathF.Round(Math.Clamp(layer.RegionFeather, 0f, 1f) * 20f);
+        for (var i = 0; i < iterations; ++i)
+        {
+            var next = new float[count];
+            for (var v = 0; v < count; ++v)
+            {
+                if (canonical[v] != v)
+                    continue;
+
+                var total = weights[v];
+                var n     = 1;
+                foreach (var nb in neighbors[v])
+                {
+                    total += weights[nb];
+                    ++n;
+                }
+
+                next[v] = total / n;
+            }
+
+            weights = next;
+        }
+
+        var result = new float[count];
+        for (var v = 0; v < count; ++v)
+            result[v] = weights[canonical[v]];
+
+        return result;
     }
 
     /// <summary>
