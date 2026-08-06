@@ -570,6 +570,13 @@ public sealed class DecalViewport(ITextureProvider textureProvider) : IDisposabl
             : _paintChannel == PaintChannel.Markings ? 0xFF30C8FFu : 0xFF5050FFu;
         draw.Shape.Circle(center.Value, radiusPx, color, thickness: 2f);
 
+        // Inner ring gauges Strength: at full strength it marks where the dab is strongest
+        // (the effect fades from there to the outer ring); lower strength pulls it inward
+        // as the whole dab weakens, so a soft brush reads as one at a glance.
+        var innerPx = radiusPx * 0.6f * _paintStrength;
+        if (innerPx >= 2f)
+            draw.Shape.Circle(center.Value, innerPx, (color & 0x00FFFFFFu) | 0x90000000u, 1.5f);
+
         // Line mode: a straight guide from the previous point (the laid stripe itself
         // follows the surface, not this preview line).
         if (_paintLine && _paintLineLast is { } previous && Project(previous) is { } from)
@@ -713,8 +720,8 @@ public sealed class DecalViewport(ITextureProvider textureProvider) : IDisposabl
         if (Im.Slider("Strength"u8, ref strength, "%.2f"u8, 0.1f, 1f))
             _paintStrength = Math.Clamp(strength, 0.1f, 1f);
         Im.Tooltip.OnHover(_paintChannel == PaintChannel.Markings
-            ? "Full strength places the highlight color solidly; lower tints."u8
-            : "Full strength removes the pattern entirely; lower thins it."u8);
+            ? "Full strength places the highlight color solidly; lower tints. The brush's inner ring shows it."u8
+            : "Full strength removes the pattern entirely; lower thins it. The brush's inner ring shows it."u8);
     }
 
     private static readonly ImSharp.Rgba32 ToolActiveColor = new(0xFF885522u);
