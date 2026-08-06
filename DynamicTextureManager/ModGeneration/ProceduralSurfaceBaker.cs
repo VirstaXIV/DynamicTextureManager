@@ -182,8 +182,10 @@ public static class ProceduralSurfaceBaker
     /// </summary>
     private static SurfaceFields? RasterizeFields(int width, int height, MaterialMesh mesh, ProceduralSurfaceLayer layer)
     {
+        // Flow anchors are DISABLED for now (user decision — they destabilized the bake);
+        // stored anchors on layers are ignored and the natural body flow drives everything.
         var texels  = width * height;
-        var flow    = SurfaceFlowField.ComputeVertexFlow(mesh, layer.Anchors);
+        var flow    = (SurfaceFlowField.VertexFlow?)null;
         var natural = SurfaceFlowField.BodyFlow(mesh);
         var region  = ComputeRegionWeights(mesh, layer);
         var directional = layer.Kind is SurfaceGeneratorKind.Fur or SurfaceGeneratorKind.Scales;
@@ -194,7 +196,7 @@ public static class ProceduralSurfaceBaker
         // to EVERY kind: the flow potential (stripe bands, tabby markings) must also agree
         // where canvases meet.
         var worldOnly = MeshExtent(mesh) < 0.35f;
-        var charts    = directional && !worldOnly ? SurfaceFlowField.ComputeCharts(mesh, flow, layer.Anchors) : null;
+        var charts    = directional && !worldOnly ? SurfaceFlowField.ComputeCharts(mesh, flow, []) : null;
         var boundary  = worldOnly ? null : SurfaceFlowField.BoundaryDistance(mesh);
         var fields = new SurfaceFields
         {
