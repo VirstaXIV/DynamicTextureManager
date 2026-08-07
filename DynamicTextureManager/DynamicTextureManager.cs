@@ -1,23 +1,20 @@
-﻿using System;
-using System.Linq;
+using System;
 using Dalamud.Plugin;
 using System.Reflection;
-using System.Text;
-using OtterGui.Log;
 using DynamicTextureManager.Services;
 using DynamicTextureManager.UI;
-using OtterGui.Classes;
-using OtterGui.Services;
+using Luna;
 
 namespace DynamicTextureManager;
 
 public sealed class DynamicTextureManager : IDalamudPlugin
 {
     public string Name => "DynamicTextureManager";
-    
+
     public static readonly string Version = Assembly.GetExecutingAssembly().GetName().Version?.ToString() ?? string.Empty;
 
-    public static readonly Logger Log = new();
+    public static readonly MainLogger Log = new("DynamicTextureManager");
+
     public static MessageService Messager { get; private set; } = null!;
     private readonly ServiceManager _services;
 
@@ -26,9 +23,8 @@ public sealed class DynamicTextureManager : IDalamudPlugin
         try
         {
             _services = ServiceProvider.CreateProvider(pluginInterface, Log, this);
-            Messager  = _services.GetService<MessageService>();
-
             _services.EnsureRequiredServices();
+            Messager  = _services.GetService<MessageService>();
             Colors.SetColors(_services.GetService<Configuration>());
             ModGeneration.FinishMapping.Sync(_services.GetService<Configuration>());
             _services.GetService<DTMWindowSystem>();

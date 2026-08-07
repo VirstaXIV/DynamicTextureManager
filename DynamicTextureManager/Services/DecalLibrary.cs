@@ -5,7 +5,7 @@ using System.Linq;
 using DynamicTextureManager.DTextures.Data;
 using Newtonsoft.Json;
 using Newtonsoft.Json.Linq;
-using OtterGui.Services;
+using IService = Luna.IService;
 using SixLabors.ImageSharp;
 
 namespace DynamicTextureManager.Services;
@@ -112,6 +112,19 @@ public sealed class EffectEntry
 }
 
 /// <summary>
+/// An imported tileable marking pattern, referenced by id from procedural surface layers as
+/// their custom markings mask. Managed exactly like decals: normalized to PNG in the same
+/// storage folder, deletable through the library.
+/// </summary>
+public sealed class PatternEntry
+{
+    public Guid           Id;
+    public string         Name         = string.Empty;
+    public string         OriginalFile = string.Empty;
+    public DateTimeOffset CreatedDate;
+}
+
+/// <summary>
 /// Shared library of decal images (PNG), referenced by id from dTexture layers. Built mods
 /// bake the pixels in, so generated mods stay self-contained even if a decal is later removed
 /// from the library. Images live in a configurable storage folder (default inside the plugin
@@ -121,14 +134,18 @@ public sealed class DecalLibrary : IService
 {
     private readonly FilenameService _filenames;
     private readonly Configuration   _config;
-    private readonly List<DecalEntry>  _decals  = [];
-    private readonly List<EffectEntry> _effects = [];
+    private readonly List<DecalEntry>   _decals   = [];
+    private readonly List<EffectEntry>  _effects  = [];
+    private readonly List<PatternEntry> _patterns = [];
 
     public IReadOnlyList<DecalEntry> Decals
         => _decals;
 
     public IReadOnlyList<EffectEntry> Effects
         => _effects;
+
+    public IReadOnlyList<PatternEntry> Patterns
+        => _patterns;
 
     public DecalLibrary(FilenameService filenames, Configuration config)
     {
@@ -158,6 +175,10 @@ public sealed class DecalLibrary : IService
     public string EffectFilePath(Guid id)
         => Path.Combine(StorageDirectory, $"{id}.png");
 
+    /// <summary> Marking patterns share the decal storage folder — ids keep the files apart. </summary>
+    public string PatternFilePath(Guid id)
+        => Path.Combine(StorageDirectory, $"{id}.png");
+
     /// <summary> Bumped on every library mutation, so UIs can cache views derived from the entry lists. </summary>
     public int Revision { get; private set; }
 
@@ -166,6 +187,9 @@ public sealed class DecalLibrary : IService
 
     public EffectEntry? GetEffect(Guid id)
         => _effects.FirstOrDefault(e => e.Id == id);
+
+    public PatternEntry? GetPattern(Guid id)
+        => _patterns.FirstOrDefault(p => p.Id == id);
 
     /// <summary> The distinct tags across all decals, for filter UIs. </summary>
     public List<string> AllTags()
@@ -258,6 +282,88 @@ public sealed class DecalLibrary : IService
         {
             DynamicTextureManager.Log.Error($"Could not import effect pattern from {sourcePath}:\n{ex}");
             return null;
+        }
+    }
+
+    /// <summary> Import an image file as a marking pattern. Returns the new entry or null on failure. </summary>
+    public PatternEntry? ImportPattern(string sourcePath)
+    {
+        try
+        {
+            var id = Guid.NewGuid();
+            Directory.CreateDirectory(StorageDirectory);
+
+            using (var image = Image.Load<SixLabors.ImageSharp.PixelFormats.Rgba32>(sourcePath))
+            {
+                image.SaveAsPng(PatternFilePath(id));
+            }
+
+            var entry = new PatternEntry
+            {
+                Id           = id,
+                Name         = Path.GetFileNameWithoutExtension(sourcePath),
+                OriginalFile = Path.GetFileName(sourcePath),
+                CreatedDate  = DateTimeOffset.UtcNow,
+            };
+            _patterns.Add(entry);
+            Save();
+            return entry;
+        }
+        catch (Exception ex)
+        {
+            DynamicTextureManager.Log.Error($"Could not import marking pattern from {sourcePath}:\n{ex}");
+            return null;
+        }
+    }
+
+    /// <summary> Import a generated in-memory image (e.g. an example pattern) as a marking pattern. </summary>
+    public PatternEntry? ImportGeneratedPattern(Image<SixLabors.ImageSharp.PixelFormats.Rgba32> image, string name)
+    {
+        try
+        {
+            var id = Guid.NewGuid();
+            Directory.CreateDirectory(StorageDirectory);
+            image.SaveAsPng(PatternFilePath(id));
+
+            var entry = new PatternEntry
+            {
+                Id          = id,
+                Name        = name,
+                CreatedDate = DateTimeOffset.UtcNow,
+            };
+            _patterns.Add(entry);
+            Save();
+            return entry;
+        }
+        catch (Exception ex)
+        {
+            DynamicTextureManager.Log.Error($"Could not import generated marking pattern \"{name}\":\n{ex}");
+            return null;
+        }
+    }
+
+    public void RenamePattern(Guid id, string newName)
+    {
+        if (GetPattern(id) is not { } entry)
+            return;
+
+        entry.Name = newName;
+        Save();
+    }
+
+    public void DeletePattern(Guid id)
+    {
+        if (_patterns.RemoveAll(p => p.Id == id) == 0)
+            return;
+
+        Save();
+        try
+        {
+            File.Delete(PatternFilePath(id));
+        }
+        catch (Exception ex)
+        {
+            DynamicTextureManager.Log.Warning($"Could not delete marking pattern file for {id}: {ex.Message}");
         }
     }
 
@@ -360,7 +466,7 @@ public sealed class DecalLibrary : IService
         }
 
         var copied = new List<string>();
-        foreach (var id in _decals.Select(d => d.Id).Concat(_effects.Select(e => e.Id)))
+        foreach (var id in _decals.Select(d => d.Id).Concat(_effects.Select(e => e.Id)).Concat(_patterns.Select(p => p.Id)))
         {
             var source = Path.Combine(old, $"{id}.png");
             // Consistent with the load-time drop behavior: missing files are skipped.
@@ -392,7 +498,7 @@ public sealed class DecalLibrary : IService
         _config.DecalStorageFolder = newFolder;
         _config.Save();
 
-        foreach (var id in _decals.Select(d => d.Id).Concat(_effects.Select(e => e.Id)))
+        foreach (var id in _decals.Select(d => d.Id).Concat(_effects.Select(e => e.Id)).Concat(_patterns.Select(p => p.Id)))
             try
             {
                 File.Delete(Path.Combine(old, $"{id}.png"));
@@ -404,6 +510,7 @@ public sealed class DecalLibrary : IService
 
         _decals.Clear();
         _effects.Clear();
+        _patterns.Clear();
         Load();
         return null;
     }
@@ -453,6 +560,22 @@ public sealed class DecalLibrary : IService
                         CreatedDate  = token["CreatedDate"]?.ToObject<DateTimeOffset?>() ?? DateTimeOffset.UtcNow,
                     });
                 }
+
+            if (json["Patterns"] is JArray patterns)
+                foreach (var token in patterns.OfType<JObject>())
+                {
+                    var id = token["Id"]?.ToObject<Guid>() ?? Guid.Empty;
+                    if (id == Guid.Empty || !File.Exists(PatternFilePath(id)))
+                        continue;
+
+                    _patterns.Add(new PatternEntry
+                    {
+                        Id           = id,
+                        Name         = token["Name"]?.ToObject<string>() ?? id.ToString(),
+                        OriginalFile = token["OriginalFile"]?.ToObject<string>() ?? string.Empty,
+                        CreatedDate  = token["CreatedDate"]?.ToObject<DateTimeOffset?>() ?? DateTimeOffset.UtcNow,
+                    });
+                }
         }
         catch (Exception ex)
         {
@@ -487,6 +610,13 @@ public sealed class DecalLibrary : IService
                     ["Name"]         = e.Name,
                     ["OriginalFile"] = e.OriginalFile,
                     ["CreatedDate"]  = e.CreatedDate.ToString("O"),
+                })),
+                ["Patterns"] = new JArray(_patterns.Select(p => new JObject
+                {
+                    ["Id"]           = p.Id,
+                    ["Name"]         = p.Name,
+                    ["OriginalFile"] = p.OriginalFile,
+                    ["CreatedDate"]  = p.CreatedDate.ToString("O"),
                 })),
             };
             File.WriteAllText(_filenames.DecalIndexFile, json.ToString(Formatting.Indented));

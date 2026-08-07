@@ -5,8 +5,6 @@ VisualStudioVersion = 16.0.29709.97
 MinimumVisualStudioVersion = 10.0.40219.1
 Project("{FAE04EC0-301F-11D3-BF4B-00C04F79EFBC}") = "DynamicTextureManager", "DynamicTextureManager\DynamicTextureManager.csproj", "{13C812E9-0D42-4B95-8646-40EEBF30636F}"
 EndProject
-Project("{FAE04EC0-301F-11D3-BF4B-00C04F79EFBC}") = "OtterGui", "OtterGui\OtterGui.csproj", "{11FC1896-136B-4831-A83C-95496BD7F1B4}"
-EndProject
 Project("{FAE04EC0-301F-11D3-BF4B-00C04F79EFBC}") = "Penumbra.String", "Penumbra.String\Penumbra.String.csproj", "{312A2240-D8E3-48FC-A17A-2052E074D2CE}"
 EndProject
 Project("{FAE04EC0-301F-11D3-BF4B-00C04F79EFBC}") = "Penumbra.Api", "Penumbra.Api\Penumbra.Api.csproj", "{7AD45307-4FAA-402E-8E87-676B3582CBE8}"
@@ -27,10 +25,6 @@ Global
 		{13C812E9-0D42-4B95-8646-40EEBF30636F}.Debug|x64.Build.0 = Debug|x64
 		{13C812E9-0D42-4B95-8646-40EEBF30636F}.Release|x64.ActiveCfg = Release|x64
 		{13C812E9-0D42-4B95-8646-40EEBF30636F}.Release|x64.Build.0 = Release|x64
-		{11FC1896-136B-4831-A83C-95496BD7F1B4}.Debug|x64.ActiveCfg = Debug|x64
-		{11FC1896-136B-4831-A83C-95496BD7F1B4}.Debug|x64.Build.0 = Debug|x64
-		{11FC1896-136B-4831-A83C-95496BD7F1B4}.Release|x64.ActiveCfg = Release|x64
-		{11FC1896-136B-4831-A83C-95496BD7F1B4}.Release|x64.Build.0 = Release|x64
 		{312A2240-D8E3-48FC-A17A-2052E074D2CE}.Debug|x64.ActiveCfg = Debug|x64
 		{312A2240-D8E3-48FC-A17A-2052E074D2CE}.Debug|x64.Build.0 = Debug|x64
 		{312A2240-D8E3-48FC-A17A-2052E074D2CE}.Release|x64.ActiveCfg = Release|x64

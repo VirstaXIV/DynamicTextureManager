@@ -31,13 +31,23 @@ public sealed class SourcePath
     /// <summary>
     /// Whether this source is an overlay part (nails, accents — see ModelUvReader.
     /// GetBodyOverlayMaterials) rather than a primary editable canvas: shown and viewable in
-    /// the Textures tab like any other source, but excluded from the Decals tab's material
+    /// the Sources section like any other source, but excluded from the Decals tab's material
     /// selector — decorating it directly there merges most of the body mesh into unpaintable
     /// "context" (framed around the tiny overlay geometry) and renders it sampling the wrong
     /// texture at the wrong UVs, which is confusing, not useful. Its texture is instead painted
     /// automatically by a body-skin tattoo that overlaps it (OverlayModManager companion bake).
     /// </summary>
     public bool Overlay = false;
+
+    /// <summary>
+    /// Whether this overlay source is an alternate material set of the SAME body — the
+    /// vanilla-compat material bibo-family body mods override so gear-embedded skin patches
+    /// match (e.g. Muse's mt_c0201b0001_a on the vanilla texture paths). It is not its own
+    /// canvas: every body bake (decals, procedural surface, relief) replays onto its texture
+    /// set through the vanilla body layout, and the viewport never renders it — it would
+    /// duplicate the body.
+    /// </summary>
+    public bool BodyMirror = false;
 
     public JObject Serialize()
         => new()
@@ -50,6 +60,7 @@ public sealed class SourcePath
             ["MdlGamePath"]   = MdlGamePath,
             ["MdlActualPath"] = MdlActualPath,
             ["Overlay"]       = Overlay,
+            ["BodyMirror"]    = BodyMirror,
         };
 
     public static SourcePath Load(JObject json)
@@ -63,6 +74,7 @@ public sealed class SourcePath
             MdlGamePath   = json["MdlGamePath"]?.ToObject<string>() ?? string.Empty,
             MdlActualPath = json["MdlActualPath"]?.ToObject<string>() ?? string.Empty,
             Overlay       = json["Overlay"]?.ToObject<bool>() ?? false,
+            BodyMirror    = json["BodyMirror"]?.ToObject<bool>() ?? false,
         };
 }
 

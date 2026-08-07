@@ -3,7 +3,6 @@ using System.Collections.Generic;
 using System.IO;
 using System.Linq;
 using System.Numerics;
-using Dalamud.Bindings.ImGui;
 using Dalamud.Interface.ImGuiFileDialog;
 using Dalamud.Interface.Textures;
 using Dalamud.Interface.Textures.TextureWraps;
@@ -14,14 +13,14 @@ using DynamicTextureManager.Interop;
 using DynamicTextureManager.ModGeneration;
 using DynamicTextureManager.ModGeneration.Shaders;
 using DynamicTextureManager.Services;
-using OtterGui.Extensions;
-using OtterGui.Raii;
-using OtterGui.Services;
-using OtterGui.Text;
+using ImSharp;
+using Luna;
+using IService = Luna.IService;
 using Penumbra.GameData.Files;
 using Penumbra.GameData.Files.MaterialStructs;
 using SixLabors.ImageSharp;
-using SixLabors.ImageSharp.PixelFormats;
+// Both ImSharp and ImageSharp define an Rgba32; this file's pixel work is ImageSharp's.
+using Rgba32 = SixLabors.ImageSharp.PixelFormats.Rgba32;
 
 namespace DynamicTextureManager.UI.Panels;
 
@@ -31,7 +30,7 @@ namespace DynamicTextureManager.UI.Panels;
 /// gear, else the diffuse) and its material effects touch the normal/mask siblings, so
 /// there is no per-texture selection. The embedded 3D viewport is the main preview: it
 /// renders the gear with the composited textures and the live colorset colors, and doubles
-/// as the placement surface. The finished textures are viewable in the Textures tab.
+/// as the placement surface. The finished texture is shown directly above the 3D preview.
 /// </summary>
 public sealed class DecalsTab(
     SourceFileProvider sourceFiles,
@@ -97,10 +96,11 @@ public sealed class DecalsTab(
 
     private readonly DecalViewport _viewport = new(textureProvider);
 
+    private readonly ProceduralSurfaceSection _procSection = new();
+
     private string                             _statsTexture = string.Empty;
     private readonly HashSet<int>              _usedRowPairs = [];
     private readonly Dictionary<int, int>      _rowUsageCounts = [];
-    private readonly List<(int Row, int Count)> _sortedRowUsage = [];
     private int                                _statsTotalTexels = 1;
 
     // Live customize colors, refreshed at most once a second. THE CHARACTER (Glamourer
@@ -161,12 +161,13 @@ public sealed class DecalsTab(
     private static void DrawColorSwatch(string label, uint packed, bool live)
     {
         var color = new Rgba32(packed);
-        ImGui.ColorButton(label, new System.Numerics.Vector4(color.R / 255f, color.G / 255f, color.B / 255f, 1f),
-            ImGuiColorEditFlags.NoTooltip | ImGuiColorEditFlags.NoAlpha);
-        ImGui.SameLine();
-        ImUtf8.Text(label);
-        if (ImGui.IsItemHovered())
-            ImUtf8.HoverTooltip(live
+        // ColorButtonFlags does not surface NoTooltip, but the native color button honors it.
+        Im.Color.Button(label, new System.Numerics.Vector4(color.R / 255f, color.G / 255f, color.B / 255f, 1f),
+            (ColorButtonFlags)ColorEditorFlags.NoTooltip | ColorButtonFlags.NoAlpha);
+        Im.Line.Same();
+        Im.Text(label);
+        if (Im.Item.Hovered())
+            Im.Tooltip.OnHover(live
                 ? "Read live from your character (Glamourer changes included). The game applies this in its shader — it is never baked into textures."
                 : "Your character is not readable right now (not loaded, or not human) — showing the last known color.");
     }
@@ -199,7 +200,7 @@ public sealed class DecalsTab(
             return;
 
         DrawTexturePreview(dTexture);
-        ImGui.Separator();
+        Im.Separator();
         DrawViewport(dTexture);
     }
 
@@ -230,7 +231,7 @@ public sealed class DecalsTab(
 
         if (dTexture.Data.Source.IsEmpty)
         {
-            ImUtf8.Text("Select a source first."u8);
+            Im.Text("Add a source first — open the Sources section."u8);
             return;
         }
 
@@ -239,7 +240,7 @@ public sealed class DecalsTab(
         // unpaintable "context" (framed around the tiny overlay geometry) sampling the wrong
         // texture at the wrong UVs — confusing, not useful. They're painted automatically by an
         // overlapping body-skin tattoo (OverlayModManager companion bake) and stay visible
-        // read-only in the Textures tab, which does NOT filter them. Their diffuse options are
+        // read-only in the Sources section, which does NOT filter them. Their diffuse options are
         // kept separately (_overlayOptions) so the 3D viewport can still show them, composited,
         // as extra rendered entries — see BuildOverlayEntries.
         if (_options == null)
@@ -254,7 +255,7 @@ public sealed class DecalsTab(
 
         if (_options.Count == 0)
         {
-            ImUtf8.Text(dTexture.Data.Source.Materials.All(m => m.Overlay)
+            Im.Text(dTexture.Data.Source.Materials.All(m => m.Overlay)
                 ? "Only overlay-part sources (nails, accents) are selected — they're painted automatically by an overlapping body tattoo. Add the body itself to place one."u8
                 : "The source materials expose no textures."u8);
             return;
@@ -269,16 +270,16 @@ public sealed class DecalsTab(
         // Shine/Animated adjustments for hair materials.
         if (SelectedKind() is MaterialKind.Hair)
         {
-            ImUtf8.TextWrapped(
+            Im.TextWrapped(
                 "Hair-shaded piece (hair, furred tail, ears) — the game blends your main hair color toward your highlight color per pixel, using the colors below (read live from your character)."u8);
 
             var liveHair = LiveHair();
             DrawColorSwatch("Hair", config.PreviewHairColor, liveHair != null);
-            ImGui.SameLine(0, 24 * ImUtf8.GlobalScale);
+            Im.Line.Same(0, 24 * Im.Style.GlobalScale);
             DrawColorSwatch("Highlights", config.PreviewHairHighlight, liveHair != null);
 
             if (liveHair is { HighlightsEnabled: false })
-                ImUtf8.TextWrapped(
+                Im.TextWrapped(
                     "Your character has highlights DISABLED — highlight edits stay invisible in-game (and in this preview) until you enable highlights in the aesthetician/character appearance."u8);
         }
         else
@@ -288,7 +289,7 @@ public sealed class DecalsTab(
             if (DefaultTargetOption() == null)
             {
                 var legacyIndex = MaterialOptions().Any(o => o is { Slot: TextureSlot.Index, DecalRecommended: false });
-                ImUtf8.TextWrapped(legacyIndex
+                Im.TextWrapped(legacyIndex
                     ? "This material has no color texture — its look comes entirely from its colorset, which decals cannot stamp onto yet."u8
                     : "This material exposes no texture decals can stamp onto."u8);
             }
@@ -298,20 +299,21 @@ public sealed class DecalsTab(
                 {
                     case MaterialKind.Skin:
                     {
-                        ImUtf8.TextWrapped("Skin material — decals bake directly into the skin texture like tattoos and conform to the body."u8);
+                        Im.TextWrapped("Skin material — decals bake directly into the skin texture like tattoos and conform to the body."u8);
                         var liveSkin = LiveSkin();
                         DrawColorSwatch("Skin Color", config.PreviewSkinTone, liveSkin != null);
                         break;
                     }
                     case MaterialKind.LegacyDiffuse:
-                        ImUtf8.TextWrapped("Legacy material — decal colors are baked into the color texture. Recoloring rebuilds the mod; dyes never affect the decal."u8);
+                        Im.TextWrapped("Legacy material — decal colors are baked into the color texture. Recoloring rebuilds the mod; dyes never affect the decal."u8);
                         break;
                 }
             }
 
-            ImGui.Separator();
+            Im.Separator();
             DrawDecalLibrary(dTexture);
-            ImGui.Separator();
+            DrawProceduralAdd(dTexture);
+            Im.Separator();
             DrawLayers(dTexture);
         }
 
@@ -363,13 +365,13 @@ public sealed class DecalsTab(
             _selectedMaterial = current.Parts[0].GamePath;
         }
 
-        ImGui.SetNextItemWidth(280 * ImUtf8.GlobalScale);
-        using (var combo = ImUtf8.Combo("##sourceUnit"u8, current.Unit.Label))
+        Im.Item.SetNextWidthScaled(280);
+        using (var combo = Im.Combo.Begin("##sourceUnit"u8, current.Unit.Label))
         {
             if (combo)
                 foreach (var (unit, parts) in units)
                 {
-                    if (ImUtf8.Selectable($"{unit.Label}##{unit.Key}", ReferenceEquals(unit, current.Unit))
+                    if (Im.Selectable($"{unit.Label}##{unit.Key}", ReferenceEquals(unit, current.Unit))
                      && !ReferenceEquals(unit, current.Unit))
                         _selectedMaterial = parts[0].GamePath;
                 }
@@ -377,28 +379,28 @@ public sealed class DecalsTab(
 
         if (current.Parts.Count > 1)
         {
-            ImGui.SameLine();
+            Im.Line.Same();
             var currentPart = current.Parts.FirstOrDefault(p
                 => string.Equals(p.GamePath, _selectedMaterial, StringComparison.OrdinalIgnoreCase)) ?? current.Parts[0];
-            ImGui.SetNextItemWidth(180 * ImUtf8.GlobalScale);
-            using var combo = ImUtf8.Combo("##unitPart"u8, currentPart.Label);
+            Im.Item.SetNextWidthScaled(180);
+            using var combo = Im.Combo.Begin("##unitPart"u8, currentPart.Label);
             if (combo)
                 foreach (var part in current.Parts)
                 {
-                    if (ImUtf8.Selectable($"{part.Label}##{part.GamePath}",
+                    if (Im.Selectable($"{part.Label}##{part.GamePath}",
                             string.Equals(part.GamePath, _selectedMaterial, StringComparison.OrdinalIgnoreCase)))
                         _selectedMaterial = part.GamePath;
                 }
 
-            ImGui.SameLine();
-            ImUtf8.LabeledHelpMarker("Part"u8,
+            Im.Line.Same();
+            LunaStyle.DrawHelpMarkerLabel("Part"u8,
                 "This piece has several materials (parts with their own colorsets/textures) — pick which one to edit."u8);
         }
         else
         {
-            ImGui.SameLine();
-            ImUtf8.LabeledHelpMarker("Source"u8,
-                "The piece being edited. Decals stamp onto its right texture automatically (the colorset id map on colorset-driven gear, else the color texture) and their material effects touch the normal/mask maps.\nThe finished textures are viewable in the Textures tab."u8);
+            Im.Line.Same();
+            LunaStyle.DrawHelpMarkerLabel("Canvas"u8,
+                "The piece being edited. Decals stamp onto its right texture automatically (the colorset id map on colorset-driven gear, else the color texture) and their material effects touch the normal/mask maps."u8);
         }
     }
 
@@ -467,10 +469,10 @@ public sealed class DecalsTab(
         if (strays.Count == 0)
             return;
 
-        ImGui.Separator();
-        ImUtf8.TextWrapped($"Other edited rows on this material: {string.Join(", ", strays.Select(RowName))}");
-        ImUtf8.TextWrapped("These affect the gear too — leftovers from removed decals or older experiments."u8);
-        if (ImUtf8.SmallButton("Clear These Rows"u8) && ImGui.GetIO().KeyCtrl)
+        Im.Separator();
+        Im.TextWrapped($"Other edited rows on this material: {string.Join(", ", strays.Select(RowName))}");
+        Im.TextWrapped("These affect the gear too — leftovers from removed decals or older experiments."u8);
+        if (Im.SmallButton("Clear These Rows"u8) && Im.Io.KeyControl)
         {
             foreach (var row in strays)
                 edit.Rows.Remove(row);
@@ -479,8 +481,8 @@ public sealed class DecalsTab(
             Save(dTexture);
         }
 
-        if (ImGui.IsItemHovered())
-            ImUtf8.HoverTooltip("Hold Control and click to remove all listed row edits (the source values return)."u8);
+        if (Im.Item.Hovered())
+            Im.Tooltip.OnHover("Hold Control and click to remove all listed row edits (the source values return)."u8);
     }
 
     private static string RowName(int row)
@@ -489,8 +491,8 @@ public sealed class DecalsTab(
     /// <summary> Eye icon that highlights a colorset row on the live model while hovered. </summary>
     private void DrawRowHighlightEye(TextureOption option, int row, ReadOnlySpan<byte> tooltip)
     {
-        ImUtf8.IconButton(Dalamud.Interface.FontAwesomeIcon.Eye, tooltip);
-        if (ImGui.IsItemHovered())
+        ImEx.Icon.Button((AwesomeIcon)Dalamud.Interface.FontAwesomeIcon.Eye, tooltip);
+        if (Im.Item.Hovered())
         {
             _highlightHovered = true;
             highlighter.Highlight(option.MaterialGamePath, option.Mtrl, row);
@@ -517,9 +519,9 @@ public sealed class DecalsTab(
     private void DrawDecalLibrary(DTexture dTexture)
     {
         var canAdd = DefaultTargetOption() != null;
-        using (ImRaii.Disabled(!canAdd))
+        using (Im.Disabled(!canAdd))
         {
-            if (ImUtf8.Button("Add Decal from Library..."u8))
+            if (Im.Button("Add Decal from Library..."u8))
             {
                 // The picker outlives this frame; ignore the pick if the selection changed meanwhile.
                 var owner = dTexture.Identifier;
@@ -532,14 +534,14 @@ public sealed class DecalsTab(
             }
         }
 
-        ImUtf8.HoverTooltip(canAdd
+        Im.Tooltip.OnHover(canAdd
             ? "Pick a decal from the library — its saved settings (colors, surface finish, size) are applied automatically."u8
             : "Select a material that supports decals first."u8);
 
-        ImGui.SameLine();
-        using (ImRaii.Disabled(!canAdd))
+        Im.Line.Same();
+        using (Im.Disabled(!canAdd))
         {
-            if (ImUtf8.Button("Import Decal..."u8))
+            if (Im.Button("Import Decal..."u8))
                 _fileDialog.OpenFileDialog("Import Decal", "Images{.png,.jpg,.jpeg,.dds,.bmp,.tga}", (success, path) =>
                 {
                     if (!success)
@@ -551,7 +553,33 @@ public sealed class DecalsTab(
                 });
         }
 
-        ImUtf8.HoverTooltip("Import an image into the decal library and stamp it onto the selected material right away.\nTo import without stamping, use the Decal Library window (title-bar button)."u8);
+        Im.Tooltip.OnHover("Import an image into the decal library and stamp it onto the selected material right away.\nTo import without stamping, use the Decal Library window (title-bar button)."u8);
+    }
+
+    /// <summary>
+    /// Procedural surface layers cover the whole skin canvas (fur, scales, patterns) instead
+    /// of stamping one image — offered on skin materials only, whose bodies/faces are uniquely
+    /// unwrapped (card hair shares texels between strands and stays excluded).
+    /// </summary>
+    private void DrawProceduralAdd(DTexture dTexture)
+    {
+        if (SelectedKind() is not MaterialKind.Skin || DiffuseOption() is not { } target)
+            return;
+
+        if (Im.Button("Add Fur / Scales / Pattern"u8))
+        {
+            if (!dTexture.Data.Textures.TryGetValue(target.GamePath, out var layers))
+            {
+                layers                                  = [];
+                dTexture.Data.Textures[target.GamePath] = layers;
+            }
+
+            CaptureTextureSource(dTexture, target.GamePath);
+            layers.Add(new ProceduralSurfaceLayer());
+            Save(dTexture);
+        }
+
+        Im.Tooltip.OnHover("Generates a full-body surface texture — fur, scales or a skin pattern — following the shape of the body."u8);
     }
 
     private void AddLayer(DTexture dTexture, Guid decalId, DecalPreset? preset)
@@ -585,8 +613,10 @@ public sealed class DecalsTab(
             layer.SurfaceLimitToPart = false;
         if (preset != null)
         {
-            // The preset may opt out of colorset mode, but never forces it onto a diffuse target.
-            layer.IdRemap        &= preset.IdRemap;
+            // Colorset eligibility always follows THIS target, never the preset: a decal
+            // saved from a diffuse-only piece of gear must not carry that limitation onto a
+            // different piece whose id map fully supports colorset remap. Everything else
+            // the preset carries is a plain overridable default.
             layer.MaxColors       = preset.MaxColors;
             layer.ColorMerge      = preset.ColorMerge;
             layer.AlphaThreshold  = preset.AlphaThreshold;
@@ -721,18 +751,25 @@ public sealed class DecalsTab(
         }
 
         if (!any)
-            ImUtf8.Text("No decals on this material yet — add one from the library above."u8);
+            Im.Text("No decals on this material yet — add one from the library above."u8);
     }
 
     private void DrawLayerList(DTexture dTexture, TextureOption option, List<TextureLayer> layers)
     {
-        using var outerId = ImRaii.PushId(option.GamePath);
+        using var outerId = Im.Id.Push(option.GamePath);
 
         var remove = -1;
         var swap   = (-1, -1);
-        foreach (var (layer, idx) in layers.WithIndex())
+        foreach (var (idx, layer) in layers.Index())
         {
-            using var id = ImUtf8.PushId(idx);
+            using var id = Im.Id.Push(idx);
+            if (layer is ProceduralSurfaceLayer proc)
+            {
+                DrawProceduralEntry(dTexture, proc, idx, layers.Count,
+                    ModelUvReader.IsBodySkinMaterial(option.MaterialGamePath), ref remove, ref swap);
+                continue;
+            }
+
             if (layer is not DecalLayer decal)
                 continue;
 
@@ -741,7 +778,7 @@ public sealed class DecalsTab(
                 : decals.Get(decal.DecalId)?.Name ?? "(missing decal)";
 
             var enabled = decal.Enabled;
-            if (ImUtf8.Checkbox("##enabled"u8, ref enabled))
+            if (Im.Checkbox("##enabled"u8, ref enabled))
             {
                 decal.Enabled = enabled;
                 // Re-enabling an auto-disabled colorset decal retries the row allocation.
@@ -750,7 +787,7 @@ public sealed class DecalsTab(
                 Save(dTexture);
             }
 
-            ImGui.SameLine();
+            Im.Line.Same();
             var targetTag = option.Slot switch
             {
                 TextureSlot.Index   => "  [colorset]",
@@ -762,10 +799,10 @@ public sealed class DecalsTab(
                 : string.Empty;
             var extractedTag = decal.Extracted && decal.LocalImageFile.Length == 0 ? "  [extracted]" : string.Empty;
             var errorTag     = decal.RowError != null ? "  [auto-disabled]" : string.Empty;
-            if (!ImUtf8.CollapsingHeader($"{idx + 1}: {name}{targetTag}{extractedTag}{modeTag}{errorTag}###layer{idx}"))
+            if (!Im.Tree.Header($"{idx + 1}: {name}{targetTag}{extractedTag}{modeTag}{errorTag}###layer{idx}"))
                 continue;
 
-            using var indent = ImRaii.PushIndent();
+            using var indent = Im.Indent();
 
             var changed = false;
             if (decal.IdRemap)
@@ -779,20 +816,20 @@ public sealed class DecalsTab(
             if (changed)
                 Save(dTexture);
 
-            if (ImUtf8.SmallButton("Remove"u8))
+            if (Im.SmallButton("Remove"u8))
                 remove = idx;
-            ImGui.SameLine();
-            if (ImUtf8.SmallButton("Up"u8) && idx > 0)
+            Im.Line.Same();
+            if (Im.SmallButton("Up"u8) && idx > 0)
                 swap = (idx, idx - 1);
-            ImGui.SameLine();
-            if (ImUtf8.SmallButton("Down"u8) && idx < layers.Count - 1)
+            Im.Line.Same();
+            if (Im.SmallButton("Down"u8) && idx < layers.Count - 1)
                 swap = (idx, idx + 1);
             if (decal.LocalImageFile.Length == 0)
             {
-                ImGui.SameLine();
-                if (ImUtf8.SmallButton("Save Settings to Library"u8))
+                Im.Line.Same();
+                if (Im.SmallButton("Save Settings to Library"u8))
                     SaveLayerPreset(dTexture, option, decal);
-                ImUtf8.HoverTooltip("Store this layer's colors, surface finish and size on the library entry.\nFuture attachments of this decal start from these settings — on any gear."u8);
+                Im.Tooltip.OnHover("Store this layer's colors, surface finish and size on the library entry.\nFuture attachments of this decal start from these settings — on any gear."u8);
             }
         }
 
@@ -832,6 +869,109 @@ public sealed class DecalsTab(
         }
     }
 
+    /// <summary> One procedural surface layer in the layer list: header row plus its settings. </summary>
+    private void DrawProceduralEntry(DTexture dTexture, ProceduralSurfaceLayer proc, int idx, int count,
+        bool bodyRegions, ref int remove, ref (int, int) swap)
+    {
+        var enabled = proc.Enabled;
+        if (Im.Checkbox("##enabled"u8, ref enabled))
+        {
+            proc.Enabled = enabled;
+            Save(dTexture);
+        }
+
+        Im.Line.Same();
+        if (!Im.Tree.Header($"{idx + 1}: {ProceduralSurfaceSection.KindLabel(proc.Kind)}###layer{idx}"))
+            return;
+
+        using var indent = Im.Indent();
+
+        if (_procSection.Draw(proc, bodyRegions))
+            Save(dTexture);
+
+        if (proc.Markings == FurMarkingStyle.Custom)
+            DrawMarkingPatternPicker(dTexture, proc);
+
+        var activeChannel = _viewport.ActivePaintChannel(proc);
+
+        var erasing = activeChannel == DecalViewport.PaintChannel.Coverage;
+        if (Im.SmallButton(erasing ? "Erasing..."u8 : "Erase Areas"u8) && !erasing)
+            _viewport.BeginCoveragePaint(proc, DecalViewport.PaintChannel.Coverage, () => Save(dTexture));
+        Im.Tooltip.OnHover("Brush (or click Line points) over the 3D preview to remove the pattern where you don't want it — it tapers into bare skin."u8);
+
+        Im.Line.Same();
+        var marking = activeChannel == DecalViewport.PaintChannel.Markings;
+        if (Im.SmallButton(marking ? "Marking..."u8 : "Paint Markings"u8) && !marking)
+        {
+            if (proc.Markings != FurMarkingStyle.Painted)
+            {
+                proc.Markings = FurMarkingStyle.Painted;
+                Save(dTexture);
+            }
+
+            _viewport.BeginCoveragePaint(proc, DecalViewport.PaintChannel.Markings, () => Save(dTexture));
+        }
+
+        Im.Tooltip.OnHover("Paint the highlight color onto the coat — brush freely, or use Line to click a stripe along the back. Switches Markings to Painted."u8);
+
+        if (proc.MaskDabs.Count > 0 || proc.MarkingDabs.Count > 0)
+        {
+            Im.Line.Same();
+            Im.Text($"({proc.MaskDabs.Count} erase, {proc.MarkingDabs.Count} marking dabs)");
+        }
+
+        if (Im.SmallButton("Remove"u8))
+            remove = idx;
+        Im.Line.Same();
+        if (Im.SmallButton("Up"u8) && idx > 0)
+            swap = (idx, idx - 1);
+        Im.Line.Same();
+        if (Im.SmallButton("Down"u8) && idx < count - 1)
+            swap = (idx, idx + 1);
+    }
+
+    /// <summary> Library pattern selection for Custom markings: combo, manage button and a small preview. </summary>
+    private void DrawMarkingPatternPicker(DTexture dTexture, ProceduralSurfaceLayer proc)
+    {
+        var comboLabel = decals.GetPattern(proc.MarkingPatternId)?.Name
+         ?? (proc.MarkingPatternId == Guid.Empty ? "(choose a pattern)" : "(missing pattern)");
+        Im.Item.SetNextWidthScaled(220);
+        using (var combo = Im.Combo.Begin("Pattern"u8, comboLabel))
+        {
+            if (combo)
+            {
+                if (decals.Patterns.Count == 0)
+                    Im.Text("No patterns in the library yet."u8);
+
+                foreach (var (idx, pattern) in decals.Patterns.Index())
+                {
+                    using var id     = Im.Id.Push(idx);
+                    var       active = proc.MarkingPatternId == pattern.Id;
+                    if (!Im.Selectable(pattern.Name, active) || active)
+                        continue;
+
+                    proc.MarkingPatternId = pattern.Id;
+                    Save(dTexture);
+                }
+            }
+        }
+
+        Im.Tooltip.OnHover("The image used as the markings — bright areas take the highlight color.\nIt wraps around the body; Marking Size sets the tile size."u8);
+
+        Im.Line.Same();
+        if (Im.SmallButton("Manage Patterns..."u8))
+            decalLibraryWindow.OpenPatterns();
+
+        Im.Tooltip.OnHover("Import and manage marking patterns in the Resource Library."u8);
+
+        if (proc.MarkingPatternId == Guid.Empty || decals.GetPattern(proc.MarkingPatternId) == null)
+            return;
+
+        var wrap = textureProvider.GetFromFile(decals.PatternFilePath(proc.MarkingPatternId)).GetWrapOrDefault();
+        if (wrap != null)
+            Im.Image.Draw(wrap.Id, new Vector2(96, 96) * Im.Style.GlobalScale);
+    }
+
     /// <summary>
     /// A colorset decal renders through automatically claimed colorset rows: the image is
     /// quantized to at most Max Colors, blend-compatible colors share one slot as a gradient
@@ -865,8 +1005,8 @@ public sealed class DecalsTab(
 
         if (decal.Extracted)
         {
-            ImUtf8.TextWrapped("Extracted from this texture's id map — relocated onto its own claimed slots, seeded from the source rows."u8);
-            ImUtf8.HoverTooltip(
+            Im.TextWrapped("Extracted from this texture's id map — relocated onto its own claimed slots, seeded from the source rows."u8);
+            Im.Tooltip.OnHover(
                 "This decal was lifted out of the id map and moved onto freshly claimed colorset slots that copy the source rows' authored look.\nRecoloring a slot recolors only the decal — the rest of the gear keeps its own rows."u8);
 
             if (decal.LocalImageFile.Length > 0)
@@ -874,40 +1014,40 @@ public sealed class DecalsTab(
                 var libraryCopy = decal.LibraryCopyId != Guid.Empty ? decals.Get(decal.LibraryCopyId) : null;
                 if (libraryCopy != null)
                 {
-                    ImUtf8.Text($"In library as \"{libraryCopy.Name}\".");
+                    Im.Text($"In library as \"{libraryCopy.Name}\".");
                 }
                 else
                 {
-                    if (ImUtf8.SmallButton("Add to Library"u8))
+                    if (Im.SmallButton("Add to Library"u8))
                         AddExtractedToLibrary(dTexture, option, decal);
-                    ImUtf8.HoverTooltip("Keep a copy in the decal library for use on other gear."u8);
+                    Im.Tooltip.OnHover("Keep a copy in the decal library for use on other gear."u8);
                 }
             }
         }
         else
         {
-            ImGui.SetNextItemWidth(220 * ImUtf8.GlobalScale);
+            Im.Item.SetNextWidthScaled(220);
             var merge = decal.ColorMerge;
-            if (ImUtf8.Slider("Color Merge"u8, ref merge, "%.0f"u8, 4f, 64f))
+            if (Im.Slider("Color Merge"u8, ref merge, "%.0f"u8, 4f, 64f))
                 decal.ColorMerge = Math.Clamp(merge, 4f, 64f);
-            if (ImGui.IsItemDeactivatedAfterEdit())
+            if (Im.Item.DeactivatedAfterEdit)
                 changed |= ReallocateDecal(dTexture, option, table, decal);
-            ImUtf8.HoverTooltip(
+            Im.Tooltip.OnHover(
                 "The decal picks how many colors it needs on its own: the fewest whose blended rendering still matches the image within this distance. Raise to merge similar colors harder (fewer slots), lower to keep more apart.\nColors that blend cleanly (shades of one hue, black/white, outline + fill) share one colorset slot as a gradient pair, keeping the decal's smooth shading and anti-aliasing; unrelated hues claim a whole slot each."u8);
 
-            ImGui.SameLine();
-            ImUtf8.Text($"Colors: {decal.PaletteColors.Count} (auto)");
+            Im.Line.Same();
+            Im.Text($"Colors: {decal.PaletteColors.Count} (auto)");
 
-            ImGui.SameLine();
-            if (ImUtf8.SmallButton("Re-extract Colors"u8))
+            Im.Line.Same();
+            if (Im.SmallButton("Re-extract Colors"u8))
                 changed |= ReallocateDecal(dTexture, option, table, decal);
-            ImUtf8.HoverTooltip("Quantize the decal image again and reassign rows — discards manual recolors below."u8);
+            Im.Tooltip.OnHover("Quantize the decal image again and reassign rows — discards manual recolors below."u8);
         }
 
         if (decal.RowError != null)
         {
-            using var color = ImRaii.PushColor(ImGuiCol.Text, 0xFF00A0FFu);
-            ImUtf8.TextWrapped(decal.RowError);
+            using var color = ImGuiColor.Text.Push(new ImSharp.Rgba32(0xFF00A0FFu));
+            Im.TextWrapped(decal.RowError);
             return changed;
         }
 
@@ -923,46 +1063,49 @@ public sealed class DecalsTab(
             .Where(r => edit.Rows.ContainsKey(r)).ToList();
         var claimedRows = claimedIndices.Select(r => edit.Rows[r]).ToList();
 
-        // One editable color per claimed row; the extracted swatch stays as reference so
-        // recoloring never loses which image color the row renders.
+        // One editable color per claimed row, shown as a compact extracted-vs-current swatch
+        // pair so the whole claimed palette reads at a glance instead of one wide editor per
+        // line; the eye still previews any slot on the body without leaving this list.
         for (var i = 0; i < decal.PaletteRows.Count; ++i)
         {
-            using var id       = ImUtf8.PushId(i);
-            var       row      = decal.PaletteRows[i];
-            var       rowEdit  = rows[i];
-            var       source   = i < decal.PaletteColors.Count ? new Rgba32(decal.PaletteColors[i]) : new Rgba32(255, 255, 255);
-
-            ImGui.ColorButton("##extracted", new Vector4(source.R / 255f, source.G / 255f, source.B / 255f, 1f));
-            if (ImGui.IsItemHovered())
-                ImUtf8.HoverTooltip("The color extracted from the decal image — image pixels closest to it render through this row."u8);
-
-            ImGui.SameLine();
-            // The picker edits the DISPLAY color; the row stores its square (colorset domain).
-            var color = RowToDisplayRgb(rowEdit.Diffuse);
-            ImGui.SetNextItemWidth(250 * ImUtf8.GlobalScale);
+            using var id        = Im.Id.Push(i);
+            var       row       = decal.PaletteRows[i];
+            var       rowEdit   = rows[i];
+            var       source    = i < decal.PaletteColors.Count ? new Rgba32(decal.PaletteColors[i]) : new Rgba32(255, 255, 255);
             // Gradient pairs render two of the decal's colors on one slot's halves — each is
             // its own editable color, so no shade sync (that would clobber the partner).
             var partnered = decal.PaletteRows.Contains(row ^ 1);
+            var letter    = partnered ? row % 2 == 0 ? 'A' : 'B' : ' ';
             var label     = partnered ? $"Slot {row / 2 + 1}{(row % 2 == 0 ? "A" : "B")}" : $"Slot {row / 2 + 1}";
-            if (ImUtf8.ColorEdit(label, ref color, ImGuiColorEditFlags.Float))
+
+            DrawRowHighlightEye(option, row,
+                "Highlights the parts of the model this row colors while hovered (redraws your character).\nAfter a build, that includes the decal itself."u8);
+
+            Im.Line.Same();
+            Im.Color.Button("##extracted"u8, new Vector4(source.R / 255f, source.G / 255f, source.B / 255f, 1f));
+            if (Im.Item.Hovered())
+                Im.Tooltip.OnHover("The color extracted from the decal image — image pixels closest to it render through this row."u8);
+
+            Im.Line.Same(0, 2f * Im.Style.GlobalScale);
+            // The picker edits the DISPLAY color; the row stores its square (colorset domain).
+            var color = RowToDisplayRgb(rowEdit.Diffuse);
+            if (ImEx.ColorPickerButton("##edit"u8,
+                    "This part of the decal renders in this color — recolor it without touching the image."u8, color, out var edited, letter))
             {
-                rowEdit.Diffuse = DisplayToRowRgb(color.X, color.Y, color.Z);
+                rowEdit.Diffuse = DisplayToRowRgb(edited.X, edited.Y, edited.Z);
                 // Keep a solo slot's B row a darkened copy so the baked shading blend darkens.
                 if (!partnered)
                     GetOrSeedRow(edit, table, row + 1).Diffuse =
-                        DisplayToRowRgb(color.X * ShadeFactor, color.Y * ShadeFactor, color.Z * ShadeFactor);
+                        DisplayToRowRgb(edited.X * ShadeFactor, edited.Y * ShadeFactor, edited.Z * ShadeFactor);
                 changed = true;
             }
 
-            if (ImGui.IsItemHovered())
-                ImUtf8.HoverTooltip("This part of the decal renders in this color — recolor it without touching the image."u8);
-
-            ImGui.SameLine();
-            DrawRowHighlightEye(option, row,
-                "Highlights the parts of the model this row colors while hovered (redraws your character).\nAfter a build, that includes the decal itself."u8);
+            Im.Line.Same();
+            Im.Cursor.FrameAlign();
+            Im.Text(label);
         }
 
-        if (ImUtf8.SmallButton("Reset Rows"u8))
+        if (Im.SmallButton("Reset Rows"u8))
         {
             // Re-seed the claimed rows from an authored source row, keeping only the colors —
             // recovers rows that carry stale or filler values from earlier edits.
@@ -979,14 +1122,14 @@ public sealed class DecalsTab(
             changed = true;
         }
 
-        if (ImGui.IsItemHovered())
-            ImUtf8.HoverTooltip("Rebuild the claimed rows from the gear's own authored values (keeps your colors).\nUse this after plugin updates or if the decal renders black or washed out from older edits."u8);
+        if (Im.Item.Hovered())
+            Im.Tooltip.OnHover("Rebuild the claimed rows from the gear's own authored values (keeps your colors).\nUse this after plugin updates or if the decal renders black or washed out from older edits."u8);
 
         // Dye: one switch across all claimed rows with a smart default copied from how the
         // rest of the gear dyes.
         var lead    = rows[0];
         var dyeable = lead.DyeMode == ColorRowEdit.RowDyeMode.Custom;
-        if (ImUtf8.Checkbox("Dyeable"u8, ref dyeable))
+        if (Im.Checkbox("Dyeable"u8, ref dyeable))
         {
             if (dyeable)
             {
@@ -1022,43 +1165,43 @@ public sealed class DecalsTab(
 
         if (dyeable)
         {
-            ImGui.SameLine();
+            Im.Line.Same();
             var channel = lead.DyeChannel + 1;
-            ImGui.SetNextItemWidth(100 * ImUtf8.GlobalScale);
-            if (ImUtf8.Slider("Dye Channel"u8, ref channel, "%d"u8, 1, 2))
+            Im.Item.SetNextWidthScaled(100);
+            if (Im.Slider("Dye Channel"u8, ref channel, "%d"u8, 1, 2))
             {
                 foreach (var row in claimedRows)
                     row.DyeChannel = (byte)(channel - 1);
                 changed = true;
             }
 
-            ImGui.SameLine();
+            Im.Line.Same();
             var template = (int)lead.DyeTemplate;
-            ImGui.SetNextItemWidth(100 * ImUtf8.GlobalScale);
-            if (ImUtf8.InputScalar("Dye Template"u8, ref template) && template is >= 0 and <= 2047)
+            Im.Item.SetNextWidthScaled(100);
+            if (Im.Input.Scalar("Dye Template"u8, ref template) && template is >= 0 and <= 2047)
             {
                 foreach (var row in claimedRows)
                     row.DyeTemplate = (ushort)template;
                 changed = true;
             }
 
-            ImUtf8.HoverTooltip(
+            Im.Tooltip.OnHover(
                 "How stain colors translate to the claimed rows — detected from how the rest of this gear dyes.\nIf it reads 0, no template was detected; copy the id from a similar dyeable item."u8);
 
-            ImUtf8.TextWrapped(lead.DyeTemplate > 0
+            Im.TextWrapped(lead.DyeTemplate > 0
                 ? $"Dyes like the rest of this gear (template {lead.DyeTemplate})."
                 : "No dye template detected on this gear — the decal will not react to dyes until a template id is set above.");
         }
         else
         {
-            ImUtf8.Text("The decal keeps its colors when the gear is dyed."u8);
+            Im.Text("The decal keeps its colors when the gear is dyed."u8);
         }
 
-        ImGui.SetNextItemWidth(220 * ImUtf8.GlobalScale);
-        changed |= ImUtf8.Slider("Shape Threshold"u8, ref decal.AlphaThreshold, "%.2f"u8, 0.05f, 1f);
-        if (!decal.Extracted && ImGui.IsItemDeactivatedAfterEdit())
+        Im.Item.SetNextWidthScaled(220);
+        changed |= Im.Slider("Shape Threshold"u8, ref decal.AlphaThreshold, "%.2f"u8, 0.05f, 1f);
+        if (!decal.Extracted && Im.Item.DeactivatedAfterEdit)
             changed |= ReallocateDecal(dTexture, option, table, decal);
-        ImUtf8.HoverTooltip(decal.Extracted
+        Im.Tooltip.OnHover(decal.Extracted
             ? "Decal pixels whose alpha is at or above this value become part of the stamped shape."u8
             : "Decal pixels whose alpha is at or above this value become part of the stamped shape.\nChanging it re-extracts the colors."u8);
 
@@ -1083,7 +1226,7 @@ public sealed class DecalsTab(
         var changed = false;
 
         var tintEnabled = decal.TintEnabled;
-        if (ImUtf8.Checkbox("Recolor Decal"u8, ref tintEnabled))
+        if (Im.Checkbox("Recolor Decal"u8, ref tintEnabled))
         {
             decal.TintEnabled = tintEnabled;
             if (tintEnabled && !decal.HasTint && ExtractTintPalette(decal))
@@ -1091,40 +1234,40 @@ public sealed class DecalsTab(
             changed = true;
         }
 
-        ImUtf8.HoverTooltip(
+        Im.Tooltip.OnHover(
             "Extracts the decal's main colors and lets each be replaced — the recolors are baked into the texture on the next build.\nOff, the decal keeps its original image colors."u8);
 
         if (!decal.TintEnabled)
             return changed;
 
-        ImGui.SetNextItemWidth(220 * ImUtf8.GlobalScale);
+        Im.Item.SetNextWidthScaled(220);
         var merge = decal.ColorMerge;
-        if (ImUtf8.Slider("Color Merge"u8, ref merge, "%.0f"u8, 4f, 64f))
+        if (Im.Slider("Color Merge"u8, ref merge, "%.0f"u8, 4f, 64f))
             decal.ColorMerge = Math.Clamp(merge, 4f, 64f);
-        if (ImGui.IsItemDeactivatedAfterEdit() && ExtractTintPalette(decal))
+        if (Im.Item.DeactivatedAfterEdit && ExtractTintPalette(decal))
         {
             decal.TintColors = decal.PaletteColors.ToList();
             changed          = true;
         }
 
-        ImUtf8.HoverTooltip(
+        Im.Tooltip.OnHover(
             "The decal picks how many colors it needs on its own: the fewest whose blended rendering still matches the image within this distance.\nRaise to merge similar colors harder, lower to keep more apart. Changing it re-extracts the colors and discards the recolors below."u8);
 
-        ImGui.SameLine();
-        ImUtf8.Text($"Colors: {decal.PaletteColors.Count} (auto)");
+        Im.Line.Same();
+        Im.Text($"Colors: {decal.PaletteColors.Count} (auto)");
 
-        ImGui.SameLine();
-        if (ImUtf8.SmallButton("Re-extract Colors"u8) && ExtractTintPalette(decal))
+        Im.Line.Same();
+        if (Im.SmallButton("Re-extract Colors"u8) && ExtractTintPalette(decal))
         {
             decal.TintColors = decal.PaletteColors.ToList();
             changed          = true;
         }
 
-        ImUtf8.HoverTooltip("Quantize the decal image again — discards the recolors below."u8);
+        Im.Tooltip.OnHover("Quantize the decal image again — discards the recolors below."u8);
 
         if (decal.PaletteColors.Count == 0)
         {
-            ImUtf8.TextWrapped("Could not extract any colors from the decal image — is the extraction threshold too high?"u8);
+            Im.TextWrapped("Could not extract any colors from the decal image — is the extraction threshold too high?"u8);
             return changed;
         }
 
@@ -1132,37 +1275,37 @@ public sealed class DecalsTab(
         // recoloring never loses which image color it replaces.
         for (var i = 0; i < decal.PaletteColors.Count && i < decal.TintColors.Count; ++i)
         {
-            using var id     = ImUtf8.PushId(i);
+            using var id     = Im.Id.Push(i);
             var       source = new Rgba32(decal.PaletteColors[i]);
 
-            ImGui.ColorButton("##extracted", new Vector4(source.R / 255f, source.G / 255f, source.B / 255f, 1f));
-            if (ImGui.IsItemHovered())
-                ImUtf8.HoverTooltip("The color extracted from the decal image — image pixels closest to it render in the replacement color."u8);
+            Im.Color.Button("##extracted"u8, new Vector4(source.R / 255f, source.G / 255f, source.B / 255f, 1f));
+            if (Im.Item.Hovered())
+                Im.Tooltip.OnHover("The color extracted from the decal image — image pixels closest to it render in the replacement color."u8);
 
-            ImGui.SameLine();
+            Im.Line.Same();
             var tint  = new Rgba32(decal.TintColors[i]);
             var color = new Vector3(tint.R / 255f, tint.G / 255f, tint.B / 255f);
-            ImGui.SetNextItemWidth(250 * ImUtf8.GlobalScale);
-            if (ImUtf8.ColorEdit($"Color {i + 1}", ref color, ImGuiColorEditFlags.Float))
+            Im.Item.SetNextWidthScaled(250);
+            if (Im.Color.Editor($"Color {i + 1}", ref color, ColorEditorFlags.Float))
                 decal.TintColors[i] = new Rgba32(color.X, color.Y, color.Z).PackedValue;
             // A save rebuilds the mod's textures — commit once the edit ends, not per drag frame.
-            if (ImGui.IsItemDeactivatedAfterEdit())
+            if (Im.Item.DeactivatedAfterEdit)
                 changed = true;
 
-            if (ImGui.IsItemHovered())
-                ImUtf8.HoverTooltip("This part of the decal renders in this color — recolor it without touching the image."u8);
+            if (Im.Item.Hovered())
+                Im.Tooltip.OnHover("This part of the decal renders in this color — recolor it without touching the image."u8);
         }
 
-        ImGui.SetNextItemWidth(220 * ImUtf8.GlobalScale);
-        ImUtf8.Slider("Extraction Threshold"u8, ref decal.AlphaThreshold, "%.2f"u8, 0.05f, 1f);
-        if (ImGui.IsItemDeactivatedAfterEdit())
+        Im.Item.SetNextWidthScaled(220);
+        Im.Slider("Extraction Threshold"u8, ref decal.AlphaThreshold, "%.2f"u8, 0.05f, 1f);
+        if (Im.Item.DeactivatedAfterEdit)
         {
             if (ExtractTintPalette(decal))
                 decal.TintColors = decal.PaletteColors.ToList();
             changed = true;
         }
 
-        ImUtf8.HoverTooltip(
+        Im.Tooltip.OnHover(
             "Decal pixels whose alpha is at or above this value feed the color extraction.\nBlending keeps the image's soft edges either way — this only affects which pixels count as colors."u8);
 
         return changed;
@@ -1343,32 +1486,32 @@ public sealed class DecalsTab(
 
         var changed       = false;
         var finishChanged = false;
-        ImGui.Separator();
-        ImUtf8.Text("Material Effects"u8);
-        ImUtf8.HoverTooltip("The decal's footprint replayed onto the material's other textures — smoothing bump detail or changing the surface finish under the decal."u8);
+        Im.Separator();
+        Im.Text("Material Effects"u8);
+        Im.Tooltip.OnHover("The decal's footprint replayed onto the material's other textures — smoothing bump detail or changing the surface finish under the decal."u8);
 
         if (hasNormal)
         {
-            ImGui.SetNextItemWidth(220 * ImUtf8.GlobalScale);
+            Im.Item.SetNextWidthScaled(220);
             var smooth = decal.NormalSmooth;
-            if (ImUtf8.Slider("Normal Smoothing"u8, ref smooth, "%.2f"u8, 0f, 1f))
+            if (Im.Slider("Normal Smoothing"u8, ref smooth, "%.2f"u8, 0f, 1f))
             {
                 decal.NormalSmooth = Math.Clamp(smooth, 0f, 1f);
                 changed            = true;
             }
 
-            ImUtf8.HoverTooltip("Flattens the cloth/skin bump detail under the decal — like a print sitting on top of the fabric.\n0 leaves the normal map untouched."u8);
+            Im.Tooltip.OnHover("Flattens the cloth/skin bump detail under the decal — like a print sitting on top of the fabric.\n0 leaves the normal map untouched."u8);
         }
 
         if (showFinish)
         {
-            ImGui.SetNextItemWidth(220 * ImUtf8.GlobalScale);
-            using (var combo = ImUtf8.Combo("Surface Finish"u8, FinishLabel(decal.Finish)))
+            Im.Item.SetNextWidthScaled(220);
+            using (var combo = Im.Combo.Begin("Surface Finish"u8, FinishLabel(decal.Finish)))
             {
                 if (combo)
-                    foreach (var mode in Enum.GetValues<DecalFinishMode>())
+                    foreach (var mode in DecalFinishMode.Values)
                     {
-                        if (!ImUtf8.Selectable(FinishLabel(mode), mode == decal.Finish) || mode == decal.Finish)
+                        if (!Im.Selectable(FinishLabel(mode), mode == decal.Finish) || mode == decal.Finish)
                             continue;
 
                         decal.Finish  = mode;
@@ -1376,51 +1519,51 @@ public sealed class DecalsTab(
                     }
             }
 
-            ImUtf8.HoverTooltip(decal.IdRemap
+            Im.Tooltip.OnHover(decal.IdRemap
                 ? "How the surface responds to light under the decal — written into the claimed colorset rows (and the mask map, if the material has one).\nMatte suits cloth prints, Glossy suits stickers/vinyl; Custom exposes the raw values."u8
                 : "How the surface responds to light under the decal, written into the material's mask map.\nMatte suits cloth prints, Glossy suits stickers/vinyl; Custom exposes the raw values.\nNote: on colorset-driven gear the underlying rows bound what the mask alone can change."u8);
 
             if (decal.Finish == DecalFinishMode.Custom)
             {
-                ImGui.SetNextItemWidth(220 * ImUtf8.GlobalScale);
+                Im.Item.SetNextWidthScaled(220);
                 var roughness = decal.FinishRoughness;
-                if (ImUtf8.Slider("Roughness"u8, ref roughness, "%.2f"u8, 0f, 1f))
+                if (Im.Slider("Roughness"u8, ref roughness, "%.2f"u8, 0f, 1f))
                 {
                     decal.FinishRoughness = Math.Clamp(roughness, 0f, 1f);
                     finishChanged         = true;
                 }
 
-                ImUtf8.HoverTooltip("0 = mirror-glossy, 1 = fully matte."u8);
+                Im.Tooltip.OnHover("0 = mirror-glossy, 1 = fully matte."u8);
 
-                ImGui.SetNextItemWidth(220 * ImUtf8.GlobalScale);
+                Im.Item.SetNextWidthScaled(220);
                 var specScale = decal.FinishSpecScale;
-                if (ImUtf8.Slider("Specular Scale"u8, ref specScale, "%.2f"u8, 0f, 2f))
+                if (Im.Slider("Specular Scale"u8, ref specScale, "%.2f"u8, 0f, 2f))
                 {
                     decal.FinishSpecScale = Math.Clamp(specScale, 0f, 2f);
                     finishChanged         = true;
                 }
 
-                ImUtf8.HoverTooltip("Multiplier on the authored specular color — below 1 dims reflections, above 1 boosts them."u8);
+                Im.Tooltip.OnHover("Multiplier on the authored specular color — below 1 dims reflections, above 1 boosts them."u8);
             }
             else if (decal.Finish != DecalFinishMode.Keep)
             {
                 var (roughness, specScale) = FinishMapping.PresetValues(decal.Finish);
-                using var disabled = ImRaii.Disabled();
-                ImUtf8.Text($"Roughness {roughness:F2}, specular ×{specScale:F2}");
+                using var disabled = Im.Disabled();
+                Im.Text($"Roughness {roughness:F2}, specular ×{specScale:F2}");
             }
         }
 
         if (decal.HasMaterialEffects && (hasNormal || hasMask))
         {
-            ImGui.SetNextItemWidth(220 * ImUtf8.GlobalScale);
+            Im.Item.SetNextWidthScaled(220);
             var effectScale = decal.EffectScale;
-            if (ImUtf8.Slider("Effect Scale"u8, ref effectScale, "%.2f"u8, 0.25f, 3f))
+            if (Im.Slider("Effect Scale"u8, ref effectScale, "%.2f"u8, 0.25f, 3f))
             {
                 decal.EffectScale = Math.Clamp(effectScale, 0.25f, 3f);
                 changed           = true;
             }
 
-            ImUtf8.HoverTooltip("Size of the affected area relative to the decal — above 1 the smoothing/finish extends past the decal's edge, below 1 it stays inside it."u8);
+            Im.Tooltip.OnHover("Size of the affected area relative to the decal — above 1 the smoothing/finish extends past the decal's edge, below 1 it stays inside it."u8);
         }
 
         if (finishChanged)
@@ -1661,7 +1804,7 @@ public sealed class DecalsTab(
     {
         var changed = false;
         var surface = decal.Surface;
-        if (ImUtf8.Checkbox("Place on Model (3D)"u8, ref surface))
+        if (Im.Checkbox("Place on Model (3D)"u8, ref surface))
         {
             decal.Surface = surface;
             changed       = true;
@@ -1676,46 +1819,46 @@ public sealed class DecalsTab(
             }
         }
 
-        ImUtf8.HoverTooltip(
+        Im.Tooltip.OnHover(
             "Project the decal onto the 3D mesh instead of stamping it flat into the texture.\nIt conforms to the surface, keeps a real-world size and continues across UV seams."u8);
 
         if (decal.Surface)
         {
             var widthCm = decal.WorldWidth * 100f;
-            ImGui.SetNextItemWidth(220 * ImUtf8.GlobalScale);
-            if (ImUtf8.Slider("Width (cm)"u8, ref widthCm, "%.1f"u8, 1f, 100f))
+            Im.Item.SetNextWidthScaled(220);
+            if (Im.Slider("Width (cm)"u8, ref widthCm, "%.1f"u8, 1f, 100f))
             {
                 decal.WorldWidth = widthCm / 100f;
                 changed          = true;
             }
 
             var heightCm = decal.WorldHeight * 100f;
-            ImGui.SetNextItemWidth(220 * ImUtf8.GlobalScale);
-            if (ImUtf8.Slider("Height (cm)"u8, ref heightCm, "%.1f"u8, 1f, 100f))
+            Im.Item.SetNextWidthScaled(220);
+            if (Im.Slider("Height (cm)"u8, ref heightCm, "%.1f"u8, 1f, 100f))
             {
                 decal.WorldHeight = heightCm / 100f;
                 changed           = true;
             }
 
-            ImGui.SetNextItemWidth(220 * ImUtf8.GlobalScale);
-            changed |= ImUtf8.Slider("Rotation"u8, ref decal.RotationDeg, "%.1f°"u8, -180f, 180f);
+            Im.Item.SetNextWidthScaled(220);
+            changed |= Im.Slider("Rotation"u8, ref decal.RotationDeg, "%.1f°"u8, -180f, 180f);
             if (!decal.IdRemap)
             {
-                ImGui.SetNextItemWidth(220 * ImUtf8.GlobalScale);
-                changed |= ImUtf8.Slider("Opacity"u8, ref decal.Opacity, "%.2f"u8, 0f, 1f);
+                Im.Item.SetNextWidthScaled(220);
+                changed |= Im.Slider("Opacity"u8, ref decal.Opacity, "%.2f"u8, 0f, 1f);
             }
 
             var limitToPart = decal.SurfaceLimitToPart;
-            if (ImUtf8.Checkbox("Limit to Clicked Mesh Part"u8, ref limitToPart))
+            if (Im.Checkbox("Limit to Clicked Mesh Part"u8, ref limitToPart))
             {
                 decal.SurfaceLimitToPart = limitToPart;
                 changed                  = true;
             }
 
-            ImUtf8.HoverTooltip(
+            Im.Tooltip.OnHover(
                 "Keep the projection on the mesh piece you stamped it on.\nWithout this, overlapping pieces (linings, straps, panels behind) within reach catch the decal too."u8);
 
-            if (ImUtf8.Button(_viewport.IsOpenFor(decal) ? "Stop Placing"u8 : "Place in 3D View"u8))
+            if (Im.Button(_viewport.IsOpenFor(decal) ? "Stop Placing"u8 : "Place in 3D View"u8))
             {
                 if (_viewport.IsOpenFor(decal))
                     _viewport.EndPlacement();
@@ -1723,51 +1866,51 @@ public sealed class DecalsTab(
                     BeginPlacement(dTexture, decal);
             }
 
-            ImUtf8.HoverTooltip(
+            Im.Tooltip.OnHover(
                 "Bind this decal to the 3D preview below — stamp and drag it directly on the mesh,\norbit and zoom freely, and changes apply to the mod when you finish an adjustment."u8);
 
             if (_placementError.Length > 0)
-                using (ImRaii.PushColor(ImGuiCol.Text, 0xFF00A0FFu))
-                    ImUtf8.TextWrapped(_placementError);
+                using (ImGuiColor.Text.Push(new ImSharp.Rgba32(0xFF00A0FFu)))
+                    Im.TextWrapped(_placementError);
             else if (decal is { AnchorX: 0f, AnchorY: 0f, AnchorZ: 0f })
-                using (ImRaii.PushColor(ImGuiCol.Text, 0xFF00A0FFu))
-                    ImUtf8.TextWrapped("NOT PLACED YET — the decal stays invisible until you place it in the 3D view below."u8);
+                using (ImGuiColor.Text.Push(new ImSharp.Rgba32(0xFF00A0FFu)))
+                    Im.TextWrapped("NOT PLACED YET — the decal stays invisible until you place it in the 3D view below."u8);
         }
         else
         {
-            ImGui.SetNextItemWidth(220 * ImUtf8.GlobalScale);
-            changed |= ImUtf8.Slider("Position U"u8, ref decal.PosU, "%.3f"u8, 0f, 1f);
-            ImGui.SetNextItemWidth(220 * ImUtf8.GlobalScale);
-            changed |= ImUtf8.Slider("Position V"u8, ref decal.PosV, "%.3f"u8, 0f, 1f);
-            ImGui.SetNextItemWidth(220 * ImUtf8.GlobalScale);
-            changed |= ImUtf8.Slider("Scale X"u8, ref decal.ScaleX, "%.3f"u8, 0.01f, 1f);
-            ImGui.SetNextItemWidth(220 * ImUtf8.GlobalScale);
-            changed |= ImUtf8.Slider("Scale Y"u8, ref decal.ScaleY, "%.3f"u8, 0.01f, 1f);
-            ImGui.SetNextItemWidth(220 * ImUtf8.GlobalScale);
-            changed |= ImUtf8.Slider("Rotation"u8, ref decal.RotationDeg, "%.1f°"u8, -180f, 180f);
+            Im.Item.SetNextWidthScaled(220);
+            changed |= Im.Slider("Position U"u8, ref decal.PosU, "%.3f"u8, 0f, 1f);
+            Im.Item.SetNextWidthScaled(220);
+            changed |= Im.Slider("Position V"u8, ref decal.PosV, "%.3f"u8, 0f, 1f);
+            Im.Item.SetNextWidthScaled(220);
+            changed |= Im.Slider("Scale X"u8, ref decal.ScaleX, "%.3f"u8, 0.01f, 1f);
+            Im.Item.SetNextWidthScaled(220);
+            changed |= Im.Slider("Scale Y"u8, ref decal.ScaleY, "%.3f"u8, 0.01f, 1f);
+            Im.Item.SetNextWidthScaled(220);
+            changed |= Im.Slider("Rotation"u8, ref decal.RotationDeg, "%.1f°"u8, -180f, 180f);
             if (!decal.IdRemap)
             {
-                ImGui.SetNextItemWidth(220 * ImUtf8.GlobalScale);
-                changed |= ImUtf8.Slider("Opacity"u8, ref decal.Opacity, "%.2f"u8, 0f, 1f);
+                Im.Item.SetNextWidthScaled(220);
+                changed |= Im.Slider("Opacity"u8, ref decal.Opacity, "%.2f"u8, 0f, 1f);
             }
 
-            if (ImUtf8.SmallButton("Flip H"u8))
+            if (Im.SmallButton("Flip H"u8))
             {
                 decal.FlipX = !decal.FlipX;
                 changed     = true;
             }
 
-            ImUtf8.HoverTooltip("Mirror the decal horizontally."u8);
-            ImGui.SameLine();
-            if (ImUtf8.SmallButton("Flip V"u8))
+            Im.Tooltip.OnHover("Mirror the decal horizontally."u8);
+            Im.Line.Same();
+            if (Im.SmallButton("Flip V"u8))
             {
                 decal.FlipY = !decal.FlipY;
                 changed     = true;
             }
 
-            ImUtf8.HoverTooltip("Mirror the decal vertically."u8);
+            Im.Tooltip.OnHover("Mirror the decal vertically."u8);
 
-            ImUtf8.TextWrapped("Flat UV placement — check the result in the 3D preview below or the Textures tab, or switch to Place on Model (3D)."u8);
+            Im.TextWrapped("Flat UV placement — check the result in the composited texture above or the 3D preview below, or switch to Place on Model (3D)."u8);
         }
 
         return changed;
@@ -1923,7 +2066,8 @@ public sealed class DecalsTab(
     #region 3D preview shading
 
     private readonly record struct ShadingKey(int DiffuseVersion, int IndexVersion, int RowVersion, bool Placement, uint SkinTone,
-        uint HairColor, uint HairHighlight, int HairMaskVersion, int OverlayVersionHash, ViewportEffect? Effect);
+        uint HairColor, uint HairHighlight, int HairMaskVersion, int OverlayVersionHash, ViewportEffect? Effect,
+        int NormalMapVersion);
 
     // Effect pattern pixels for the live viewport effect and thumbnails, cached per
     // (pattern, library entry) — ViewportEffect compares the array by reference, so the same
@@ -2023,7 +2167,7 @@ public sealed class DecalsTab(
         var mesh   = source == null ? null : uvReader.GetMesh(source);
         if (mesh == null)
         {
-            ImUtf8.TextWrapped(source != null && ModelUvReader.IsBodySkinMaterial(source.GamePath)
+            Im.TextWrapped(source != null && ModelUvReader.IsBodySkinMaterial(source.GamePath)
                 ? "Your current body does not use this skin material — run Load Skin in the Source tab again and add the body material listed there."u8
                 : "No mesh geometry available for a 3D preview — re-add the material in the Source tab while wearing the gear."u8);
             return;
@@ -2122,9 +2266,13 @@ public sealed class DecalsTab(
         // matches the built result, including mid-drag.
         var overlayEntries = BuildOverlayEntries(dTexture, placementLayer, boundPath, out var overlayVersionHash);
 
+        // The composited normal map shades the preview's relief (fur strands, scales, decal
+        // smoothing) — hair excluded, its normal already IS the color-shading entry.
+        var normalMapEntry = kind is MaterialKind.Hair ? null : EntryFor(NormalOption());
+
         var key = new ShadingKey(diffuseEntry?.Version ?? -1, indexEntry?.Version ?? -1, _rowDiffuseVersion,
             placementLayer != null, skinTone, hairColor, hairHighlight, maskEntry?.Version ?? -1, overlayVersionHash,
-            viewportEffect);
+            viewportEffect, normalMapEntry?.Version ?? -1);
         if (key == _shadingKey)
             return;
 
@@ -2138,7 +2286,7 @@ public sealed class DecalsTab(
         }
 
         _viewport.UpdateShading(new ViewportShading(PreviewBuffer(diffuseEntry), PreviewBuffer(indexEntry), _rowDiffuse, tone,
-            HairPreviewColors(dTexture, kind), PreviewBuffer(maskEntry), viewportEffect));
+            HairPreviewColors(dTexture, kind), PreviewBuffer(maskEntry), viewportEffect, PreviewBuffer(normalMapEntry)));
         _viewport.SetOverlays(overlayEntries);
     }
 
@@ -2249,7 +2397,9 @@ public sealed class DecalsTab(
             {
                 var source = dTexture.Data.Source.Materials.FirstOrDefault(m
                     => string.Equals(m.GamePath, option.MaterialGamePath, StringComparison.OrdinalIgnoreCase));
-                var mesh = source == null ? null : uvReader.GetMesh(source);
+                // A body mirror IS the body under an alternate material set — rendering it
+                // would draw a duplicate body over the primary mesh.
+                var mesh = source == null || source.BodyMirror ? null : uvReader.GetMesh(source);
                 if (mesh == null)
                     continue;
 
@@ -2346,10 +2496,21 @@ public sealed class DecalsTab(
             ? a
             : null;
 
+        // Body-family companion canvases (face, nails, accents) are painted automatically by
+        // the body's own layers — show their textures alongside the body's so the user can
+        // check the continuation without selecting anything. The face also receives relief
+        // and finish, so all its slots list; overlay parts only take diffuse decals.
+        var companionOptions = _overlayOptions is { Count: > 0 } && ModelUvReader.IsBodySkinMaterial(_selectedMaterial)
+            ? _overlayOptions.Where(o => ModelUvReader.IsFaceSkinMaterial(o.MaterialGamePath)
+                ? o.Slot is TextureSlot.Diffuse or TextureSlot.Normal or TextureSlot.Mask
+                : o.Slot is TextureSlot.Diffuse).ToList()
+            : [];
+
         var generatedIndex = animatedEdit != null ? Array.IndexOf(GeneratedIds, _previewTexturePath) : -1;
         var current = generatedIndex >= 0
             ? null
-            : options.Find(o => string.Equals(o.GamePath, _previewTexturePath, StringComparison.OrdinalIgnoreCase))
+            : options.Concat(companionOptions)
+                 .FirstOrDefault(o => string.Equals(o.GamePath, _previewTexturePath, StringComparison.OrdinalIgnoreCase))
              ?? DefaultTargetOption() ?? options[0];
 
         // --- thumbnail strip: the material's textures, then the generated companions.
@@ -2362,22 +2523,23 @@ public sealed class DecalsTab(
 
         void Thumbnail(string id, string label, IDalamudTextureWrap? wrap, int width, int height, bool selected)
         {
-            var thumbH = 44f * ImUtf8.GlobalScale;
+            var thumbH = 44f * Im.Style.GlobalScale;
             var thumbW = Math.Clamp(height > 0 ? thumbH * width / height : thumbH, thumbH, thumbH * 2.2f);
-            using var pushed = ImUtf8.PushId(id);
-            var pos  = ImGui.GetCursorScreenPos();
+            using var pushed = Im.Id.Push(id);
+            var pos  = Im.Cursor.ScreenPosition;
             var size = new Vector2(thumbW, thumbH);
-            if (ImUtf8.InvisibleButton("##thumb"u8, size))
+            if (Im.InvisibleButton("##thumb"u8, size))
                 SelectPreview(id);
 
-            var draw = ImGui.GetWindowDrawList();
-            draw.AddRectFilled(pos, pos + size, 0xFF181818);
+            var draw = Im.Window.DrawList;
+            draw.Shape.RectangleFilled(pos, pos + size, 0xFF181818u);
             if (wrap != null)
-                draw.AddImage(wrap.Handle, pos, pos + size);
-            draw.AddRect(pos, pos + size, selected ? 0xFF53D7FF : 0x40FFFFFF, 0f, ImDrawFlags.None, selected ? 2f : 1f);
-            if (ImGui.IsItemHovered())
-                ImUtf8.HoverTooltip($"{label}{(wrap == null ? " (loading...)" : $"  {width}x{height}")}");
-            ImGui.SameLine(0f, 4f * ImUtf8.GlobalScale);
+                draw.Image(wrap.Id, pos, pos + size);
+            draw.Shape.Rectangle(pos, pos + size, selected ? 0xFF53D7FFu : 0x40FFFFFFu, 0f, ImDrawFlagsRectangle.None,
+                selected ? 2f : 1f);
+            if (Im.Item.Hovered())
+                Im.Tooltip.OnHover(HoveredFlags.None, $"{label}{(wrap == null ? " (loading...)" : $"  {width}x{height}")}");
+            Im.Line.Same(0, 4f * Im.Style.GlobalScale);
         }
 
         foreach (var option in options)
@@ -2388,12 +2550,20 @@ public sealed class DecalsTab(
                 current != null && ReferenceEquals(option, current));
         }
 
+        foreach (var option in companionOptions)
+        {
+            var entry = previewCache.Get(dTexture, option.GamePath, null);
+            Thumbnail(option.GamePath, $"{option.MaterialLabel} {SlotButtonLabel(option)} (painted by this canvas's layers)\n{option.GamePath}",
+                entry.CompositedWrap ?? entry.PristineWrap, entry.Pristine?.Width ?? 0, entry.Pristine?.Height ?? 0,
+                current != null && ReferenceEquals(option, current));
+        }
+
         if (animatedEdit != null)
         {
             EnsureGeneratedPreviews(dTexture, animatedEdit);
-            ImUtf8.Text("|"u8);
-            ImUtf8.HoverTooltip("Right of the bar: the GENERATED files the animated conversion ships — these replace the source textures in game."u8);
-            ImGui.SameLine(0f, 4f * ImUtf8.GlobalScale);
+            Im.Text("|"u8);
+            Im.Tooltip.OnHover("Right of the bar: the GENERATED files the animated conversion ships — these replace the source textures in game."u8);
+            Im.Line.Same(0, 4f * Im.Style.GlobalScale);
             for (var i = 0; i < GeneratedIds.Length; ++i)
             {
                 if (_generatedWraps[i] == null)
@@ -2404,7 +2574,7 @@ public sealed class DecalsTab(
             }
         }
 
-        ImGui.NewLine();
+        Im.Line.New();
 
         // --- header row of the main view: label, compare, hair-color view, zoom state.
         if (generatedIndex >= 0)
@@ -2417,19 +2587,19 @@ public sealed class DecalsTab(
         var pristine  = entryMain.Pristine;
         if (pristine == null)
         {
-            ImUtf8.Text("(loading texture...)"u8);
+            Im.Text("(loading texture...)"u8);
             return;
         }
 
-        ImUtf8.Text($"{SlotButtonLabel(current)}  {pristine.Width}x{pristine.Height}");
+        Im.Text($"{SlotButtonLabel(current)}  {pristine.Width}x{pristine.Height}");
 
         var showSource = false;
         if (entryMain.Composited != null)
         {
-            ImGui.SameLine();
-            ImUtf8.Button("Hold: Source"u8);
-            showSource = ImGui.IsItemActive();
-            ImUtf8.HoverTooltip("Hold to see the untouched source texture — release to return to your edited version. Flipping back and forth makes the changes pop."u8);
+            Im.Line.Same();
+            Im.Button("Hold: Source"u8);
+            showSource = Im.Item.Active;
+            Im.Tooltip.OnHover("Hold to see the untouched source texture — release to return to your edited version. Flipping back and forth makes the changes pop."u8);
         }
 
         // Hair normals are unreadable as raw data — default to rendering them as the two
@@ -2437,10 +2607,10 @@ public sealed class DecalsTab(
         var colorView = current is { Kind: MaterialKind.Hair, Slot: TextureSlot.Normal } && !_previewRawView;
         if (current is { Kind: MaterialKind.Hair, Slot: TextureSlot.Normal })
         {
-            ImGui.SameLine();
-            if (ImUtf8.SmallButton(colorView ? "View: Hair Colors"u8 : "View: Raw Texture"u8))
+            Im.Line.Same();
+            if (Im.SmallButton(colorView ? "View: Hair Colors"u8 : "View: Raw Texture"u8))
                 _previewRawView = !_previewRawView;
-            ImUtf8.HoverTooltip(
+            Im.Tooltip.OnHover(
                 "Hair Colors renders the highlight channel as your preview hair/highlight colors — what the hair will actually look like.\nRaw Texture shows the normal map data itself."u8);
         }
 
@@ -2487,11 +2657,11 @@ public sealed class DecalsTab(
         var wrap = _generatedWraps[index];
         if (wrap == null)
         {
-            ImUtf8.Text("(generating...)"u8);
+            Im.Text("(generating...)"u8);
             return;
         }
 
-        ImUtf8.Text($"{GeneratedLabels[index]}  {_generatedSizes[index].W}x{_generatedSizes[index].H}  (as built)");
+        Im.Text($"{GeneratedLabels[index]}  {_generatedSizes[index].W}x{_generatedSizes[index].H}  (as built)");
         DrawZoomIndicator();
         DrawZoomableImage(wrap, _generatedSizes[index].W, _generatedSizes[index].H,
             "Generated by the Animated Effect conversion — this file ships in the built mod.");
@@ -2502,10 +2672,10 @@ public sealed class DecalsTab(
         if (_previewZoom <= 1.01f)
             return;
 
-        ImGui.SameLine();
-        ImUtf8.Text($"{_previewZoom:F1}x");
-        ImGui.SameLine();
-        if (ImUtf8.SmallButton("Reset Zoom"u8))
+        Im.Line.Same();
+        Im.Text($"{_previewZoom:F1}x");
+        Im.Line.Same();
+        if (Im.SmallButton("Reset Zoom"u8))
         {
             _previewZoom   = 1f;
             _previewCenter = new Vector2(0.5f, 0.5f);
@@ -2518,8 +2688,8 @@ public sealed class DecalsTab(
     /// </summary>
     private void DrawZoomableImage(IDalamudTextureWrap wrap, int texWidth, int texHeight, string tooltip)
     {
-        var avail = ImGui.GetContentRegionAvail();
-        var maxH  = MathF.Max(180f * ImUtf8.GlobalScale, avail.Y * 0.45f);
+        var avail = Im.ContentRegion.Available;
+        var maxH  = MathF.Max(180f * Im.Style.GlobalScale, avail.Y * 0.45f);
         var scale = MathF.Min(MathF.Max(avail.X, 1f) / texWidth, maxH / texHeight);
         var size  = new Vector2(texWidth * scale, texHeight * scale);
 
@@ -2530,33 +2700,42 @@ public sealed class DecalsTab(
         var uv0 = _previewCenter - new Vector2(span / 2f);
         var uv1 = _previewCenter + new Vector2(span / 2f);
 
-        var pos = ImGui.GetCursorScreenPos();
-        ImUtf8.InvisibleButton("##texZoom"u8, size);
-        ImGui.GetWindowDrawList().AddImage(wrap.Handle, pos, pos + size, uv0, uv1);
+        var pos = Im.Cursor.ScreenPosition;
+        Im.InvisibleButton("##texZoom"u8, size);
+        Im.Window.DrawList.Image(wrap.Id, pos, pos + size, uv0, uv1);
 
-        var io = ImGui.GetIO();
-        if (ImGui.IsItemHovered())
+        if (Im.Item.Hovered())
         {
-            if (io.MouseWheel != 0f)
+            var wheel = Im.Io.MouseWheel;
+            if (wheel != 0f)
             {
-                var mouseFrac    = (ImGui.GetMousePos() - pos) / size;
+                var mouseFrac    = (Im.Mouse.Position - pos) / size;
                 var uvUnderMouse = uv0 + mouseFrac * (uv1 - uv0);
-                _previewZoom = Math.Clamp(_previewZoom * (1f + io.MouseWheel * 0.2f), 1f, 16f);
+                _previewZoom = Math.Clamp(_previewZoom * (1f + wheel * 0.2f), 1f, 16f);
                 var newSpan = 1f / _previewZoom;
                 _previewCenter = uvUnderMouse - (mouseFrac - new Vector2(0.5f, 0.5f)) * newSpan;
             }
 
-            if (ImGui.IsMouseDoubleClicked(ImGuiMouseButton.Left))
+            if (Im.Mouse.IsDoubleClicked(MouseButton.Left))
             {
                 _previewZoom   = 1f;
                 _previewCenter = new Vector2(0.5f, 0.5f);
             }
 
-            ImUtf8.HoverTooltip($"{tooltip}\nWheel: zoom at the cursor.  Drag: pan while zoomed.  Double-click: reset.");
+            Im.Tooltip.OnHover(HoveredFlags.None, $"{tooltip}\nWheel: zoom at the cursor.  Drag: pan while zoomed.  Double-click: reset.");
         }
 
-        if (ImGui.IsItemActive() && _previewZoom > 1f && io.MouseDelta != Vector2.Zero)
-            _previewCenter -= io.MouseDelta / size * (uv1 - uv0);
+        // Per-frame pan delta: the drag delta since the last reset stands in for the raw
+        // per-frame mouse delta (the invisible button is only active with the button held).
+        if (Im.Item.Active && _previewZoom > 1f)
+        {
+            var delta = Im.Mouse.GetDragDelta(MouseButton.Left, 0f);
+            if (delta != Vector2.Zero)
+            {
+                _previewCenter -= delta / size * (uv1 - uv0);
+                Im.Mouse.ResetDragDelta(MouseButton.Left);
+            }
+        }
     }
 
     /// <summary>
@@ -2636,11 +2815,11 @@ public sealed class DecalsTab(
         if (SelectedKind() is not MaterialKind.Hair)
             return;
 
-        ImGui.Separator();
-        if (!ImUtf8.CollapsingHeader("Hair Adjustments"u8, ImGuiTreeNodeFlags.DefaultOpen))
+        Im.Separator();
+        if (!Im.Tree.Header("Hair Adjustments"u8, TreeNodeFlags.DefaultOpen))
             return;
 
-        using var indent = ImRaii.PushIndent();
+        using var indent = Im.Indent();
 
         var normalOption = NormalOption();
         var maskOption   = MaterialOptions().Find(o => o.Slot is TextureSlot.Mask);
@@ -2649,12 +2828,12 @@ public sealed class DecalsTab(
 
         if (normalOption != null && _selectedMaterial.Length > 0)
         {
-            ImGui.Separator();
+            Im.Separator();
             DrawAnimatedControls(dTexture);
         }
 
         if (normalOption == null && maskOption == null)
-            ImUtf8.Text("This hair material exposes no normal or mask texture to adjust."u8);
+            Im.Text("This hair material exposes no normal or mask texture to adjust."u8);
     }
 
     /// <summary>
@@ -2727,13 +2906,13 @@ public sealed class DecalsTab(
         var changed = false;
 
         var enabled = staged.Enabled;
-        if (ImUtf8.Checkbox("Animated Effect"u8, ref enabled))
+        if (Im.Checkbox("Animated Effect"u8, ref enabled))
         {
             staged.Enabled = enabled;
             changed        = true;
         }
 
-        ImUtf8.HoverTooltip(
+        Im.Tooltip.OnHover(
             "Replaces this hairstyle's materials with the game's scrolling-effect shader: the highlight areas become a glowing effect that moves through the hair. Works whether or not your character's Highlights toggle is on — the areas come from the hair texture itself.\nApplies to every material of the hairstyle at once; the preview animates a stand-in of the effect (the exact look and speed need a Build to judge in game).\nThe hair and highlight colors follow your character unless overridden below; the effect color is the glow and is always picked here. Of the Shine sliders above, roughness and ambient occlusion carry into converted hair — specular and subsurface do not apply to it."u8);
 
         var hairstyleMaterials = HairstyleMaterialPaths(dTexture);
@@ -2746,9 +2925,9 @@ public sealed class DecalsTab(
 
         if (staged.Enabled && HairstyleModelMaterialCount(dTexture) is > 1 and var modelMaterials)
         {
-            ImGui.SameLine();
-            ImUtf8.Text($"({modelMaterials} materials)");
-            ImUtf8.HoverTooltip("This hairstyle's model splits across several hair materials — the build converts all of them together, whether or not each was added as a source."u8);
+            Im.Line.Same();
+            Im.Text($"({modelMaterials} materials)");
+            Im.Tooltip.OnHover("This hairstyle's model splits across several hair materials — the build converts all of them together, whether or not each was added as a source."u8);
         }
 
         if (!staged.Enabled)
@@ -2759,21 +2938,21 @@ public sealed class DecalsTab(
             return;
         }
 
-        using var indent = ImRaii.PushIndent();
+        using var indent = Im.Indent();
 
         // Three colors: the effect (emissive glow) is always authored here; the hair and
         // highlight colors follow the character until the override toggle is set.
         var effectColor = new Vector3(staged.EffectColor[0], staged.EffectColor[1], staged.EffectColor[2]);
-        if (ImUtf8.ColorEdit("Effect Color"u8, ref effectColor))
+        if (Im.Color.Editor("Effect Color"u8, ref effectColor))
         {
             staged.EffectColor = [effectColor.X, effectColor.Y, effectColor.Z];
             changed            = true;
         }
 
-        ImUtf8.HoverTooltip("Emissive color of the moving effect — what glows and scrolls through the highlight areas."u8);
+        Im.Tooltip.OnHover("Emissive color of the moving effect — what glows and scrolls through the highlight areas."u8);
 
         var overrideColors = staged.OverrideHairColors;
-        if (ImUtf8.Checkbox("Override Hair Colors"u8, ref overrideColors))
+        if (Im.Checkbox("Override Hair Colors"u8, ref overrideColors))
         {
             // Seed the overrides from what is currently shown so enabling starts from the
             // character's colors instead of jumping to a stale stored value.
@@ -2788,97 +2967,97 @@ public sealed class DecalsTab(
             changed                   = true;
         }
 
-        ImUtf8.HoverTooltip("The hair and highlight colors normally follow your character (Glamourer included) at every Build.\nEnable to pick both manually instead — the in-game hair color picker cannot reach converted hair."u8);
+        Im.Tooltip.OnHover("The hair and highlight colors normally follow your character (Glamourer included) at every Build.\nEnable to pick both manually instead — the in-game hair color picker cannot reach converted hair."u8);
 
         if (staged.OverrideHairColors)
         {
-            using var colorIndent = ImRaii.PushIndent();
+            using var colorIndent = Im.Indent();
 
             var baseColor = new Vector3(staged.BaseColor[0], staged.BaseColor[1], staged.BaseColor[2]);
-            if (ImUtf8.ColorEdit("Hair Color"u8, ref baseColor))
+            if (Im.Color.Editor("Hair Color"u8, ref baseColor))
             {
                 staged.BaseColor = [baseColor.X, baseColor.Y, baseColor.Z];
                 changed          = true;
             }
 
-            ImUtf8.HoverTooltip("Baked color of the hair outside the highlight areas."u8);
+            Im.Tooltip.OnHover("Baked color of the hair outside the highlight areas."u8);
 
             var highlightColor = new Vector3(staged.HighlightColor[0], staged.HighlightColor[1], staged.HighlightColor[2]);
-            if (ImUtf8.ColorEdit("Highlight Color"u8, ref highlightColor))
+            if (Im.Color.Editor("Highlight Color"u8, ref highlightColor))
             {
                 staged.HighlightColor = [highlightColor.X, highlightColor.Y, highlightColor.Z];
                 changed               = true;
             }
 
-            ImUtf8.HoverTooltip("Baked hair color of the highlight areas underneath the glowing effect."u8);
+            Im.Tooltip.OnHover("Baked hair color of the highlight areas underneath the glowing effect."u8);
         }
 
-        ImGui.SetNextItemWidth(220 * ImUtf8.GlobalScale);
+        Im.Item.SetNextWidthScaled(220);
         var intensity = staged.EffectIntensity;
-        if (ImUtf8.Slider("Effect Intensity"u8, ref intensity, "%.2f"u8, 0f, 4f))
+        if (Im.Slider("Effect Intensity"u8, ref intensity, "%.2f"u8, 0f, 4f))
         {
             staged.EffectIntensity = Math.Clamp(intensity, 0f, 4f);
             changed                = true;
         }
 
-        ImUtf8.HoverTooltip("Brightness of the glow — above 1 overdrives the effect color."u8);
+        Im.Tooltip.OnHover("Brightness of the glow — above 1 overdrives the effect color."u8);
 
-        ImGui.SetNextItemWidth(150 * ImUtf8.GlobalScale);
+        Im.Item.SetNextWidthScaled(150);
         var scrollU = staged.ScrollU;
-        if (ImUtf8.Slider("##scrollU"u8, ref scrollU, "Across: %.2f"u8, -1f, 1f))
+        if (Im.Slider("##scrollU"u8, ref scrollU, "Across: %.2f"u8, -1f, 1f))
         {
             staged.ScrollU = scrollU;
             changed        = true;
         }
 
-        ImUtf8.HoverTooltip("Sideways drift of the pattern. Negative reverses, 0 freezes."u8);
+        Im.Tooltip.OnHover("Sideways drift of the pattern. Negative reverses, 0 freezes."u8);
 
-        ImGui.SameLine();
-        ImGui.SetNextItemWidth(150 * ImUtf8.GlobalScale);
+        Im.Line.Same();
+        Im.Item.SetNextWidthScaled(150);
         var scrollV = staged.ScrollV;
-        if (ImUtf8.Slider("Scroll Speed"u8, ref scrollV, "Along: %.2f"u8, -1f, 1f))
+        if (Im.Slider("Scroll Speed"u8, ref scrollV, "Along: %.2f"u8, -1f, 1f))
         {
             staged.ScrollV = scrollV;
             changed        = true;
         }
 
-        ImUtf8.HoverTooltip("Drift along the strands. Negative reverses, 0 freezes."u8);
+        Im.Tooltip.OnHover("Drift along the strands. Negative reverses, 0 freezes."u8);
 
-        ImGui.SetNextItemWidth(150 * ImUtf8.GlobalScale);
+        Im.Item.SetNextWidthScaled(150);
         var tilingU = staged.TilingU;
-        if (ImUtf8.Slider("##tilingU"u8, ref tilingU, "Across: %.2f"u8, 0.05f, 8f))
+        if (Im.Slider("##tilingU"u8, ref tilingU, "Across: %.2f"u8, 0.05f, 8f))
         {
             staged.TilingU = Math.Clamp(tilingU, 0.01f, 16f);
             changed        = true;
         }
 
-        ImUtf8.HoverTooltip("Pattern repeats across the strands — low = broad, high = fine."u8);
+        Im.Tooltip.OnHover("Pattern repeats across the strands — low = broad, high = fine."u8);
 
-        ImGui.SameLine();
-        ImGui.SetNextItemWidth(150 * ImUtf8.GlobalScale);
+        Im.Line.Same();
+        Im.Item.SetNextWidthScaled(150);
         var tilingV = staged.TilingV;
-        if (ImUtf8.Slider("Pattern Tiling"u8, ref tilingV, "Along: %.2f"u8, 0.05f, 8f))
+        if (Im.Slider("Pattern Tiling"u8, ref tilingV, "Along: %.2f"u8, 0.05f, 8f))
         {
             staged.TilingV = Math.Clamp(tilingV, 0.01f, 16f);
             changed        = true;
         }
 
-        ImUtf8.HoverTooltip("Pattern repeats along the strands — low = broad, high = fine."u8);
+        Im.Tooltip.OnHover("Pattern repeats along the strands — low = broad, high = fine."u8);
 
         var pattern    = (AnimatedHairBuilder.HairEffectPattern)staged.Pattern;
         var libraryEntry = staged.EffectLibraryId != Guid.Empty ? decals.GetEffect(staged.EffectLibraryId) : null;
         var comboLabel = staged.EffectLibraryId != Guid.Empty
             ? libraryEntry?.Name ?? "(missing library pattern)"
             : AnimatedHairBuilder.PatternLabel(pattern);
-        ImGui.SetNextItemWidth(220 * ImUtf8.GlobalScale);
-        using (var combo = ImUtf8.Combo("Effect Pattern"u8, comboLabel))
+        Im.Item.SetNextWidthScaled(220);
+        using (var combo = Im.Combo.Begin("Effect Pattern"u8, comboLabel))
         {
             if (combo)
             {
-                foreach (var candidate in Enum.GetValues<AnimatedHairBuilder.HairEffectPattern>())
+                foreach (var candidate in AnimatedHairBuilder.HairEffectPattern.Values)
                 {
                     var active = staged.EffectLibraryId == Guid.Empty && candidate == pattern;
-                    if (!ImUtf8.Selectable(AnimatedHairBuilder.PatternLabel(candidate), active) || active)
+                    if (!Im.Selectable(AnimatedHairBuilder.PatternLabel(candidate), active) || active)
                         continue;
 
                     staged.Pattern         = (int)candidate;
@@ -2888,12 +3067,12 @@ public sealed class DecalsTab(
 
                 if (decals.Effects.Count > 0)
                 {
-                    ImGui.Separator();
-                    foreach (var (effect, idx) in decals.Effects.WithIndex())
+                    Im.Separator();
+                    foreach (var (idx, effect) in decals.Effects.Index())
                     {
-                        using var id     = ImUtf8.PushId(idx);
+                        using var id     = Im.Id.Push(idx);
                         var       active = staged.EffectLibraryId == effect.Id;
-                        if (!ImUtf8.Selectable($"Library: {effect.Name}", active) || active)
+                        if (!Im.Selectable($"Library: {effect.Name}", active) || active)
                             continue;
 
                         staged.EffectLibraryId = effect.Id;
@@ -2903,14 +3082,14 @@ public sealed class DecalsTab(
             }
         }
 
-        ImUtf8.HoverTooltip(
+        Im.Tooltip.OnHover(
             "The black/white pattern scrolled across the hair — bright areas show the effect color. Shown below as it tiles.\nGlint mimics the original reference (occasional single sparkles); Glitter loads the game's own hand-authored sparkle texture from your game files.\nLibrary entries are imported images, managed alongside the decals in the library window."u8);
 
-        ImGui.SameLine();
-        if (ImUtf8.SmallButton("Manage Patterns..."u8))
+        Im.Line.Same();
+        if (Im.SmallButton("Manage Patterns..."u8))
             decalLibraryWindow.OpenEffects();
 
-        ImUtf8.HoverTooltip(
+        Im.Tooltip.OnHover(
             "Open the Resource Library's Effect Patterns tab — import, rename or delete patterns there.\nImported patterns appear in this dropdown as \"Library:\" entries."u8);
 
         DrawPatternThumbnail(staged);
@@ -2936,7 +3115,7 @@ public sealed class DecalsTab(
 
         // The pattern is always square — draw it square, or it reads stretched.
         if (_patternThumbnail.Wrap is { } wrap)
-            ImGui.Image(wrap.Handle, new Vector2(128, 128) * ImUtf8.GlobalScale);
+            Im.Image.Draw(wrap.Id, new Vector2(128, 128) * Im.Style.GlobalScale);
     }
 
     /// <summary> Find the singleton hair layer of a texture's stack, or stage a fresh neutral one. </summary>
@@ -2983,9 +3162,9 @@ public sealed class DecalsTab(
         var layer   = HairLayerFor<HairShineLayer>(dTexture, option, out var exists);
         var changed = false;
 
-        ImUtf8.TextWrapped("Shine — how the hair surface responds to light."u8);
+        Im.TextWrapped("Shine — how the hair surface responds to light."u8);
 
-        if (ImUtf8.SmallButton("Glossy"u8))
+        if (Im.SmallButton("Glossy"u8))
         {
             layer.SpecScale       = 1.5f;
             layer.RoughnessScale  = 0.6f;
@@ -2993,9 +3172,9 @@ public sealed class DecalsTab(
             changed               = true;
         }
 
-        ImUtf8.HoverTooltip("Sleek, reflective hair — boosted specular, lowered roughness."u8);
-        ImGui.SameLine();
-        if (ImUtf8.SmallButton("Matte"u8))
+        Im.Tooltip.OnHover("Sleek, reflective hair — boosted specular, lowered roughness."u8);
+        Im.Line.Same();
+        if (Im.SmallButton("Matte"u8))
         {
             layer.SpecScale       = 0.6f;
             layer.RoughnessScale  = 1.4f;
@@ -3003,65 +3182,65 @@ public sealed class DecalsTab(
             changed               = true;
         }
 
-        ImUtf8.HoverTooltip("Dry, diffuse hair — dimmed specular, raised roughness."u8);
+        Im.Tooltip.OnHover("Dry, diffuse hair — dimmed specular, raised roughness."u8);
 
-        ImGui.SetNextItemWidth(220 * ImUtf8.GlobalScale);
+        Im.Item.SetNextWidthScaled(220);
         var spec = layer.SpecScale;
-        if (ImUtf8.Slider("Specular"u8, ref spec, "×%.2f"u8, 0f, 2f))
+        if (Im.Slider("Specular"u8, ref spec, "×%.2f"u8, 0f, 2f))
         {
             layer.SpecScale = Math.Clamp(spec, 0f, 2f);
             changed         = true;
         }
 
-        ImUtf8.HoverTooltip("Multiplier on the authored specular power — below 1 dims reflections, above 1 boosts them."u8);
+        Im.Tooltip.OnHover("Multiplier on the authored specular power — below 1 dims reflections, above 1 boosts them."u8);
 
-        ImGui.SetNextItemWidth(220 * ImUtf8.GlobalScale);
+        Im.Item.SetNextWidthScaled(220);
         var roughnessScale = layer.RoughnessScale;
-        if (ImUtf8.Slider("Roughness"u8, ref roughnessScale, "×%.2f"u8, 0f, 2f))
+        if (Im.Slider("Roughness"u8, ref roughnessScale, "×%.2f"u8, 0f, 2f))
         {
             layer.RoughnessScale = Math.Clamp(roughnessScale, 0f, 2f);
             changed              = true;
         }
 
-        ImGui.SetNextItemWidth(220 * ImUtf8.GlobalScale);
+        Im.Item.SetNextWidthScaled(220);
         var roughnessOffset = layer.RoughnessOffset;
-        if (ImUtf8.Slider("Roughness Offset"u8, ref roughnessOffset, "%+.2f"u8, -1f, 1f))
+        if (Im.Slider("Roughness Offset"u8, ref roughnessOffset, "%+.2f"u8, -1f, 1f))
         {
             layer.RoughnessOffset = Math.Clamp(roughnessOffset, -1f, 1f);
             changed               = true;
         }
 
-        ImUtf8.HoverTooltip("Roughness spreads the shine out; the channel semantics are empirical — nudge and check in-game."u8);
+        Im.Tooltip.OnHover("Roughness spreads the shine out; the channel semantics are empirical — nudge and check in-game."u8);
 
-        ImGui.SetNextItemWidth(220 * ImUtf8.GlobalScale);
+        Im.Item.SetNextWidthScaled(220);
         var sss = layer.SssScale;
-        if (ImUtf8.Slider("Subsurface"u8, ref sss, "×%.2f"u8, 0f, 2f))
+        if (Im.Slider("Subsurface"u8, ref sss, "×%.2f"u8, 0f, 2f))
         {
             layer.SssScale = Math.Clamp(sss, 0f, 2f);
             changed        = true;
         }
 
-        ImUtf8.HoverTooltip("Subsurface-scattering thickness — how much light glows through the strands."u8);
+        Im.Tooltip.OnHover("Subsurface-scattering thickness — how much light glows through the strands."u8);
 
-        ImGui.SetNextItemWidth(220 * ImUtf8.GlobalScale);
+        Im.Item.SetNextWidthScaled(220);
         var ao = layer.AoScale;
-        if (ImUtf8.Slider("Ambient Occlusion"u8, ref ao, "×%.2f"u8, 0f, 2f))
+        if (Im.Slider("Ambient Occlusion"u8, ref ao, "×%.2f"u8, 0f, 2f))
         {
             layer.AoScale = Math.Clamp(ao, 0f, 2f);
             changed       = true;
         }
 
-        ImUtf8.HoverTooltip("Multiplier on the authored shading darkness between strands."u8);
+        Im.Tooltip.OnHover("Multiplier on the authored shading darkness between strands."u8);
 
         if (exists)
         {
-            if (ImUtf8.SmallButton("Reset Shine"u8))
+            if (Im.SmallButton("Reset Shine"u8))
             {
                 RemoveHairLayer<HairShineLayer>(dTexture, option);
                 return;
             }
 
-            ImUtf8.HoverTooltip("Remove the shine adjustment — the authored surface returns on the next build."u8);
+            Im.Tooltip.OnHover("Remove the shine adjustment — the authored surface returns on the next build."u8);
         }
 
         if (!changed)
@@ -3094,11 +3273,11 @@ public sealed class DecalsTab(
         if (option == null || option.Mtrl.Table is not ColorTable table)
             return;
 
-        ImGui.Separator();
-        if (!ImUtf8.CollapsingHeader("Manage Colorset"u8))
+        Im.Separator();
+        if (!Im.Tree.Header("Manage Colorset"u8))
             return;
 
-        using var indent = ImRaii.PushIndent();
+        using var indent = Im.Indent();
 
         // Which file the analysis actually reads — a stale capture (taken before the source
         // mod was enabled or updated) is the usual reason a baked decal does not show up.
@@ -3112,11 +3291,11 @@ public sealed class DecalsTab(
                  => "cleaned copy (extracted decals removed)",
             _ => Path.GetFileName(capturedPath),
         };
-        ImUtf8.TextWrapped($"Analyzing id map: {sourceLabel}");
-        if (capturedPath is { Length: > 0 } && ImGui.IsItemHovered())
-            ImUtf8.HoverTooltip(capturedPath);
-        ImGui.SameLine();
-        if (ImUtf8.SmallButton("Reload Source"u8))
+        Im.TextWrapped($"Analyzing id map: {sourceLabel}");
+        if (capturedPath is { Length: > 0 } && Im.Item.Hovered())
+            Im.Tooltip.OnHover(capturedPath);
+        Im.Line.Same();
+        if (Im.SmallButton("Reload Source"u8))
         {
             dTexture.Data.TextureSourcePaths.Remove(option.GamePath);
             _statsTexture = string.Empty;
@@ -3137,13 +3316,13 @@ public sealed class DecalsTab(
             saveService.QueueSave(dTexture);
         }
 
-        ImUtf8.HoverTooltip(
+        Im.Tooltip.OnHover(
             "Drop the stored source capture and resolve the id map again from the currently active mods.\nUse this when the analyzed file is not the one your mod actually ships (e.g. the capture predates enabling or updating the source mod)."u8);
 
         EnsureIdStats(dTexture, option.GamePath);
-        if (_sortedRowUsage.Count == 0)
+        if (_rowUsageCounts.Count == 0)
         {
-            ImUtf8.Text("No id-map statistics available for this texture."u8);
+            Im.Text("No id-map statistics available for this texture."u8);
             return;
         }
 
@@ -3160,22 +3339,41 @@ public sealed class DecalsTab(
 
         DrawSlotAvailability(dTexture, option, claimedRows, rowDiffuse);
 
-        ImGui.Separator();
-        ImUtf8.Text("Extract Baked Decal"u8);
-        ImUtf8.HoverTooltip(
+        Im.Separator();
+        Im.Text("Extract Baked Decal"u8);
+        Im.Tooltip.OnHover(
             "Lift a decal that is already baked into this id map (e.g. by the source mod) out into a decal layer of its own: hover the eye of each row to see where it renders on your character, pick the row(s) the baked decal uses, then extract. The decal is moved onto free colorset slots of its own — the original texels are filled with the surrounding garment — so it can be recolored and repositioned without touching the rest of the gear."u8);
 
         _extractRows.RemoveWhere(claimedRows.Contains);
 
-        // Small regions first — a baked decal is usually a small fraction of the garment.
-        foreach (var (row, count) in _sortedRowUsage)
+        // Slot order (1-16) in an actual table, both halves as their own columns — the
+        // per-decal editor already labels claimed rows "Slot N A/B", so this list now reads
+        // against the same map instead of a size-sorted shuffle. Extraction still selects
+        // per HALF independently; only the layout pairs them. A pair with neither half used
+        // anywhere in this id map is skipped. Fixed column widths (not content-sized) keep
+        // the swatches and slot numbers aligned down the whole list regardless of how long a
+        // row's texel/percentage text runs.
+        var previewWidth = (2 * Im.Style.FrameHeight + Im.Style.ItemInnerSpacing.X) * Im.Style.GlobalScale;
+
+        void DrawColumn(Im.TableDisposable extractTable, int row)
         {
-            using var id      = ImUtf8.PushId(row);
+            using var colId  = Im.Id.Push(row);
             var       claimed = claimedRows.Contains(row);
             var       picked  = _extractRows.Contains(row);
-            using (ImRaii.Disabled(claimed))
+            var       count   = _rowUsageCounts.GetValueOrDefault(row);
+
+            extractTable.NextColumn();
+            DrawRowHighlightEye(option, row,
+                "Highlights where this row dominantly renders on the character while hovered (redraws your character).\nA baked decal usually lives on a row the garment itself barely uses — often a slot's B half."u8);
+            Im.Line.Same();
+            var color   = rowDiffuse == null ? Vector3.One : rowDiffuse[row];
+            var clamped = new Vector4(Math.Clamp(color.X, 0f, 1f), Math.Clamp(color.Y, 0f, 1f), Math.Clamp(color.Z, 0f, 1f), 1f);
+            Im.Color.Button("##rowColor"u8, clamped);
+
+            extractTable.NextColumn();
+            using (Im.Disabled(claimed))
             {
-                if (ImUtf8.Checkbox($"Row {RowName(row)}", ref picked))
+                if (Im.Checkbox($"{count} texels ({100f * count / _statsTotalTexels:F1}%){(claimed ? "  — claimed" : string.Empty)}", ref picked))
                 {
                     if (picked)
                         _extractRows.Add(row);
@@ -3183,29 +3381,48 @@ public sealed class DecalsTab(
                         _extractRows.Remove(row);
                 }
             }
-
-            ImGui.SameLine();
-            var color = rowDiffuse == null ? Vector3.One : rowDiffuse[row];
-            ImGui.ColorButton("##rowColor",
-                new Vector4(Math.Clamp(color.X, 0f, 1f), Math.Clamp(color.Y, 0f, 1f), Math.Clamp(color.Z, 0f, 1f), 1f));
-            ImGui.SameLine();
-            ImUtf8.Text($"{count} texels ({100f * count / _statsTotalTexels:F1}%){(claimed ? "  — claimed by a decal layer" : string.Empty)}");
-            ImGui.SameLine();
-            DrawRowHighlightEye(option, row,
-                "Highlights where this row dominantly renders on the character while hovered (redraws your character).\nA baked decal usually lives on a row the garment itself barely uses — often a slot's B half."u8);
         }
 
-        ImUtf8.Checkbox("Largest Connected Region Only"u8, ref _extractLargestOnly);
-        ImUtf8.HoverTooltip(
+        using (var extractTable = Im.Table.Begin("##extractRows"u8, 5, ImSharp.TableFlags.RowBackground))
+        {
+            if (extractTable)
+            {
+                extractTable.SetupColumn("Slot"u8, ImSharp.TableColumnFlags.WidthFixed, 55f * Im.Style.GlobalScale);
+                extractTable.SetupColumn("A"u8, ImSharp.TableColumnFlags.WidthFixed, previewWidth);
+                extractTable.SetupColumn(""u8, ImSharp.TableColumnFlags.WidthStretch);
+                extractTable.SetupColumn("B"u8, ImSharp.TableColumnFlags.WidthFixed, previewWidth);
+                extractTable.SetupColumn(""u8, ImSharp.TableColumnFlags.WidthStretch);
+                extractTable.HeaderRow();
+
+                for (var pair = 0; pair < ColorTable.NumRows / 2; ++pair)
+                {
+                    var rowA = pair * 2;
+                    var rowB = rowA + 1;
+                    if (!_rowUsageCounts.ContainsKey(rowA) && !_rowUsageCounts.ContainsKey(rowB))
+                        continue;
+
+                    using var id = Im.Id.Push(pair);
+                    extractTable.NextColumn();
+                    Im.Cursor.FrameAlign();
+                    Im.Text($"Slot {pair + 1}");
+
+                    DrawColumn(extractTable, rowA);
+                    DrawColumn(extractTable, rowB);
+                }
+            }
+        }
+
+        Im.Checkbox("Largest Connected Region Only"u8, ref _extractLargestOnly);
+        Im.Tooltip.OnHover(
             "Keep only the biggest connected patch of the selected rows.\nUseful when a row also covers unrelated texels elsewhere (a B half additionally catches the garment's deepest baked shading) — but turn it OFF if the decal itself is smaller than those other patches."u8);
 
-        if (ImUtf8.Button("Extract Selected Rows as Decal"u8) && _extractRows.Count > 0)
+        if (Im.Button("Extract Selected Rows as Decal"u8) && _extractRows.Count > 0)
             ExtractDecal(dTexture, option, table);
         if (_extractRows.Count == 0)
-            ImUtf8.HoverTooltip("Select at least one row above first."u8);
+            Im.Tooltip.OnHover("Select at least one row above first."u8);
 
         if (_extractStatus.Length > 0)
-            ImUtf8.TextWrapped(_extractStatus);
+            Im.TextWrapped(_extractStatus);
     }
 
     /// <summary>
@@ -3217,37 +3434,37 @@ public sealed class DecalsTab(
     /// </summary>
     private void DrawSlotAvailability(DTexture dTexture, TextureOption option, HashSet<int> claimedRows, Vector3[]? rowDiffuse)
     {
-        ImUtf8.Text("Slot Availability"u8);
-        ImUtf8.HoverTooltip(
+        Im.Text("Slot Availability"u8);
+        Im.Tooltip.OnHover(
             "Which colorset slots decals may claim. Free slots are used automatically; slots the id map references are blocked — but a slot referenced by only a handful of stray texels is often fine to hand over with the Usable checkbox."u8);
 
         var edit = dTexture.Data.Materials.GetValueOrDefault(option.MaterialGamePath);
         for (var pair = 1; pair <= ColorRowAllocator.PairCount; ++pair)
         {
-            using var id   = ImUtf8.PushId(pair);
+            using var id   = Im.Id.Push(pair);
             var       rowA = (pair - 1) * 2;
 
             var color = rowDiffuse == null ? Vector3.One : rowDiffuse[rowA];
-            ImGui.ColorButton("##slotColor",
+            Im.Color.Button("##slotColor"u8,
                 new Vector4(Math.Clamp(color.X, 0f, 1f), Math.Clamp(color.Y, 0f, 1f), Math.Clamp(color.Z, 0f, 1f), 1f));
-            ImGui.SameLine();
-            ImUtf8.Text($"Slot {pair,2}");
-            ImGui.SameLine();
+            Im.Line.Same();
+            Im.Text($"Slot {pair,2}");
+            Im.Line.Same();
 
             if (claimedRows.Contains(rowA) || claimedRows.Contains(rowA + 1))
             {
-                ImUtf8.Text("— claimed by a decal"u8);
+                Im.Text("— claimed by a decal"u8);
                 continue;
             }
 
             if (!_usedRowPairs.Contains(pair))
             {
-                ImUtf8.Text("— free"u8);
+                Im.Text("— free"u8);
                 continue;
             }
 
             var usable = edit?.UsableSlots.Contains(pair) ?? false;
-            if (ImUtf8.Checkbox("Usable"u8, ref usable))
+            if (Im.Checkbox("Usable"u8, ref usable))
             {
                 var target = GetOrAddMaterialEdit(dTexture, option);
                 if (usable)
@@ -3265,12 +3482,12 @@ public sealed class DecalsTab(
                 Save(dTexture);
             }
 
-            ImUtf8.HoverTooltip(
+            Im.Tooltip.OnHover(
                 "Let decals claim this slot even though the id map references it.\nUse when the scanner is wrong (a few stray texels) or to sacrifice the slot deliberately — decals will overwrite its rows wherever the map really renders them."u8);
 
-            ImGui.SameLine();
+            Im.Line.Same();
             var texels = _rowUsageCounts.GetValueOrDefault(rowA) + _rowUsageCounts.GetValueOrDefault(rowA + 1);
-            ImUtf8.Text($"— used by the map, {texels} texels ({100f * texels / _statsTotalTexels:F1}%)");
+            Im.Text($"— used by the map, {texels} texels ({100f * texels / _statsTotalTexels:F1}%)");
         }
     }
 
@@ -3501,7 +3718,6 @@ public sealed class DecalsTab(
             _statsTexture = gamePath;
             _usedRowPairs.Clear();
             _rowUsageCounts.Clear();
-            _sortedRowUsage.Clear();
             _statsTotalTexels = 1;
             return;
         }
@@ -3521,9 +3737,6 @@ public sealed class DecalsTab(
             _rowUsageCounts[row] = _rowUsageCounts.GetValueOrDefault(row) + 1;
         }
 
-        // Prepared once per stats pass — the extraction list draws from these every frame.
-        _sortedRowUsage.Clear();
-        _sortedRowUsage.AddRange(_rowUsageCounts.OrderBy(kvp => kvp.Value).Select(kvp => (kvp.Key, kvp.Value)));
         _statsTotalTexels = Math.Max(1, decoded.Rgba.Length / 4);
     }
 

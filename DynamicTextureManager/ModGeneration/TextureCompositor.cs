@@ -2,16 +2,22 @@ using System;
 using System.Collections.Generic;
 using System.IO;
 using System.Linq;
-using System.Numerics;
 using DynamicTextureManager.DTextures.Data;
 using DynamicTextureManager.ModGeneration.Shaders;
 using DynamicTextureManager.Services;
-using OtterGui.Services;
+using IService = Luna.IService;
 using SixLabors.ImageSharp;
 using SixLabors.ImageSharp.PixelFormats;
 using SixLabors.ImageSharp.Processing;
 
 namespace DynamicTextureManager.ModGeneration;
+
+/// <summary>
+/// The character's live customize colors a composite may bake with (procedural surface
+/// layers): captured on the framework thread before the composite runs in the background.
+/// Null components mean the character was unreadable — layer colors are used as stored.
+/// </summary>
+public readonly record struct CharacterColors(System.Numerics.Vector3? HairMain, System.Numerics.Vector3? HairHighlight);
 
 /// <summary> Composites decal layers onto a base texture in RGBA space. </summary>
 public sealed class TextureCompositor(DecalLibrary decals) : IService
@@ -20,7 +26,8 @@ public sealed class TextureCompositor(DecalLibrary decals) : IService
     /// Apply all enabled layers onto the base texture. Returns the composited RGBA buffer.
     /// Surface-projected layers need the material's mesh geometry; without it they are skipped.
     /// </summary>
-    private byte[] Composite(DecodedTexture baseTexture, IEnumerable<TextureLayer> layers, MaterialMesh? mesh)
+    private byte[] Composite(DecodedTexture baseTexture, IEnumerable<TextureLayer> layers, MaterialMesh? mesh,
+        CharacterColors characterColors)
     {
         if (!layers.Any(l => l.Enabled))
             return (byte[])baseTexture.Rgba.Clone();
@@ -40,6 +47,13 @@ public sealed class TextureCompositor(DecalLibrary decals) : IService
                 case HairShineLayer shine:
                     HairAdjust.ApplyShine(image, shine);
                     break;
+                case ProceduralSurfaceLayer proc:
+                    if (mesh != null)
+                        ProceduralSurfaceBaker.Bake(image, mesh, proc, characterColors: characterColors,
+                            markingPattern: ResolveMarkingPattern(proc));
+                    else
+                        DynamicTextureManager.Log.Warning("Procedural surface layer skipped — no mesh geometry available for this texture's material.");
+                    break;
                 default:
                     DynamicTextureManager.Log.Warning($"Unknown layer type {layer.LayerType}, skipped.");
                     break;
@@ -57,12 +71,13 @@ public sealed class TextureCompositor(DecalLibrary decals) : IService
     /// previews stay pixel-identical to built files by construction.
     /// </summary>
     public byte[] CompositeFull(DecodedTexture baseTexture, IEnumerable<TextureLayer> layers,
-        IReadOnlyList<TextureLayer> effectLayers, TextureSlot effectSlot, MaterialMesh? mesh)
+        IReadOnlyList<TextureLayer> effectLayers, TextureSlot effectSlot, MaterialMesh? mesh,
+        CharacterColors characterColors = default)
     {
-        var rgba = Composite(baseTexture, layers, mesh);
+        var rgba = Composite(baseTexture, layers, mesh, characterColors);
         if (effectLayers.Count > 0)
             rgba = CompositeSiblingEffects(new DecodedTexture(rgba, baseTexture.Width, baseTexture.Height),
-                effectLayers, effectSlot, mesh);
+                effectLayers, effectSlot, mesh, characterColors);
         return rgba;
     }
 
@@ -72,19 +87,28 @@ public sealed class TextureCompositor(DecalLibrary decals) : IService
     /// UV-normalized, so resolution differences between the siblings do not matter.
     /// </summary>
     private byte[] CompositeSiblingEffects(DecodedTexture baseTexture, IEnumerable<TextureLayer> layers, TextureSlot slot,
-        MaterialMesh? mesh)
+        MaterialMesh? mesh, CharacterColors characterColors)
     {
-        if (!layers.OfType<DecalLayer>().Any(l => l.Enabled && l.HasMaterialEffects))
+        if (!layers.Any(l => l.Enabled && l.HasSiblingEffects))
             return baseTexture.Rgba;
 
         using var image = Image.LoadPixelData<Rgba32>(baseTexture.Rgba, baseTexture.Width, baseTexture.Height);
 
-        foreach (var layer in layers.OfType<DecalLayer>())
+        foreach (var layer in layers)
         {
-            if (!layer.Enabled || !layer.HasMaterialEffects)
+            if (!layer.Enabled || !layer.HasSiblingEffects)
                 continue;
 
-            ApplyDecal(image, layer, mesh, effectSlot: slot);
+            switch (layer)
+            {
+                case DecalLayer decal:
+                    ApplyDecal(image, decal, mesh, effectSlot: slot);
+                    break;
+                case ProceduralSurfaceLayer proc when mesh != null:
+                    ProceduralSurfaceBaker.Bake(image, mesh, proc, effectSlot: slot, characterColors: characterColors,
+                        markingPattern: ResolveMarkingPattern(proc));
+                    break;
+            }
         }
 
         var result = new byte[image.Width * image.Height * 4];
@@ -131,6 +155,63 @@ public sealed class TextureCompositor(DecalLibrary decals) : IService
     private sealed record CachedDecal(long Stamp, Rgba32[] Pixels, int Width, int Height);
 
     private readonly Dictionary<string, CachedDecal> _decalCache = new(StringComparer.OrdinalIgnoreCase);
+
+    private readonly Dictionary<string, MarkingPatternImage> _patternCache = new(StringComparer.OrdinalIgnoreCase);
+
+    /// <summary>
+    /// The custom markings image a procedural layer samples, converted to intensity
+    /// (luminance × alpha) once and cached by file stamp — the baker reads it per texel.
+    /// Missing images degrade to unmarked coats, mirroring the decal-skip behavior.
+    /// </summary>
+    private MarkingPatternImage? ResolveMarkingPattern(ProceduralSurfaceLayer layer)
+    {
+        if (layer.Markings != FurMarkingStyle.Custom || layer.MarkingPatternId == Guid.Empty)
+            return null;
+
+        var path = decals.PatternFilePath(layer.MarkingPatternId);
+        if (!File.Exists(path))
+        {
+            DynamicTextureManager.Log.Warning($"Marking pattern image {path} is missing, markings skipped.");
+            return null;
+        }
+
+        var stamp = File.GetLastWriteTimeUtc(path).Ticks;
+        MarkingPatternImage? cached;
+        lock (_patternCache)
+            _patternCache.TryGetValue(path, out cached);
+
+        if (cached == null || cached.Stamp != stamp)
+        {
+            try
+            {
+                using var image = Image.Load<Rgba32>(path);
+                var pixels = new Rgba32[image.Width * image.Height];
+                image.CopyPixelDataTo(pixels);
+                var intensity = new float[pixels.Length];
+                for (var i = 0; i < pixels.Length; ++i)
+                {
+                    var p = pixels[i];
+                    intensity[i] = (0.2126f * p.R + 0.7152f * p.G + 0.0722f * p.B) / 255f * (p.A / 255f);
+                }
+
+                cached = new MarkingPatternImage(stamp, intensity, image.Width, image.Height);
+            }
+            catch (Exception ex)
+            {
+                DynamicTextureManager.Log.Warning($"Could not load marking pattern image {path}, markings skipped: {ex.Message}");
+                return null;
+            }
+
+            lock (_patternCache)
+            {
+                if (_patternCache.Count >= 4 && !_patternCache.ContainsKey(path))
+                    _patternCache.Clear();
+                _patternCache[path] = cached;
+            }
+        }
+
+        return cached;
+    }
 
     /// <summary>
     /// Decal image decode, cached by file stamp — every composite stamps the same few PNGs,

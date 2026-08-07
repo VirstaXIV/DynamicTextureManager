@@ -1,11 +1,9 @@
 using System;
 using System.Collections.Generic;
 using System.Linq;
-using Dalamud.Bindings.ImGui;
 using DynamicTextureManager.DTextures;
 using DynamicTextureManager.ModGeneration;
 using DynamicTextureManager.ModGeneration.Shaders;
-using OtterGui.Text;
 using Penumbra.GameData.Files;
 
 namespace DynamicTextureManager.UI.Panels;
@@ -20,7 +18,7 @@ public sealed record TextureOption(
     MtrlFile Mtrl,
     MaterialKind Kind);
 
-/// <summary> Shared material/texture enumeration and the material dropdown of the Decals and Textures tabs. </summary>
+/// <summary> Shared material/texture enumeration and the material dropdown of the Decals tab. </summary>
 public static class TextureOptions
 {
     /// <summary> All textures of the source materials, classified by shader handler. </summary>
@@ -45,50 +43,4 @@ public static class TextureOptions
         return ret;
     }
 
-    /// <summary> The display label of one texture slot in texture lists and thumbnails. </summary>
-    public static string SlotLabel(TextureOption option)
-        => option.Slot is TextureSlot.Index ? "Colorset (ID map)" : option.Slot.ToString();
-
-    /// <summary>
-    /// Dropdown over the distinct materials of the options. Ensures the selection is valid
-    /// (falling back to the first material) and returns true when it changed.
-    /// </summary>
-    public static bool DrawMaterialCombo(IReadOnlyList<TextureOption> options, ref string selectedMaterial)
-    {
-        var materials = new List<(string GamePath, string Label)>();
-        foreach (var option in options)
-            if (!materials.Any(m => string.Equals(m.GamePath, option.MaterialGamePath, StringComparison.OrdinalIgnoreCase)))
-                materials.Add((option.MaterialGamePath, option.MaterialLabel));
-
-        if (materials.Count == 0)
-            return false;
-
-        var changed = false;
-        var currentPath = selectedMaterial;
-        var current = materials.FirstOrDefault(m => string.Equals(m.GamePath, currentPath, StringComparison.OrdinalIgnoreCase));
-        if (current.GamePath == null)
-        {
-            current          = materials[0];
-            selectedMaterial = current.GamePath;
-            changed          = true;
-        }
-
-        using var combo = ImUtf8.Combo("##material"u8, current.Label);
-        if (combo)
-            foreach (var material in materials)
-            {
-                if (ImUtf8.Selectable($"{material.Label}##{material.GamePath}",
-                        string.Equals(material.GamePath, selectedMaterial, StringComparison.OrdinalIgnoreCase))
-                 && !string.Equals(material.GamePath, selectedMaterial, StringComparison.OrdinalIgnoreCase))
-                {
-                    selectedMaterial = material.GamePath;
-                    changed          = true;
-                }
-
-                if (ImGui.IsItemHovered())
-                    ImUtf8.HoverTooltip(material.GamePath);
-            }
-
-        return changed;
-    }
 }

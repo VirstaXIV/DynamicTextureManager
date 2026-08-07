@@ -3,15 +3,16 @@ using System.Collections.Generic;
 using System.IO;
 using System.Linq;
 using System.Numerics;
-using Dalamud.Bindings.ImGui;
 using Dalamud.Interface.Textures;
 using Dalamud.Interface.Textures.TextureWraps;
 using Dalamud.Plugin.Services;
 using DynamicTextureManager.DTextures;
 using DynamicTextureManager.DTextures.Data;
 using DynamicTextureManager.ModGeneration;
-using OtterGui.Text;
-using SixLabors.ImageSharp.PixelFormats;
+using ImSharp;
+using Luna;
+// Both ImSharp and ImageSharp define an Rgba32; this file's pixel work is ImageSharp's.
+using Rgba32 = SixLabors.ImageSharp.PixelFormats.Rgba32;
 
 namespace DynamicTextureManager.UI.Panels;
 
@@ -27,7 +28,8 @@ namespace DynamicTextureManager.UI.Panels;
 /// to a flat silhouette.
 /// </summary>
 public sealed record ViewportShading(DecodedTexture? Diffuse, DecodedTexture? IdMap, Vector3[]? RowDiffuse, Vector3? SkinTone = null,
-    (Vector3 Main, Vector3 Highlight)? HairColors = null, DecodedTexture? HairMask = null, ViewportEffect? Effect = null);
+    (Vector3 Main, Vector3 Highlight)? HairColors = null, DecodedTexture? HairMask = null, ViewportEffect? Effect = null,
+    DecodedTexture? NormalMap = null);
 
 /// <summary>
 /// A live stand-in for the animated-effect conversion, following the shader-verified math:
@@ -69,6 +71,35 @@ public sealed class DecalViewport(ITextureProvider textureProvider) : IDisposabl
     private MaterialMesh? _mesh;
     private uint          _visibleAttributes = uint.MaxValue;
     private Action?       _onChanged;
+
+    /// <summary> What the paint mode paints: erasing pattern coverage, or placing markings. </summary>
+    public enum PaintChannel
+    {
+        Coverage,
+        Markings,
+    }
+
+    // Surface painting (procedural surface layers): brush strokes append dabs — erasing
+    // the pattern or placing highlight markings. The Line tool connects clicked points
+    // with dabs along the geodesic path, following the body like a drawn stripe.
+    // Mutually exclusive with the other placement modes.
+    private ProceduralSurfaceLayer? _paintLayer;
+    private PaintChannel            _paintChannel;
+    private float                   _paintRadius   = 0.06f;
+    private float                   _paintStrength = 0.33f;
+    private bool                    _paintRestore;
+    private bool                    _paintLine;
+    private Vector3?                _paintLineLast;
+    private MaterialMesh?           _paintLineLastMesh;
+    private int                     _paintStrokeStart = -1;
+    private Vector3?                _paintLastDab;
+    private Vector3?                _paintCursor;
+    private MaterialMesh?           _paintCursorMesh;
+
+    // Per-session undo/redo: every completed action (one brush stroke, one line click)
+    // records where its dabs start; undo moves them onto the redo stack and back.
+    private readonly List<int>            _paintActionStarts = [];
+    private readonly List<CoverageDab[]>  _paintRedo         = [];
 
     private ViewportShading? _shading;
     private bool             _highlightDecal;
@@ -113,12 +144,13 @@ public sealed class DecalViewport(ITextureProvider textureProvider) : IDisposabl
             _renderDirty = true;
         _visibleAttributes = visibleAttributes;
 
-        if (dTextureChanged && _layer != null)
+        if (dTextureChanged && (_layer != null || _paintLayer != null))
         {
             // A different project: the placement binding belongs to its layers, drop it.
             DynamicTextureManager.Log.Debug("Viewport placement unbound — the selected dTexture changed.");
-            _layer     = null;
-            _onChanged = null;
+            _layer      = null;
+            _paintLayer = null;
+            _onChanged  = null;
         }
 
         if (meshChanged)
@@ -151,6 +183,26 @@ public sealed class DecalViewport(ITextureProvider textureProvider) : IDisposabl
         LoadDecal(decalPath);
     }
 
+    /// <summary> Bind a procedural layer for painting: erase its coverage or place its markings. </summary>
+    public void BeginCoveragePaint(ProceduralSurfaceLayer layer, PaintChannel channel, Action onChanged)
+    {
+        _layer            = null;
+        _paintLayer        = layer;
+        _paintChannel      = channel;
+        _paintStrokeStart  = -1;
+        _paintLastDab      = null;
+        _paintLineLast     = null;
+        _paintLineLastMesh = null;
+        _paintActionStarts.Clear();
+        _paintRedo.Clear();
+        _onChanged        = onChanged;
+        _renderDirty      = true;
+    }
+
+    /// <summary> The channel being painted on this layer, null when not painting it. </summary>
+    public PaintChannel? ActivePaintChannel(ProceduralSurfaceLayer layer)
+        => _open && ReferenceEquals(_paintLayer, layer) ? _paintChannel : null;
+
     /// <summary> Return to view mode, committing any pending placement edit. </summary>
     public void EndPlacement()
     {
@@ -160,9 +212,13 @@ public sealed class DecalViewport(ITextureProvider textureProvider) : IDisposabl
             _onChanged?.Invoke();
         }
 
-        _layer       = null;
-        _onChanged   = null;
-        _renderDirty = true;
+        _layer          = null;
+        _paintLayer     = null;
+        _paintLastDab   = null;
+        _paintLineLast  = null;
+        _paintCursor    = null;
+        _onChanged      = null;
+        _renderDirty    = true;
     }
 
     /// <summary> Swap in new shading buffers; re-renders only when something actually changed. </summary>
@@ -174,7 +230,8 @@ public sealed class DecalViewport(ITextureProvider textureProvider) : IDisposabl
          && Nullable.Equals(_shading?.SkinTone, shading?.SkinTone)
          && Nullable.Equals(_shading?.HairColors, shading?.HairColors)
          && ReferenceEquals(_shading?.HairMask, shading?.HairMask)
-         && Equals(_shading?.Effect, shading?.Effect))
+         && Equals(_shading?.Effect, shading?.Effect)
+         && ReferenceEquals(_shading?.NormalMap, shading?.NormalMap))
             return;
 
         _shading     = shading;
@@ -259,25 +316,28 @@ public sealed class DecalViewport(ITextureProvider textureProvider) : IDisposabl
 
         if (_poppedOut)
         {
-            ImGui.SetNextWindowSize(new Vector2(820, 900) * ImUtf8.GlobalScale, ImGuiCond.FirstUseEver);
+            Im.Window.SetNextSize(new Vector2(820, 900) * Im.Style.GlobalScale, Condition.FirstUseEver);
             var open = true;
-            if (ImGui.Begin("3D Preview###dtmDecalViewport", ref open))
-                DrawContent();
-            ImGui.End();
+            using (var window = Im.Window.Begin("3D Preview###dtmDecalViewport"u8, ref open))
+            {
+                if (window)
+                    DrawContent();
+            }
+
             if (!open)
                 _poppedOut = false;
         }
         else
         {
-            var avail  = ImGui.GetContentRegionAvail();
-            var height = MathF.Max(340f * ImUtf8.GlobalScale, avail.Y);
-            using var child = ImUtf8.Child("##viewportChild"u8, new Vector2(avail.X, height), true);
+            var avail  = Im.ContentRegion.Available;
+            var height = MathF.Max(340f * Im.Style.GlobalScale, avail.Y);
+            using var child = Im.Child.Begin("##viewportChild"u8, new Vector2(avail.X, height), true);
             if (child)
                 DrawContent();
         }
 
         // Commit once per completed interaction even if the mouse left the canvas.
-        if (_editDirty && !ImGui.IsMouseDown(ImGuiMouseButton.Left) && !ImGui.IsAnyItemActive())
+        if (_editDirty && !Im.Mouse.IsDown(MouseButton.Left) && !Im.Item.AnyActive)
         {
             _editDirty = false;
             _onChanged?.Invoke();
@@ -289,36 +349,39 @@ public sealed class DecalViewport(ITextureProvider textureProvider) : IDisposabl
         if (_mesh == null)
             return;
 
-        if (ImUtf8.SmallButton(_poppedOut ? "Embed"u8 : "Pop Out"u8))
+        if (Im.SmallButton(_poppedOut ? "Embed"u8 : "Pop Out"u8))
             _poppedOut = !_poppedOut;
-        ImUtf8.HoverTooltip("Move the 3D preview between the Decals tab and its own resizable window."u8);
+        Im.Tooltip.OnHover("Move the 3D preview between the Decals tab and its own resizable window."u8);
 
-        ImGui.SameLine();
-        if (ImUtf8.SmallButton("Reset View"u8))
+        Im.Line.Same();
+        if (Im.SmallButton("Reset View"u8))
         {
             FrameCamera();
             _renderDirty = true;
         }
 
-        ImUtf8.HoverTooltip("Re-frame the camera on the whole piece."u8);
+        Im.Tooltip.OnHover("Re-frame the camera on the whole piece."u8);
 
-        ImGui.SameLine();
-        ImUtf8.Text("(?)"u8);
-        ImUtf8.HoverTooltip(
+        Im.Line.Same();
+        Im.Text("(?)"u8);
+        Im.Tooltip.OnHover(
             "Right-drag: orbit.  Middle-drag: pan.  Wheel: zoom.\nWhile placing a decal: left-drag places/moves it, Ctrl+wheel resizes it, Shift+wheel rotates it.\nThe colored corner cross shows the world axes (X red, Y green, Z blue); the live hints inside the canvas light up when a modifier is active."u8);
 
         if (_layer != null)
             DrawPlacementControls(_layer);
+        else if (_paintLayer != null)
+            DrawPaintControls(_paintLayer);
 
-        var avail = ImGui.GetContentRegionAvail();
-        var size  = MathF.Max(200f, MathF.Min(avail.X, avail.Y));
+        var avail        = Im.ContentRegion.Available;
+        var toolbarWidth = _paintLayer != null ? 34f * Im.Style.GlobalScale : 0f;
+        var size         = MathF.Max(200f, MathF.Min(avail.X - toolbarWidth, avail.Y));
 
         // Camera interaction degrades gracefully instead of re-rasterizing 768² every frame
         // (which tanked game fps): while orbiting/panning/zooming, render at reduced
         // resolution, paced by the previous render's own measured cost — a fixed 30fps
         // cadence let a dense modded hairstyle (high triangle count + card overdraw) eat
         // the whole frame budget. A final full-resolution render lands on release.
-        var now         = ImGui.GetTime();
+        var now         = Im.State.Time;
         var interacting = now - _lastCameraChange < 0.15;
         if (_renderDirty || _wrap == null)
         {
@@ -342,10 +405,16 @@ public sealed class DecalViewport(ITextureProvider textureProvider) : IDisposabl
             PresentFrame();
         }
 
-        var start = ImGui.GetCursorScreenPos();
-        ImUtf8.InvisibleButton("##viewportCanvas"u8, new Vector2(size));
+        if (_paintLayer != null)
+        {
+            DrawPaintToolbar(size);
+            Im.Line.Same();
+        }
+
+        var start = Im.Cursor.ScreenPosition;
+        Im.InvisibleButton("##viewportCanvas"u8, new Vector2(size));
         if (_wrap != null)
-            ImGui.GetWindowDrawList().AddImage(_wrap.Handle, start, start + new Vector2(size));
+            Im.Window.DrawList.Image(_wrap.Id, start, start + new Vector2(size));
 
         DrawCanvasOverlays(start, size);
         HandleInput(start, size);
@@ -357,41 +426,45 @@ public sealed class DecalViewport(ITextureProvider textureProvider) : IDisposabl
     /// </summary>
     private void DrawCanvasOverlays(Vector2 start, float size)
     {
-        var draw = ImGui.GetWindowDrawList();
-        var io   = ImGui.GetIO();
+        var draw = Im.Window.DrawList;
 
         // Control hints, top-left. The active modifier's line lights up so the current
         // wheel mode is always visible at a glance.
         const uint dimColor = 0xAAB4B4B4;
         const uint hotColor = 0xFF53D7FF;
+        var keyControl = Im.Io.KeyControl;
+        var keyShift   = Im.Io.KeyShift;
         Span<(string Text, uint Color)> lines = _layer != null
             ?
             [
                 ("LMB place · RMB orbit · MMB pan · Wheel zoom", dimColor),
-                (io.KeyCtrl ? "Ctrl+Wheel: resizing decal" : "Ctrl+Wheel: resize decal", io.KeyCtrl ? hotColor : dimColor),
-                (io.KeyShift ? "Shift+Wheel: rotating decal" : "Shift+Wheel: rotate decal", io.KeyShift ? hotColor : dimColor),
+                (keyControl ? "Ctrl+Wheel: resizing decal" : "Ctrl+Wheel: resize decal", keyControl ? hotColor : dimColor),
+                (keyShift ? "Shift+Wheel: rotating decal" : "Shift+Wheel: rotate decal", keyShift ? hotColor : dimColor),
             ]
-            : [("RMB orbit · MMB pan · Wheel zoom", dimColor)];
+            : _paintLayer != null
+                ? [(PaintHint(), dimColor)]
+                : [("RMB orbit · MMB pan · Wheel zoom", dimColor)];
 
-        var pad       = 6f * ImUtf8.GlobalScale;
-        var lineStep  = ImGui.GetTextLineHeight() + 2f;
+        var pad       = 6f * Im.Style.GlobalScale;
+        var lineStep  = Im.Style.TextHeight + 2f;
         var maxWidth  = 0f;
         foreach (var (text, _) in lines)
-            maxWidth = MathF.Max(maxWidth, ImGui.CalcTextSize(text).X);
+            maxWidth = MathF.Max(maxWidth, Im.Font.CalculateSize(text).X);
         var boxMin = start + new Vector2(pad, pad);
-        draw.AddRectFilled(boxMin - new Vector2(4f), boxMin + new Vector2(maxWidth + 4f, lines.Length * lineStep + 2f), 0x90101010, 4f);
+        draw.Shape.RectangleFilled(boxMin - new Vector2(4f), boxMin + new Vector2(maxWidth + 4f, lines.Length * lineStep + 2f), 0x90101010u,
+            4f);
         for (var i = 0; i < lines.Length; ++i)
-            draw.AddText(boxMin + new Vector2(0f, i * lineStep), lines[i].Color, lines[i].Text);
+            draw.Text(boxMin + new Vector2(0f, i * lineStep), lines[i].Color, lines[i].Text);
 
         // Orientation gizmo, bottom-left: world axes through the camera's rotation. An axis
         // pointing away from the camera renders dimmed.
-        var gizmoRadius = 20f * ImUtf8.GlobalScale;
+        var gizmoRadius = 20f * Im.Style.GlobalScale;
         var center      = start + new Vector2(gizmoRadius + 10f, size - gizmoRadius - 10f);
         var offset      = CameraOffset();
         var forward     = Vector3.Normalize(-offset);
         var right       = Vector3.Normalize(Vector3.Cross(forward, Vector3.UnitY));
         var up          = Vector3.Cross(right, forward);
-        draw.AddCircleFilled(center, gizmoRadius + 8f, 0x60101010);
+        draw.Shape.CircleFilled(center, gizmoRadius + 8f, 0x60101010u);
 
         void Axis(Vector3 dir, uint color, string label)
         {
@@ -399,70 +472,219 @@ public sealed class DecalViewport(ITextureProvider textureProvider) : IDisposabl
             var away   = Vector3.Dot(dir, forward) > 0f;
             var col    = away ? (color & 0x00FFFFFFu) | 0x50000000u : color;
             var tip    = center + screen * gizmoRadius;
-            draw.AddLine(center, tip, col, 2f);
-            draw.AddText(tip + screen * 3f - new Vector2(3.5f, 7f), col, label);
+            draw.Shape.Line(center, tip, col, 2f);
+            draw.Text(tip + screen * 3f - new Vector2(3.5f, 7f), col, label);
         }
 
         Axis(Vector3.UnitX, 0xFF4040E0, "X");
         Axis(Vector3.UnitY, 0xFF40C040, "Y");
         Axis(Vector3.UnitZ, 0xFFE07050, "Z");
+
+        DrawPaintCursor(draw, start, size);
+    }
+
+    private string PaintHint()
+    {
+        var verb = (_paintChannel, _paintRestore) switch
+        {
+            (PaintChannel.Markings, false) => "paint markings",
+            (PaintChannel.Markings, true)  => "erase markings",
+            (_, false)                     => "remove the pattern",
+            (_, true)                      => "regrow the pattern",
+        };
+        return _paintLine
+            ? $"Click points: {verb} along a stripe · Shift+click ends the line · RMB orbit · Wheel zoom"
+            : $"LMB drag: {verb} · RMB orbit · Wheel zoom";
+    }
+
+    /// <summary> The brush cursor: the dab radius projected around the hovered surface point. </summary>
+    private void DrawPaintCursor(Im.DrawList draw, Vector2 start, float size)
+    {
+        if (_paintLayer == null || _paintCursor is not { } cursor)
+            return;
+
+        Vector2? Project(Vector3 world)
+        {
+            var v = Vector4.Transform(new Vector4(world, 1f), _lastViewProjection);
+            if (v.W <= 1e-6f)
+                return null;
+
+            var ndc = new Vector2(v.X, v.Y) / v.W;
+            return start + new Vector2((ndc.X + 1f) * 0.5f, (1f - ndc.Y) * 0.5f) * size;
+        }
+
+        var center = Project(cursor);
+        if (center == null)
+            return;
+
+        var offset   = CameraOffset();
+        var right    = Vector3.Normalize(Vector3.Cross(Vector3.Normalize(-offset), Vector3.UnitY));
+        var rim      = Project(cursor + right * _paintRadius);
+        var radiusPx = rim != null ? MathF.Max(3f, (rim.Value - center.Value).Length()) : 8f;
+        var color = _paintRestore
+            ? 0xFF40C040u
+            : _paintChannel == PaintChannel.Markings ? 0xFF30C8FFu : 0xFF5050FFu;
+        draw.Shape.Circle(center.Value, radiusPx, color, thickness: 2f);
+
+        // Inner ring = the full-effect plateau (radius × strength): everything inside it is
+        // fully affected, the effect blends away between the rings. At max strength the
+        // rings merge — a hard cutoff at the brush edge.
+        var innerPx = radiusPx * _paintStrength;
+        if (innerPx >= 2f && innerPx < radiusPx - 2f)
+            draw.Shape.Circle(center.Value, innerPx, (color & 0x00FFFFFFu) | 0x90000000u, 1.5f);
+
+        // Line mode: a straight guide from the previous point (the laid stripe itself
+        // follows the surface, not this preview line).
+        if (_paintLine && _paintLineLast is { } previous && Project(previous) is { } from)
+            draw.Shape.Line(from, center.Value, (color & 0x00FFFFFFu) | 0x90000000u, 2f);
     }
 
     private void DrawPlacementControls(DecalLayer layer)
     {
         var widthCm = layer.WorldWidth * 100f;
-        ImGui.SetNextItemWidth(130 * ImUtf8.GlobalScale);
-        if (ImUtf8.Slider("Width (cm)"u8, ref widthCm, "%.1f"u8, 1f, 100f))
+        Im.Item.SetNextWidthScaled(130);
+        if (Im.Slider("Width (cm)"u8, ref widthCm, "%.1f"u8, 1f, 100f))
         {
             layer.WorldWidth = widthCm / 100f;
             MarkEdited();
         }
 
-        ImGui.SameLine();
+        Im.Line.Same();
         var heightCm = layer.WorldHeight * 100f;
-        ImGui.SetNextItemWidth(130 * ImUtf8.GlobalScale);
-        if (ImUtf8.Slider("Height (cm)"u8, ref heightCm, "%.1f"u8, 1f, 100f))
+        Im.Item.SetNextWidthScaled(130);
+        if (Im.Slider("Height (cm)"u8, ref heightCm, "%.1f"u8, 1f, 100f))
         {
             layer.WorldHeight = heightCm / 100f;
             MarkEdited();
         }
 
-        ImGui.SameLine();
-        ImGui.SetNextItemWidth(130 * ImUtf8.GlobalScale);
+        Im.Line.Same();
+        Im.Item.SetNextWidthScaled(130);
         var rotation = layer.RotationDeg;
-        if (ImUtf8.Slider("Rotation"u8, ref rotation, "%.0f°"u8, -180f, 180f))
+        if (Im.Slider("Rotation"u8, ref rotation, "%.0f°"u8, -180f, 180f))
         {
             layer.RotationDeg = rotation;
             MarkEdited();
         }
 
-        ImGui.SameLine();
-        if (ImUtf8.SmallButton("Flip H"u8))
+        Im.Line.Same();
+        if (Im.SmallButton("Flip H"u8))
         {
             layer.FlipX = !layer.FlipX;
             MarkEdited();
         }
 
-        ImUtf8.HoverTooltip(layer.FlipX ? "Mirror the decal horizontally (currently flipped)."u8 : "Mirror the decal horizontally."u8);
+        Im.Tooltip.OnHover(layer.FlipX ? "Mirror the decal horizontally (currently flipped)."u8 : "Mirror the decal horizontally."u8);
 
-        ImGui.SameLine();
-        if (ImUtf8.SmallButton("Flip V"u8))
+        Im.Line.Same();
+        if (Im.SmallButton("Flip V"u8))
         {
             layer.FlipY = !layer.FlipY;
             MarkEdited();
         }
 
-        ImUtf8.HoverTooltip(layer.FlipY ? "Mirror the decal vertically (currently flipped)."u8 : "Mirror the decal vertically."u8);
+        Im.Tooltip.OnHover(layer.FlipY ? "Mirror the decal vertically (currently flipped)."u8 : "Mirror the decal vertically."u8);
 
-        ImGui.SameLine();
-        if (ImUtf8.Checkbox("Highlight"u8, ref _highlightDecal))
+        Im.Line.Same();
+        if (Im.Checkbox("Highlight"u8, ref _highlightDecal))
             _renderDirty = true;
-        ImUtf8.HoverTooltip("Render the decal as a bright orange footprint instead of its real colors — easier to find on busy textures."u8);
+        Im.Tooltip.OnHover("Render the decal as a bright orange footprint instead of its real colors — easier to find on busy textures."u8);
 
-        ImGui.SameLine();
-        if (ImUtf8.SmallButton("Done"u8))
+        Im.Line.Same();
+        if (Im.SmallButton("Done"u8))
             EndPlacement();
-        ImUtf8.HoverTooltip("Finish placing this decal and return the preview to view mode."u8);
+        Im.Tooltip.OnHover("Finish placing this decal and return the preview to view mode."u8);
+    }
+
+    /// <summary> The compact slider row above the canvas — the tools live in the side toolbar. </summary>
+    private void DrawPaintControls(ProceduralSurfaceLayer layer)
+    {
+        Im.Item.SetNextWidthScaled(130);
+        var radiusCm = _paintRadius * 100f;
+        if (Im.Slider("Brush (cm)"u8, ref radiusCm, "%.1f"u8, 1f, 30f))
+            _paintRadius = Math.Clamp(radiusCm, 1f, 30f) / 100f;
+
+        Im.Line.Same();
+        Im.Item.SetNextWidthScaled(130);
+        var strength = _paintStrength;
+        if (Im.Slider("Strength"u8, ref strength, "%.2f"u8, 0f, 1f))
+            _paintStrength = Math.Clamp(strength, 0f, 1f);
+        Im.Tooltip.OnHover(_paintChannel == PaintChannel.Markings
+            ? "Max places the highlight solidly with a hard edge; lower blends it in. Inside the inner ring is fully painted."u8
+            : "Max cuts the pattern off sharply; lower blends it out. Inside the inner ring is fully erased."u8);
+    }
+
+    private static readonly ImSharp.Rgba32 ToolActiveColor = new(0xFF885522u);
+
+    /// <summary>
+    /// The editor-style tool column beside the canvas: brush/line tools, the inverse brush,
+    /// undo/redo of whole actions (a stroke, a line point), clear and done — icons stack
+    /// vertically so nothing hides off the row in a narrow window.
+    /// </summary>
+    private void DrawPaintToolbar(float height)
+    {
+        if (PaintDabs is not { } dabs)
+            return;
+
+        using var child = Im.Child.Begin("##paintTools"u8, new Vector2(30f * Im.Style.GlobalScale, height), false);
+        if (!child)
+            return;
+
+        bool Tool(Dalamud.Interface.FontAwesomeIcon icon, bool active, ReadOnlySpan<byte> tooltip)
+        {
+            bool clicked;
+            using (ImGuiColor.Button.Push(ToolActiveColor, active))
+                clicked = ImEx.Icon.Button((AwesomeIcon)icon, tooltip);
+            return clicked;
+        }
+
+        if (Tool(Dalamud.Interface.FontAwesomeIcon.PaintBrush, !_paintLine, "Brush: drag over the model to paint."u8) && _paintLine)
+        {
+            _paintLine     = false;
+            _paintLineLast = null;
+        }
+
+        if (Tool(Dalamud.Interface.FontAwesomeIcon.Route, _paintLine,
+                "Line: click points — the stroke follows the body between them, like a drawing guide.\nShift+click ends the line so the next click starts a new one."u8) && !_paintLine)
+        {
+            _paintLine     = true;
+            _paintLineLast = null;
+        }
+
+        if (Tool(Dalamud.Interface.FontAwesomeIcon.Eraser, _paintRestore, _paintChannel == PaintChannel.Markings
+                ? "Eraser: brush painted markings away."u8
+                : "Regrow: brush the pattern back in."u8))
+            _paintRestore = !_paintRestore;
+
+        Im.Separator();
+
+        using (Im.Disabled(_paintActionStarts.Count == 0))
+        {
+            if (ImEx.Icon.Button((AwesomeIcon)Dalamud.Interface.FontAwesomeIcon.Undo, "Undo the last stroke or line point."u8))
+                UndoPaint(dabs);
+        }
+
+        using (Im.Disabled(_paintRedo.Count == 0))
+        {
+            if (ImEx.Icon.Button((AwesomeIcon)Dalamud.Interface.FontAwesomeIcon.Redo, "Redo."u8))
+                RedoPaint(dabs);
+        }
+
+        if (ImEx.Icon.Button((AwesomeIcon)Dalamud.Interface.FontAwesomeIcon.Trash,
+                "Hold Control and click to remove everything painted on this channel."u8)
+         && Im.Io.KeyControl && dabs.Count > 0)
+        {
+            dabs.Clear();
+            _paintActionStarts.Clear();
+            _paintRedo.Clear();
+            _paintLineLast = null;
+            MarkEdited();
+        }
+
+        Im.Separator();
+
+        if (ImEx.Icon.Button((AwesomeIcon)Dalamud.Interface.FontAwesomeIcon.Check, "Done painting."u8))
+            EndPlacement();
     }
 
     private void MarkEdited()
@@ -476,21 +698,21 @@ public sealed class DecalViewport(ITextureProvider textureProvider) : IDisposabl
         if (_mesh == null)
             return;
 
-        var hovered = ImGui.IsItemHovered();
-        var io      = ImGui.GetIO();
+        var hovered = Im.Item.Hovered();
+        var wheel   = Im.Io.MouseWheel;
 
-        if (hovered && io.MouseWheel != 0f)
+        if (hovered && wheel != 0f)
         {
-            if (io.KeyCtrl && _layer != null)
+            if (Im.Io.KeyControl && _layer != null)
             {
-                var factor = 1f + io.MouseWheel * 0.1f;
+                var factor = 1f + wheel * 0.1f;
                 _layer.WorldWidth  = Math.Clamp(_layer.WorldWidth * factor, 0.01f, 2f);
                 _layer.WorldHeight = Math.Clamp(_layer.WorldHeight * factor, 0.01f, 2f);
                 MarkEdited();
             }
-            else if (io.KeyShift && _layer != null)
+            else if (Im.Io.KeyShift && _layer != null)
             {
-                var rotation = _layer.RotationDeg + io.MouseWheel * 5f;
+                var rotation = _layer.RotationDeg + wheel * 5f;
                 _layer.RotationDeg = rotation switch
                 {
                     > 180f  => rotation - 360f,
@@ -501,52 +723,56 @@ public sealed class DecalViewport(ITextureProvider textureProvider) : IDisposabl
             }
             else
             {
-                _distance         = Math.Clamp(_distance * (1f - io.MouseWheel * 0.1f), 0.05f, 20f);
+                _distance         = Math.Clamp(_distance * (1f - wheel * 0.1f), 0.05f, 20f);
                 _renderDirty      = true;
-                _lastCameraChange = ImGui.GetTime();
+                _lastCameraChange = Im.State.Time;
             }
         }
 
-        if (hovered && ImGui.IsMouseDown(ImGuiMouseButton.Right))
+        // Per-frame drag deltas: the drag delta since the last reset stands in for the raw
+        // per-frame mouse delta (ImSharp does not surface io.MouseDelta).
+        if (hovered && Im.Mouse.IsDown(MouseButton.Right))
         {
-            var delta = io.MouseDelta;
+            var delta = Im.Mouse.GetDragDelta(MouseButton.Right, 0f);
             if (delta != Vector2.Zero)
             {
+                Im.Mouse.ResetDragDelta(MouseButton.Right);
                 _yaw   -= delta.X * 0.01f;
                 _pitch  = Math.Clamp(_pitch + delta.Y * 0.01f, -1.5f, 1.5f);
                 _renderDirty      = true;
-                _lastCameraChange = ImGui.GetTime();
+                _lastCameraChange = Im.State.Time;
             }
         }
 
-        if (hovered && ImGui.IsMouseDown(ImGuiMouseButton.Middle))
+        if (hovered && Im.Mouse.IsDown(MouseButton.Middle))
         {
-            var delta = io.MouseDelta;
+            var delta = Im.Mouse.GetDragDelta(MouseButton.Middle, 0f);
             if (delta != Vector2.Zero)
             {
+                Im.Mouse.ResetDragDelta(MouseButton.Middle);
                 var eyeOffset = CameraOffset();
                 var forward   = Vector3.Normalize(-eyeOffset);
                 var right     = Vector3.Normalize(Vector3.Cross(forward, Vector3.UnitY));
                 var up        = Vector3.Cross(right, forward);
                 _target          += (-right * delta.X + up * delta.Y) * _distance * 0.0015f;
                 _renderDirty      = true;
-                _lastCameraChange = ImGui.GetTime();
+                _lastCameraChange = Im.State.Time;
             }
         }
 
         // One diagnostic line per CLICK (not per drag frame): the first thing to check when
         // "clicking does nothing" — distinguishes a lost binding from a missed pick.
-        if (hovered && ImGui.IsMouseClicked(ImGuiMouseButton.Left))
+        if (hovered && Im.Mouse.IsClicked(MouseButton.Left))
         {
-            var probe = (ImGui.GetMousePos() - start) / size;
+            var probe = (Im.Mouse.Position - start) / size;
             DynamicTextureManager.Log.Debug(_layer == null
                 ? $"Viewport click at ({probe.X:F2}, {probe.Y:F2}) — no placement layer bound."
                 : $"Viewport click at ({probe.X:F2}, {probe.Y:F2}) — pick {(TryPick(probe, out _, out _, out _) ? "hit" : "MISSED the mesh")}.");
         }
 
-        if (hovered && _layer != null && ImGui.IsMouseDown(ImGuiMouseButton.Left))
+        if (hovered && _layer != null && Im.Mouse.IsDown(MouseButton.Left))
         {
-            var local = (ImGui.GetMousePos() - start) / size;
+            var local = (Im.Mouse.Position - start) / size;
             if (local is { X: >= 0f and <= 1f, Y: >= 0f and <= 1f } && TryPick(local, out var position, out var normal, out var part))
             {
                 _layer.AnchorX           = position.X;
@@ -561,6 +787,187 @@ public sealed class DecalViewport(ITextureProvider textureProvider) : IDisposabl
                 MarkEdited();
             }
         }
+
+        HandlePaintInput(start, size, hovered);
+    }
+
+    private List<CoverageDab>? PaintDabs
+        => _paintLayer == null
+            ? null
+            : _paintChannel == PaintChannel.Markings
+                ? _paintLayer.MarkingDabs
+                : _paintLayer.MaskDabs;
+
+    /// <summary>
+    /// Surface brush: while the button is held, dabs land along the drag at a spacing tied
+    /// to the brush radius. In Line mode each click instead connects to the previous point
+    /// with dabs laid along the geodesic path — a stripe following the body. Commit rides
+    /// the shared edit-dirty flow.
+    /// </summary>
+    private void HandlePaintInput(Vector2 start, float size, bool hovered)
+    {
+        if (_paintLayer == null || PaintDabs is not { } dabs)
+            return;
+
+        _paintCursor     = null;
+        _paintCursorMesh = null;
+        var local = (Im.Mouse.Position - start) / size;
+        var onCanvas = hovered && local is { X: >= 0f and <= 1f, Y: >= 0f and <= 1f };
+        if (onCanvas && TryPickAny(local, out var position, out _, out var pickedMesh))
+        {
+            _paintCursor     = position;
+            _paintCursorMesh = pickedMesh;
+        }
+
+        if (_paintLine)
+        {
+            if (!onCanvas || !Im.Mouse.IsClicked(MouseButton.Left))
+                return;
+
+            // Shift+click ends the current line — the next click starts a fresh one.
+            if (Im.Io.KeyShift)
+            {
+                _paintLineLast = null;
+                return;
+            }
+
+            if (_paintCursor is not { } point)
+                return;
+
+            var lineStart = dabs.Count;
+            if (_paintLineLast is { } previous)
+            {
+                // Same mesh: the stroke follows the surface. Across meshes (body to head)
+                // no shared surface exists — a straight segment bridges the short gap, and
+                // the spherical dabs still hug both sides.
+                var path = _paintCursorMesh != null && ReferenceEquals(_paintCursorMesh, _paintLineLastMesh)
+                    ? SurfaceFlowField.GeodesicPath(_paintCursorMesh, previous, point)
+                    : StraightPath(previous, point);
+                LayDabsAlong(path, dabs);
+            }
+            else
+            {
+                AddDab(dabs, point);
+            }
+
+            _paintLineLast     = point;
+            _paintLineLastMesh = _paintCursorMesh;
+            CompleteAction(lineStart);
+            MarkEdited();
+            return;
+        }
+
+        if (!Im.Mouse.IsDown(MouseButton.Left))
+        {
+            // Stroke ended — it becomes one undoable action.
+            if (_paintLastDab != null && _paintStrokeStart >= 0 && _paintStrokeStart < dabs.Count)
+                CompleteAction(_paintStrokeStart);
+            _paintLastDab     = null;
+            _paintStrokeStart = -1;
+            return;
+        }
+
+        if (_paintCursor is not { } hit)
+            return;
+
+        if (_paintLastDab == null)
+            _paintStrokeStart = dabs.Count;
+        else if ((_paintLastDab.Value - hit).Length() < _paintRadius * 0.35f)
+            return;
+
+        AddDab(dabs, hit);
+        _paintLastDab = hit;
+        MarkEdited();
+    }
+
+    private void CompleteAction(int startIndex)
+    {
+        _paintActionStarts.Add(startIndex);
+        _paintRedo.Clear();
+    }
+
+    private void UndoPaint(List<CoverageDab> dabs)
+    {
+        if (_paintActionStarts.Count == 0)
+            return;
+
+        var start = _paintActionStarts[^1];
+        _paintActionStarts.RemoveAt(_paintActionStarts.Count - 1);
+        if (start < 0 || start > dabs.Count)
+            return;
+
+        _paintRedo.Add(dabs.GetRange(start, dabs.Count - start).ToArray());
+        dabs.RemoveRange(start, dabs.Count - start);
+        SyncLineToLastDab(dabs);
+        MarkEdited();
+    }
+
+    private void RedoPaint(List<CoverageDab> dabs)
+    {
+        if (_paintRedo.Count == 0)
+            return;
+
+        var action = _paintRedo[^1];
+        _paintRedo.RemoveAt(_paintRedo.Count - 1);
+        _paintActionStarts.Add(dabs.Count);
+        dabs.AddRange(action);
+        SyncLineToLastDab(dabs);
+        MarkEdited();
+    }
+
+    /// <summary> After undo/redo the line tool continues from wherever the stroke now ends. </summary>
+    private void SyncLineToLastDab(List<CoverageDab> dabs)
+    {
+        _paintLineLast = _paintLine && dabs.Count > 0
+            ? new Vector3(dabs[^1].X, dabs[^1].Y, dabs[^1].Z)
+            : null;
+        // Which mesh that dab sat on is no longer known — the next segment bridges straight.
+        _paintLineLastMesh = null;
+    }
+
+    private void AddDab(List<CoverageDab> dabs, Vector3 at)
+        => dabs.Add(new CoverageDab
+        {
+            X        = at.X,
+            Y        = at.Y,
+            Z        = at.Z,
+            Radius   = _paintRadius,
+            Strength = _paintStrength,
+            Restore  = _paintRestore,
+        });
+
+    /// <summary> A straight polyline between two points, subdivided finely enough for dab spacing. </summary>
+    private List<Vector3> StraightPath(Vector3 from, Vector3 to)
+    {
+        var length = (to - from).Length();
+        var steps  = Math.Max(1, (int)MathF.Ceiling(length / MathF.Max(0.002f, _paintRadius * 0.2f)));
+        var path   = new List<Vector3>(steps + 1);
+        for (var i = 0; i <= steps; ++i)
+            path.Add(Vector3.Lerp(from, to, i / (float)steps));
+        return path;
+    }
+
+    /// <summary> Dabs along a surface path at brush-radius spacing, endpoint included. </summary>
+    private void LayDabsAlong(List<Vector3> path, List<CoverageDab> dabs)
+    {
+        if (path.Count == 0)
+            return;
+
+        var spacing = _paintRadius * 0.4f;
+        var since   = spacing; // the first point always gets a dab
+        for (var i = 0; i < path.Count; ++i)
+        {
+            if (i > 0)
+                since += (path[i] - path[i - 1]).Length();
+
+            if (since >= spacing)
+            {
+                AddDab(dabs, path[i]);
+                since = 0f;
+            }
+        }
+
+        AddDab(dabs, path[^1]);
     }
 
     private Vector3 CameraOffset()
@@ -623,6 +1030,62 @@ public sealed class DecalViewport(ITextureProvider textureProvider) : IDisposabl
         normal   = _mesh.Normals[i0] * bary.X + _mesh.Normals[i1] * bary.Y + _mesh.Normals[i2] * bary.Z;
         normal   = normal.LengthSquared() < 1e-8f ? Vector3.UnitY : Vector3.Normalize(normal);
         part     = _mesh.TriangleParts[bestTri / 3];
+        return true;
+    }
+
+    /// <summary>
+    /// Paint-mode picking: tests the primary mesh AND the overlay meshes (the face renders
+    /// as an overlay — brushes must land on the head too), returning which mesh was hit so
+    /// the line tool can path along it.
+    /// </summary>
+    private bool TryPickAny(Vector2 canvasUv, out Vector3 position, out Vector3 normal, out MaterialMesh? pickedMesh)
+    {
+        position   = default;
+        normal     = default;
+        pickedMesh = null;
+        if (_mesh == null || !Matrix4x4.Invert(_lastViewProjection, out var inverse))
+            return false;
+
+        var ndc = new Vector2(canvasUv.X * 2f - 1f, 1f - canvasUv.Y * 2f);
+        var np  = Unproject(new Vector3(ndc, 0.05f), inverse);
+        var fp  = Unproject(new Vector3(ndc, 0.95f), inverse);
+        if (np == null || fp == null)
+            return false;
+
+        var origin    = np.Value;
+        var direction = Vector3.Normalize(fp.Value - np.Value);
+        var best      = float.MaxValue;
+
+        void PickMesh(MaterialMesh mesh, ref Vector3 pos, ref Vector3 nrm, ref MaterialMesh? hit, ref float bestT)
+        {
+            for (var i = 0; i + 2 < mesh.Indices.Length; i += 3)
+            {
+                if (!mesh.TriangleEditable[i / 3] || (mesh.TriangleAttributeMasks[i / 3] & ~_visibleAttributes) != 0)
+                    continue;
+
+                if (!RayTriangle(origin, direction,
+                        mesh.Positions[mesh.Indices[i]], mesh.Positions[mesh.Indices[i + 1]], mesh.Positions[mesh.Indices[i + 2]],
+                        out var t, out var b) || t >= bestT)
+                    continue;
+
+                bestT = t;
+                hit   = mesh;
+                var i0 = mesh.Indices[i];
+                var i1 = mesh.Indices[i + 1];
+                var i2 = mesh.Indices[i + 2];
+                pos = mesh.Positions[i0] * b.X + mesh.Positions[i1] * b.Y + mesh.Positions[i2] * b.Z;
+                nrm = mesh.Normals[i0] * b.X + mesh.Normals[i1] * b.Y + mesh.Normals[i2] * b.Z;
+            }
+        }
+
+        PickMesh(_mesh, ref position, ref normal, ref pickedMesh, ref best);
+        foreach (var overlay in _overlays)
+            PickMesh(overlay.Mesh, ref position, ref normal, ref pickedMesh, ref best);
+
+        if (pickedMesh == null)
+            return false;
+
+        normal = normal.LengthSquared() < 1e-8f ? Vector3.UnitY : Vector3.Normalize(normal);
         return true;
     }
 
@@ -734,6 +1197,14 @@ public sealed class DecalViewport(ITextureProvider textureProvider) : IDisposabl
 
             return table;
         });
+
+    private static (float X, float Y) SampleNormalRg(DecodedTexture texture, Vector2 uv)
+    {
+        var x = Math.Clamp((int)(uv.X * texture.Width), 0, texture.Width - 1);
+        var y = Math.Clamp((int)(uv.Y * texture.Height), 0, texture.Height - 1);
+        var o = (y * texture.Width + x) * 4;
+        return (texture.Rgba[o] / 255f * 2f - 1f, texture.Rgba[o + 1] / 255f * 2f - 1f);
+    }
 
     private static byte SampleAlpha(DecodedTexture texture, Vector2 uv)
     {
@@ -849,7 +1320,8 @@ public sealed class DecalViewport(ITextureProvider textureProvider) : IDisposabl
         // (same as the primary), which would duplicate-render it — only their own editable
         // (real) geometry is new here, the body itself already came from the primary pass.
         void RasterizeMesh(MaterialMesh mesh, DecodedTexture? meshDiffuse, DecodedTexture? meshIdMap, Vector3? meshSkinTone,
-            (Vector3 Main, Vector3 Highlight)? meshHairColors, DecodedTexture? meshHairMask, bool skipContext)
+            (Vector3 Main, Vector3 Highlight)? meshHairColors, DecodedTexture? meshHairMask, bool skipContext,
+            DecodedTexture? meshNormalMap = null)
         {
             // Hair renders as alpha-tested cutout cards: fully transparent texels of the hair
             // normal's alpha must not write depth or color at all, or the empty regions of a
@@ -934,6 +1406,40 @@ public sealed class DecalViewport(ITextureProvider textureProvider) : IDisposabl
                     if (minX > maxX || minY > maxY)
                         continue;
 
+                    // Tangent frame for normal-map shading, from the triangle's UV/position
+                    // derivatives — computed once per triangle, only where a normal map is
+                    // actually shaded (editable geometry of the primary mesh).
+                    var triNormalMap = meshNormalMap != null && !dimmed;
+                    Vector3 triTangent = default, triBitangent = default;
+                    if (triNormalMap)
+                    {
+                        var e1   = mesh.Positions[i1] - mesh.Positions[i0];
+                        var e2   = mesh.Positions[i2] - mesh.Positions[i0];
+                        var duv1 = mesh.Uvs[i1] - mesh.Uvs[i0];
+                        var duv2 = mesh.Uvs[i2] - mesh.Uvs[i0];
+                        var det  = duv1.X * duv2.Y - duv2.X * duv1.Y;
+                        if (MathF.Abs(det) > 1e-12f)
+                        {
+                            triTangent   = (e1 * duv2.Y - e2 * duv1.Y) / det;
+                            triBitangent = (e2 * duv1.X - e1 * duv2.X) / det;
+                            var lenT = triTangent.Length();
+                            var lenB = triBitangent.Length();
+                            if (lenT > 1e-9f && lenB > 1e-9f)
+                            {
+                                triTangent   /= lenT;
+                                triBitangent /= lenB;
+                            }
+                            else
+                            {
+                                triNormalMap = false;
+                            }
+                        }
+                        else
+                        {
+                            triNormalMap = false;
+                        }
+                    }
+
                     // Curvature-following projection reached all three corners — same gate the bake
                     // uses; triangles outside the walk radius never receive the decal.
                     var triProjected = !dimmed && anchored && layer != null && projection != null
@@ -986,10 +1492,25 @@ public sealed class DecalViewport(ITextureProvider textureProvider) : IDisposabl
                                 _editableTouched[index] = true;
 
                             var pixelNormal = mesh.Normals[i0] * w0 + mesh.Normals[i1] * w1 + mesh.Normals[i2] * w2;
-                            var facing = pixelNormal.LengthSquared() > 1e-8f
-                                ? MathF.Abs(Vector3.Dot(Vector3.Normalize(pixelNormal), eyeDirection))
-                                : 0.4f;
-                            var light = 0.35f + 0.65f * facing;
+                            var shadingNormal = pixelNormal.LengthSquared() > 1e-8f
+                                ? Vector3.Normalize(pixelNormal)
+                                : eyeDirection;
+
+                            // Normal-map relief: perturb the mesh normal through the triangle's
+                            // tangent frame so baked detail (fur strands, scales) shades in the
+                            // preview the way it will in game.
+                            if (triNormalMap)
+                            {
+                                var nmUv = mesh.Uvs[i0] * w0 + mesh.Uvs[i1] * w1 + mesh.Uvs[i2] * w2;
+                                var (nx, ny) = SampleNormalRg(meshNormalMap!, nmUv);
+                                var nz = MathF.Sqrt(MathF.Max(0f, 1f - nx * nx - ny * ny));
+                                var perturbed = shadingNormal * nz + triTangent * nx + triBitangent * ny;
+                                if (perturbed.LengthSquared() > 1e-8f)
+                                    shadingNormal = Vector3.Normalize(perturbed);
+                            }
+
+                            var facing = MathF.Abs(Vector3.Dot(shadingNormal, eyeDirection));
+                            var light  = 0.35f + 0.65f * facing;
 
                             // Dimmed/context geometry belongs to a DIFFERENT material than the one
                             // shaded here — its UVs point into a texture this pass never loaded, so
@@ -1111,6 +1632,7 @@ public sealed class DecalViewport(ITextureProvider textureProvider) : IDisposabl
         }
 
         RasterizeMesh(_mesh, _shading?.Diffuse, _shading?.IdMap, _shading?.SkinTone, _shading?.HairColors, _shading?.HairMask,
+            meshNormalMap: _shading?.NormalMap,
             skipContext: false);
         foreach (var overlay in _overlays)
             RasterizeMesh(overlay.Mesh, overlay.Diffuse, null, overlay.ApplySkinTone ? _shading?.SkinTone : null,
@@ -1172,7 +1694,7 @@ public sealed class DecalViewport(ITextureProvider textureProvider) : IDisposabl
             // Shader-verified: scroll = time in SECONDS × the scroll constants, no hidden
             // factor. The squared pattern sample times the linear emissive color reduces to
             // a LINEAR sample response in the display domain.
-            var t      = (float)ImGui.GetTime();
+            var t      = (float)Im.State.Time;
             var offset = new Vector2(t * effect.ScrollU, t * effect.ScrollV);
             for (var n = 0; n < _effectPixelCount; ++n)
             {
@@ -1193,7 +1715,7 @@ public sealed class DecalViewport(ITextureProvider textureProvider) : IDisposabl
 
         _wrap?.Dispose();
         _wrap = textureProvider.CreateFromRaw(RawImageSpecification.Rgba32(_renderedSize, _renderedSize), buffer, "DTM Viewport");
-        _lastEffectFrame = ImGui.GetTime();
+        _lastEffectFrame = Im.State.Time;
         _lastRenderTime  = _lastEffectFrame;
     }
 }

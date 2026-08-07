@@ -6,10 +6,10 @@ using Dalamud.Configuration;
 using DynamicTextureManager.DTextures;
 using DynamicTextureManager.Services;
 using DynamicTextureManager.UI;
+using Dalamud.Game.ClientState.Keys;
+using Luna;
 using Newtonsoft.Json;
-using OtterGui.Classes;
-using OtterGui.Extensions;
-using OtterGui.Filesystem;
+using Newtonsoft.Json.Linq;
 using ErrorEventArgs = Newtonsoft.Json.Serialization.ErrorEventArgs;
 
 namespace DynamicTextureManager;
@@ -20,6 +20,7 @@ public class Configuration: IPluginConfiguration, ISavable
     public int OverlayPriority { get; set; } = 999;
     public bool DeleteModWithDTexture { get; set; } = true;
     public int DefaultDecalMaxColors { get; set; } = 6;
+    [JsonConverter(typeof(DoubleModifierCompatConverter))]
     public DoubleModifier DeleteDTextureModifier { get; set; } = new(ModifierHotkey.Control, ModifierHotkey.Shift);
 
     /// <summary> Folder decal images are stored in; empty uses the default inside the plugin config directory. </summary>
@@ -52,10 +53,17 @@ public class Configuration: IPluginConfiguration, ISavable
     public bool MaskInvertRoughness { get; set; } = false;
 
     public bool MaskWriteSpec { get; set; } = false;
-    
+
+    /// <summary> Flip the generated normal's green channel if relief renders inverted in-game. </summary>
+    public bool ProceduralNormalFlipG { get; set; } = false;
+
+    /// <summary> Also darken the mask's R (cavity/spec occlusion) in procedural crevices — off until verified. </summary>
+    public bool ProceduralMaskWriteCavity { get; set; } = false;
+
+
     [JsonConverter(typeof(SortModeConverter))]
     [JsonProperty(Order = int.MaxValue)]
-    public ISortMode<DTexture> SortMode { get; set; } = ISortMode<DTexture>.FoldersFirst;
+    public ISortMode SortMode { get; set; } = ISortMode.FoldersFirst;
     
 #if DEBUG
     public bool DebugMode { get; set; } = true;
@@ -102,57 +110,107 @@ public class Configuration: IPluginConfiguration, ISavable
         }
     }
     
-    public string ToFilename(FilenameService fileNames) => fileNames.ConfigFile;
+    public string ToFilePath(FilenameService fileNames) => fileNames.ConfigFile;
 
-    public void Save(StreamWriter writer)
+    [JsonIgnore] private string? _snapshot;
+
+    /// <summary> Serialize on the calling thread — the save service writes on a background task. </summary>
+    internal void CaptureSnapshot()
+        => _snapshot = JsonConvert.SerializeObject(this, Formatting.Indented);
+
+    public void Save(Stream stream)
     {
-        using var jWriter = new JsonTextWriter(writer);
-        jWriter.Formatting = Formatting.Indented;
-        var serializer = new JsonSerializer {
-            Formatting = Formatting.Indented
-        };
-        serializer.Serialize(jWriter, this);
+        using var writer = new StreamWriter(stream, System.Text.Encoding.UTF8, leaveOpen: true);
+        writer.Write(_snapshot ?? JsonConvert.SerializeObject(this, Formatting.Indented));
     }
     
 
     public static class Constants
     {
         public const int CurrentVersion = 1;
-        
-        public static readonly ISortMode<DTexture>[] ValidSortModes =
+
+        public static readonly ISortMode[] ValidSortModes =
         [
-            ISortMode<DTexture>.FoldersFirst,
-            ISortMode<DTexture>.Lexicographical,
+            ISortMode.FoldersFirst,
+            ISortMode.Lexicographical,
             new DTextureFileSystem.CreationDate(),
             new DTextureFileSystem.InverseCreationDate(),
             new DTextureFileSystem.UpdateDate(),
             new DTextureFileSystem.InverseUpdateDate(),
-            ISortMode<DTexture>.InverseFoldersFirst,
-            ISortMode<DTexture>.InverseLexicographical,
-            ISortMode<DTexture>.FoldersLast,
-            ISortMode<DTexture>.InverseFoldersLast,
-            ISortMode<DTexture>.InternalOrder,
-            ISortMode<DTexture>.InverseInternalOrder,
+            ISortMode.InverseFoldersFirst,
+            ISortMode.InverseLexicographical,
+            ISortMode.FoldersLast,
+            ISortMode.InverseFoldersLast,
+            ISortMode.InternalOrder,
+            ISortMode.InverseInternalOrder,
         ];
-    }
-    
-    private class SortModeConverter : JsonConverter<ISortMode<DTexture>>
-    {
-        public override void WriteJson(JsonWriter writer, ISortMode<DTexture>? value, JsonSerializer serializer)
+
+        /// <summary> Find a sort mode by its stored type name, also accepting the old OtterGui names with their trailing 'T'. </summary>
+        public static ISortMode? ParseSortMode(string name)
         {
-            value ??= ISortMode<DTexture>.FoldersFirst;
+            var mode = ValidSortModes.FirstOrDefault(s => s.GetType().Name == name);
+            if (mode == null && name.EndsWith('T'))
+                mode = ValidSortModes.FirstOrDefault(s => s.GetType().Name == name[..^1]);
+            return mode;
+        }
+    }
+
+    /// <summary>
+    /// Reads both Luna's flat modifier shape and OtterGui's old nested one
+    /// ({"Modifier1": {"Modifier": 17}, ...}), so customized delete modifiers survive
+    /// the migration; writes Luna's flat shape.
+    /// </summary>
+    private class DoubleModifierCompatConverter : JsonConverter<DoubleModifier>
+    {
+        public override void WriteJson(JsonWriter writer, DoubleModifier value, JsonSerializer serializer)
+        {
+            writer.WriteStartObject();
+            writer.WritePropertyName("Modifier1");
+            writer.WriteValue((ushort)value.Modifier1.Modifier);
+            if (value.Modifier2.Modifier != ModifierHotkey.NoKey)
+            {
+                writer.WritePropertyName("Modifier2");
+                writer.WriteValue((ushort)value.Modifier2.Modifier);
+            }
+
+            writer.WriteEndObject();
+        }
+
+        public override DoubleModifier ReadJson(JsonReader reader, Type objectType, DoubleModifier existingValue, bool hasExistingValue,
+            JsonSerializer serializer)
+        {
+            var token = JToken.ReadFrom(reader);
+            var m1    = ReadKey(token["Modifier1"]);
+            var m2    = ReadKey(token["Modifier2"]);
+            return new DoubleModifier(new ModifierHotkey(m1), new ModifierHotkey(m2));
+
+            static VirtualKey ReadKey(JToken? value)
+                => value switch
+                {
+                    JObject nested => (VirtualKey)(nested["Modifier"]?.ToObject<ushort>() ?? 0),
+                    JValue         => (VirtualKey)(value.ToObject<ushort?>() ?? 0),
+                    _              => VirtualKey.NO_KEY,
+                };
+        }
+    }
+
+    private class SortModeConverter : JsonConverter<ISortMode>
+    {
+        public override void WriteJson(JsonWriter writer, ISortMode? value, JsonSerializer serializer)
+        {
+            value ??= ISortMode.FoldersFirst;
             serializer.Serialize(writer, value.GetType().Name);
         }
 
-        public override ISortMode<DTexture> ReadJson(JsonReader reader, Type objectType, ISortMode<DTexture>? existingValue,
+        public override ISortMode ReadJson(JsonReader reader, Type objectType, ISortMode? existingValue,
             bool hasExistingValue,
             JsonSerializer serializer)
         {
             var name = serializer.Deserialize<string>(reader);
-            if (name == null || !Constants.ValidSortModes.FindFirst(s => s.GetType().Name == name, out var mode))
-                return existingValue ?? ISortMode<DTexture>.FoldersFirst;
+            if (name == null)
+                return existingValue ?? ISortMode.FoldersFirst;
 
-            return mode;
+            return Constants.ParseSortMode(name) ?? existingValue ?? ISortMode.FoldersFirst;
         }
     }
 }
