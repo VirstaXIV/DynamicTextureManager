@@ -194,10 +194,7 @@ public static class ProceduralSurfaceBaker
     /// </summary>
     private static SurfaceFields? RasterizeFields(int width, int height, MaterialMesh mesh, ProceduralSurfaceLayer layer)
     {
-        // Flow anchors are DISABLED for now (user decision — they destabilized the bake);
-        // stored anchors on layers are ignored and the natural body flow drives everything.
         var texels  = width * height;
-        var flow    = (SurfaceFlowField.VertexFlow?)null;
         var natural = SurfaceFlowField.BodyFlow(mesh);
         var region  = ComputeRegionWeights(mesh, layer);
         // Small companion canvases (the face) skip charts entirely and live in the shared
@@ -208,7 +205,7 @@ public static class ProceduralSurfaceBaker
         // one RIGID frame per UV island instead — uniform cells with no interior
         // transitions at all, their only seams the texture's own island borders.
         var worldOnly = MeshExtent(mesh) < 0.35f;
-        var charts    = layer.Kind == SurfaceGeneratorKind.Fur && !worldOnly ? SurfaceFlowField.ComputeCharts(mesh, flow, []) : null;
+        var charts    = layer.Kind == SurfaceGeneratorKind.Fur && !worldOnly ? SurfaceFlowField.ComputeCharts(mesh) : null;
         // Island frames apply on EVERY canvas (face included): the world-cylinder frame
         // distorts cells on near-horizontal surfaces (collarbone, under the chin), so
         // plates never fall back to it — where two canvases' plate fields meet at the
@@ -343,11 +340,9 @@ public static class ProceduralSurfaceBaker
 
                     var index = y * width + x;
 
-                    // The overlap tie-break compares final weights, so exclusion fades and
-                    // region weights are part of the weight before the comparison.
-                    var weight = flow != null
-                        ? flow.Exclusion[i0] * w0 + flow.Exclusion[i1] * w1 + flow.Exclusion[i2] * w2
-                        : 1f;
+                    // The overlap tie-break compares final weights, so region weights are
+                    // part of the weight before the comparison.
+                    var weight = 1f;
                     if (region != null)
                         weight *= region[i0] * w0 + region[i1] * w1 + region[i2] * w2;
                     if (fields.Covered[index] && fields.Weight[index] >= weight)
@@ -411,9 +406,7 @@ public static class ProceduralSurfaceBaker
 
                     // The potential (stripe/tabby banding coordinate) fades to plain world
                     // descent at seams — both canvases band identically where they meet.
-                    var meshPotential = flow != null && (flow.HasFlow[i0] || flow.HasFlow[i1] || flow.HasFlow[i2])
-                        ? flow.Potential[i0] * w0 + flow.Potential[i1] * w1 + flow.Potential[i2] * w2
-                        : natural.Potential[i0] * w0 + natural.Potential[i1] * w1 + natural.Potential[i2] * w2;
+                    var meshPotential = natural.Potential[i0] * w0 + natural.Potential[i1] * w1 + natural.Potential[i2] * w2;
                     var descent = -fields.Position[index].Y;
                     fields.FlowPotential[index] = descent + (meshPotential - descent) * seam;
 

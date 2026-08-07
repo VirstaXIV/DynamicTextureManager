@@ -41,7 +41,6 @@ public sealed class PenumbraService : IDisposable, IService
     private readonly GetGameObjectResourceTrees    _getGameObjectResourceTrees;
     private readonly ResolvePlayerPath             _resolvePlayerPath;
     private readonly ConvertTextureData            _convertTextureData;
-    private readonly ConvertTextureFile            _convertTextureFile;
     private readonly RedrawObject                  _redrawObject;
     private readonly RedrawAll                     _redrawAll;
     private readonly OpenMainWindow                _openMainWindow;
@@ -83,7 +82,6 @@ public sealed class PenumbraService : IDisposable, IService
         _getGameObjectResourceTrees = new GetGameObjectResourceTrees(pi);
         _resolvePlayerPath          = new ResolvePlayerPath(pi);
         _convertTextureData         = new ConvertTextureData(pi);
-        _convertTextureFile         = new ConvertTextureFile(pi);
         _redrawObject               = new RedrawObject(pi);
         _redrawAll                  = new RedrawAll(pi);
         _openMainWindow             = new OpenMainWindow(pi);
@@ -199,9 +197,6 @@ public sealed class PenumbraService : IDisposable, IService
     /// <summary> Let Penumbra BC-compress raw RGBA data and write it as a .tex (or other) file. </summary>
     public Task ConvertTextureData(byte[] rgbaData, int width, string outputFile, TextureType textureType, bool mipMaps = true)
         => _convertTextureData.Invoke(rgbaData, width, outputFile, textureType, mipMaps);
-
-    public Task ConvertTextureFile(string inputFile, string outputFile, TextureType textureType, bool mipMaps = true)
-        => _convertTextureFile.Invoke(inputFile, outputFile, textureType, mipMaps);
 
     public void RedrawObject(int gameObjectIndex)
         => _redrawObject.Invoke(gameObjectIndex);

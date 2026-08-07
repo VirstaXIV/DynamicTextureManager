@@ -171,58 +171,6 @@ public static class ProceduralFields
         return new WorleySample(MathF.Sqrt(f1), MathF.Sqrt(f2), hash);
     }
 
-    /// <summary> One 3D cellular-noise evaluation, see <see cref="Worley3"/>. </summary>
-    public readonly record struct Worley3Sample(float F1, float F2, uint CellHash)
-    {
-        /// <summary> Distance from the nearest cell border, roughly — 0 at borders, large at centers. </summary>
-        public float EdgeDist
-            => F2 - F1;
-    }
-
-    /// <summary>
-    /// 3D cellular (Worley) noise: one feature point per lattice cell. Evaluated on world
-    /// positions it is seamless across UV islands and separate canvases and never
-    /// stretches — the volumetric counterpart of <see cref="Worley"/> for surface plates.
-    /// </summary>
-    public static Worley3Sample Worley3(int seed, Vector3 p)
-    {
-        var cx = (int)MathF.Floor(p.X);
-        var cy = (int)MathF.Floor(p.Y);
-        var cz = (int)MathF.Floor(p.Z);
-
-        var f1   = float.MaxValue;
-        var f2   = float.MaxValue;
-        var hash = 0u;
-
-        for (var dz = -1; dz <= 1; ++dz)
-        for (var dy = -1; dy <= 1; ++dy)
-        for (var dx = -1; dx <= 1; ++dx)
-        {
-            var gx = cx + dx;
-            var gy = cy + dy;
-            var gz = cz + dz;
-            var h  = Hash(seed, gx, gy, gz);
-            var feature = new Vector3(
-                gx + (h & 0x3FF) / 1023f,
-                gy + ((h >> 10) & 0x3FF) / 1023f,
-                gz + ((h >> 20) & 0x3FF) / 1023f);
-
-            var d = (p - feature).LengthSquared();
-            if (d < f1)
-            {
-                f2   = f1;
-                f1   = d;
-                hash = h;
-            }
-            else if (d < f2)
-            {
-                f2 = d;
-            }
-        }
-
-        return new Worley3Sample(MathF.Sqrt(f1), MathF.Sqrt(f2), hash);
-    }
-
     /// <summary> Hermite threshold: 0 below <paramref name="a"/>, 1 above <paramref name="b"/>. </summary>
     public static float Smooth(float a, float b, float t)
     {

@@ -18,7 +18,7 @@ public sealed record TextureOption(
     MtrlFile Mtrl,
     MaterialKind Kind);
 
-/// <summary> Shared material/texture enumeration and the material dropdown of the Decals and Textures tabs. </summary>
+/// <summary> Shared material/texture enumeration and the material dropdown of the Decals tab. </summary>
 public static class TextureOptions
 {
     /// <summary> All textures of the source materials, classified by shader handler. </summary>

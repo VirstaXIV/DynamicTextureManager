@@ -30,7 +30,7 @@ namespace DynamicTextureManager.UI.Panels;
 /// gear, else the diffuse) and its material effects touch the normal/mask siblings, so
 /// there is no per-texture selection. The embedded 3D viewport is the main preview: it
 /// renders the gear with the composited textures and the live colorset colors, and doubles
-/// as the placement surface. The finished textures are viewable in the Textures tab.
+/// as the placement surface. The finished texture is shown directly above the 3D preview.
 /// </summary>
 public sealed class DecalsTab(
     SourceFileProvider sourceFiles,
@@ -241,7 +241,7 @@ public sealed class DecalsTab(
         // unpaintable "context" (framed around the tiny overlay geometry) sampling the wrong
         // texture at the wrong UVs — confusing, not useful. They're painted automatically by an
         // overlapping body-skin tattoo (OverlayModManager companion bake) and stay visible
-        // read-only in the Textures tab, which does NOT filter them. Their diffuse options are
+        // read-only in the Sources section, which does NOT filter them. Their diffuse options are
         // kept separately (_overlayOptions) so the 3D viewport can still show them, composited,
         // as extra rendered entries — see BuildOverlayEntries.
         if (_options == null)
@@ -1906,7 +1906,7 @@ public sealed class DecalsTab(
 
             Im.Tooltip.OnHover("Mirror the decal vertically."u8);
 
-            Im.TextWrapped("Flat UV placement — check the result in the 3D preview below or the Textures tab, or switch to Place on Model (3D)."u8);
+            Im.TextWrapped("Flat UV placement — check the result in the composited texture above or the 3D preview below, or switch to Place on Model (3D)."u8);
         }
 
         return changed;
