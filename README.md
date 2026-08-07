@@ -35,8 +35,8 @@ Requires [Penumbra](https://github.com/xivdev/Penumbra) to be installed and enab
 
 ## Concepts
 
-- **dTexture** — one overlay project: a source (which pieces to edit), its decal layers, and
-  its colorset edits. Each dTexture builds into exactly one Penumbra mod.
+- **Canvas group** — one overlay project: a source (which pieces to edit), its decal layers,
+  and its colorset edits. Each canvas group builds into exactly one Penumbra mod.
 - **Decal** — an image from your library, stamped onto a material. Placed directly on the 3D
   model, it conforms to the surface and carries per-layer colors, finish, and size.
 - **Surface pattern** — a generated fur, scales or skin-pattern layer covering the whole body
@@ -48,7 +48,8 @@ Requires [Penumbra](https://github.com/xivdev/Penumbra) to be installed and enab
 ## Documentation
 
 Full documentation lives in the
-[wiki](https://github.com/VirstaXIV/DynamicTextureManager/wiki).
+[wiki](https://github.com/VirstaXIV/DynamicTextureManager/wiki). See
+[CHANGELOG.md](CHANGELOG.md) for what changed in each stable release.
 
 User guide:
 
@@ -58,6 +59,8 @@ User guide:
   picking gear, body and hair pieces
 - [Decals](https://github.com/VirstaXIV/DynamicTextureManager/wiki/Decals) —
   placement, recoloring, surface finish, extraction, Manage Colorset
+- [Fur, Scales and Skin Patterns](https://github.com/VirstaXIV/DynamicTextureManager/wiki/Fur-Scales-and-Skin-Patterns) —
+  generated coats, markings, custom pattern images, painting
 - [Hair and the Animated Effect](https://github.com/VirstaXIV/DynamicTextureManager/wiki/Hair-and-the-Animated-Effect) —
   Shine and the animated glow for hair and tails
 - [Library, Settings and Troubleshooting](https://github.com/VirstaXIV/DynamicTextureManager/wiki/Library-Settings-and-Troubleshooting)
@@ -67,6 +70,7 @@ formulas and reverse-engineered shader facts the implementation is built on:
 
 - [Colorset Decals and the ID Map](https://github.com/VirstaXIV/DynamicTextureManager/wiki/Colorset-Decals-and-the-ID-Map)
 - [Surface Projection and Decal Baking](https://github.com/VirstaXIV/DynamicTextureManager/wiki/Surface-Projection-and-Decal-Baking)
+- [The Procedural Surface Baker](https://github.com/VirstaXIV/DynamicTextureManager/wiki/The-Procedural-Surface-Baker)
 - [The Composite and Build Pipeline](https://github.com/VirstaXIV/DynamicTextureManager/wiki/The-Composite-and-Build-Pipeline)
 - [The Animated Effect](https://github.com/VirstaXIV/DynamicTextureManager/wiki/The-Animated-Effect)
 - [The 3D Preview System](https://github.com/VirstaXIV/DynamicTextureManager/wiki/The-3D-Preview-System)
