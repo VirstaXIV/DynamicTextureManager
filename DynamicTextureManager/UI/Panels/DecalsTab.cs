@@ -3348,11 +3348,33 @@ public sealed class DecalsTab(
         _extractRows.RemoveWhere(claimedRows.Contains);
 
         // Small regions first — a baked decal is usually a small fraction of the garment.
+        // The swatch leads each row (enlarged, row number overlaid) so the whole material's
+        // colors read as a scannable palette — matching a known baked decal's look by eye is
+        // the actual workflow here, the checkbox and stats are secondary confirmation.
+        var swatchSize = new Vector2(Im.Style.FrameHeight * 1.6f);
         foreach (var (row, count) in _sortedRowUsage)
         {
             using var id      = Im.Id.Push(row);
             var       claimed = claimedRows.Contains(row);
             var       picked  = _extractRows.Contains(row);
+
+            DrawRowHighlightEye(option, row,
+                "Highlights where this row dominantly renders on the character while hovered (redraws your character).\nA baked decal usually lives on a row the garment itself barely uses — often a slot's B half."u8);
+
+            Im.Line.Same();
+            var color   = rowDiffuse == null ? Vector3.One : rowDiffuse[row];
+            var clamped = new Vector4(Math.Clamp(color.X, 0f, 1f), Math.Clamp(color.Y, 0f, 1f), Math.Clamp(color.Z, 0f, 1f), 1f);
+            Im.Color.Button("##rowColor"u8, clamped, size: swatchSize);
+            if (Im.Item.Visible)
+            {
+                var text      = RowName(row);
+                var textSize  = Im.Font.CalculateSize(text);
+                var center    = Im.Item.UpperLeftCorner + (Im.Item.Size - textSize) / 2f;
+                var textColor = ImSharp.Rgba32.ContrastColor(new Vector4(clamped.X, clamped.Y, clamped.Z, 0.7f));
+                Im.Window.DrawList.Text(center, textColor, text);
+            }
+
+            Im.Line.Same();
             using (Im.Disabled(claimed))
             {
                 if (Im.Checkbox($"Row {RowName(row)}", ref picked))
@@ -3365,14 +3387,7 @@ public sealed class DecalsTab(
             }
 
             Im.Line.Same();
-            var color = rowDiffuse == null ? Vector3.One : rowDiffuse[row];
-            Im.Color.Button("##rowColor"u8,
-                new Vector4(Math.Clamp(color.X, 0f, 1f), Math.Clamp(color.Y, 0f, 1f), Math.Clamp(color.Z, 0f, 1f), 1f));
-            Im.Line.Same();
             Im.Text($"{count} texels ({100f * count / _statsTotalTexels:F1}%){(claimed ? "  — claimed by a decal layer" : string.Empty)}");
-            Im.Line.Same();
-            DrawRowHighlightEye(option, row,
-                "Highlights where this row dominantly renders on the character while hovered (redraws your character).\nA baked decal usually lives on a row the garment itself barely uses — often a slot's B half."u8);
         }
 
         Im.Checkbox("Largest Connected Region Only"u8, ref _extractLargestOnly);
