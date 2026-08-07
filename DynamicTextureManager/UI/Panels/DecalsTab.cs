@@ -1064,43 +1064,46 @@ public sealed class DecalsTab(
             .Where(r => edit.Rows.ContainsKey(r)).ToList();
         var claimedRows = claimedIndices.Select(r => edit.Rows[r]).ToList();
 
-        // One editable color per claimed row; the extracted swatch stays as reference so
-        // recoloring never loses which image color the row renders.
+        // One editable color per claimed row, shown as a compact extracted-vs-current swatch
+        // pair so the whole claimed palette reads at a glance instead of one wide editor per
+        // line; the eye still previews any slot on the body without leaving this list.
         for (var i = 0; i < decal.PaletteRows.Count; ++i)
         {
-            using var id       = Im.Id.Push(i);
-            var       row      = decal.PaletteRows[i];
-            var       rowEdit  = rows[i];
-            var       source   = i < decal.PaletteColors.Count ? new Rgba32(decal.PaletteColors[i]) : new Rgba32(255, 255, 255);
+            using var id        = Im.Id.Push(i);
+            var       row       = decal.PaletteRows[i];
+            var       rowEdit   = rows[i];
+            var       source    = i < decal.PaletteColors.Count ? new Rgba32(decal.PaletteColors[i]) : new Rgba32(255, 255, 255);
+            // Gradient pairs render two of the decal's colors on one slot's halves — each is
+            // its own editable color, so no shade sync (that would clobber the partner).
+            var partnered = decal.PaletteRows.Contains(row ^ 1);
+            var letter    = partnered ? row % 2 == 0 ? 'A' : 'B' : ' ';
+            var label     = partnered ? $"Slot {row / 2 + 1}{(row % 2 == 0 ? "A" : "B")}" : $"Slot {row / 2 + 1}";
 
+            DrawRowHighlightEye(option, row,
+                "Highlights the parts of the model this row colors while hovered (redraws your character).\nAfter a build, that includes the decal itself."u8);
+
+            Im.Line.Same();
             Im.Color.Button("##extracted"u8, new Vector4(source.R / 255f, source.G / 255f, source.B / 255f, 1f));
             if (Im.Item.Hovered())
                 Im.Tooltip.OnHover("The color extracted from the decal image — image pixels closest to it render through this row."u8);
 
-            Im.Line.Same();
+            Im.Line.Same(0, 2f * Im.Style.GlobalScale);
             // The picker edits the DISPLAY color; the row stores its square (colorset domain).
             var color = RowToDisplayRgb(rowEdit.Diffuse);
-            Im.Item.SetNextWidthScaled(250);
-            // Gradient pairs render two of the decal's colors on one slot's halves — each is
-            // its own editable color, so no shade sync (that would clobber the partner).
-            var partnered = decal.PaletteRows.Contains(row ^ 1);
-            var label     = partnered ? $"Slot {row / 2 + 1}{(row % 2 == 0 ? "A" : "B")}" : $"Slot {row / 2 + 1}";
-            if (Im.Color.Editor(label, ref color, ColorEditorFlags.Float))
+            if (ImEx.ColorPickerButton("##edit"u8,
+                    "This part of the decal renders in this color — recolor it without touching the image."u8, color, out var edited, letter))
             {
-                rowEdit.Diffuse = DisplayToRowRgb(color.X, color.Y, color.Z);
+                rowEdit.Diffuse = DisplayToRowRgb(edited.X, edited.Y, edited.Z);
                 // Keep a solo slot's B row a darkened copy so the baked shading blend darkens.
                 if (!partnered)
                     GetOrSeedRow(edit, table, row + 1).Diffuse =
-                        DisplayToRowRgb(color.X * ShadeFactor, color.Y * ShadeFactor, color.Z * ShadeFactor);
+                        DisplayToRowRgb(edited.X * ShadeFactor, edited.Y * ShadeFactor, edited.Z * ShadeFactor);
                 changed = true;
             }
 
-            if (Im.Item.Hovered())
-                Im.Tooltip.OnHover("This part of the decal renders in this color — recolor it without touching the image."u8);
-
             Im.Line.Same();
-            DrawRowHighlightEye(option, row,
-                "Highlights the parts of the model this row colors while hovered (redraws your character).\nAfter a build, that includes the decal itself."u8);
+            Im.Cursor.FrameAlign();
+            Im.Text(label);
         }
 
         if (Im.SmallButton("Reset Rows"u8))
