@@ -101,7 +101,6 @@ public sealed class DecalsTab(
     private string                             _statsTexture = string.Empty;
     private readonly HashSet<int>              _usedRowPairs = [];
     private readonly Dictionary<int, int>      _rowUsageCounts = [];
-    private readonly List<(int Row, int Count)> _sortedRowUsage = [];
     private int                                _statsTotalTexels = 1;
 
     // Live customize colors, refreshed at most once a second. THE CHARACTER (Glamourer
@@ -3321,7 +3320,7 @@ public sealed class DecalsTab(
             "Drop the stored source capture and resolve the id map again from the currently active mods.\nUse this when the analyzed file is not the one your mod actually ships (e.g. the capture predates enabling or updating the source mod)."u8);
 
         EnsureIdStats(dTexture, option.GamePath);
-        if (_sortedRowUsage.Count == 0)
+        if (_rowUsageCounts.Count == 0)
         {
             Im.Text("No id-map statistics available for this texture."u8);
             return;
@@ -3347,16 +3346,19 @@ public sealed class DecalsTab(
 
         _extractRows.RemoveWhere(claimedRows.Contains);
 
-        // Small regions first — a baked decal is usually a small fraction of the garment.
-        // The swatch leads each row (enlarged, row number overlaid) so the whole material's
-        // colors read as a scannable palette — matching a known baked decal's look by eye is
-        // the actual workflow here, the checkbox and stats are secondary confirmation.
+        // Slot order (1-16), both halves inline on one line — the per-decal editor already
+        // labels claimed rows "Slot N A/B", so this list now reads against the same map
+        // instead of a size-sorted shuffle. Extraction still selects per HALF independently;
+        // only the layout pairs them. A pair with neither half used anywhere in this id map
+        // is skipped entirely.
         var swatchSize = new Vector2(Im.Style.FrameHeight * 1.6f);
-        foreach (var (row, count) in _sortedRowUsage)
+
+        void DrawColumn(int row)
         {
-            using var id      = Im.Id.Push(row);
+            using var colId  = Im.Id.Push(row);
             var       claimed = claimedRows.Contains(row);
             var       picked  = _extractRows.Contains(row);
+            var       count   = _rowUsageCounts.GetValueOrDefault(row);
 
             DrawRowHighlightEye(option, row,
                 "Highlights where this row dominantly renders on the character while hovered (redraws your character).\nA baked decal usually lives on a row the garment itself barely uses — often a slot's B half."u8);
@@ -3367,7 +3369,7 @@ public sealed class DecalsTab(
             Im.Color.Button("##rowColor"u8, clamped, size: swatchSize);
             if (Im.Item.Visible)
             {
-                var text      = RowName(row);
+                var text      = row % 2 == 0 ? "A" : "B";
                 var textSize  = Im.Font.CalculateSize(text);
                 var center    = Im.Item.UpperLeftCorner + (Im.Item.Size - textSize) / 2f;
                 var textColor = ImSharp.Rgba32.ContrastColor(new Vector4(clamped.X, clamped.Y, clamped.Z, 0.7f));
@@ -3377,7 +3379,7 @@ public sealed class DecalsTab(
             Im.Line.Same();
             using (Im.Disabled(claimed))
             {
-                if (Im.Checkbox($"Row {RowName(row)}", ref picked))
+                if (Im.Checkbox($"{count} texels ({100f * count / _statsTotalTexels:F1}%){(claimed ? "  — claimed" : string.Empty)}", ref picked))
                 {
                     if (picked)
                         _extractRows.Add(row);
@@ -3385,9 +3387,21 @@ public sealed class DecalsTab(
                         _extractRows.Remove(row);
                 }
             }
+        }
 
+        for (var pair = 0; pair < ColorTable.NumRows / 2; ++pair)
+        {
+            var rowA = pair * 2;
+            var rowB = rowA + 1;
+            if (!_rowUsageCounts.ContainsKey(rowA) && !_rowUsageCounts.ContainsKey(rowB))
+                continue;
+
+            using var id = Im.Id.Push(pair);
+            Im.Text($"Slot {pair + 1}");
             Im.Line.Same();
-            Im.Text($"{count} texels ({100f * count / _statsTotalTexels:F1}%){(claimed ? "  — claimed by a decal layer" : string.Empty)}");
+            DrawColumn(rowA);
+            Im.Line.Same(0, 16f * Im.Style.GlobalScale);
+            DrawColumn(rowB);
         }
 
         Im.Checkbox("Largest Connected Region Only"u8, ref _extractLargestOnly);
@@ -3696,7 +3710,6 @@ public sealed class DecalsTab(
             _statsTexture = gamePath;
             _usedRowPairs.Clear();
             _rowUsageCounts.Clear();
-            _sortedRowUsage.Clear();
             _statsTotalTexels = 1;
             return;
         }
@@ -3716,9 +3729,6 @@ public sealed class DecalsTab(
             _rowUsageCounts[row] = _rowUsageCounts.GetValueOrDefault(row) + 1;
         }
 
-        // Prepared once per stats pass — the extraction list draws from these every frame.
-        _sortedRowUsage.Clear();
-        _sortedRowUsage.AddRange(_rowUsageCounts.OrderBy(kvp => kvp.Value).Select(kvp => (kvp.Key, kvp.Value)));
         _statsTotalTexels = Math.Max(1, decoded.Rgba.Length / 4);
     }
 
