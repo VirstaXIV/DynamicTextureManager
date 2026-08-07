@@ -192,9 +192,6 @@ public sealed class ProceduralSurfaceLayer : TextureLayer
     /// </summary>
     public bool UseCharacterColors = true;
 
-    /// <summary> Shift both colors toward the character's current skin tone at bake time. </summary>
-    public bool TintFromSkin;
-
     public float Opacity = 1f;
 
     /// <summary> Height/coverage contrast remap around the midpoint. </summary>
@@ -302,7 +299,6 @@ public sealed class ProceduralSurfaceLayer : TextureLayer
         json["ColorA"]          = ColorA;
         json["ColorB"]          = ColorB;
         json["UseCharacterColors"] = UseCharacterColors;
-        json["TintFromSkin"]    = TintFromSkin;
         json["Opacity"]         = Opacity;
         json["Contrast"]        = Contrast;
         json["ColorVariation"]  = ColorVariation;
@@ -345,7 +341,6 @@ public sealed class ProceduralSurfaceLayer : TextureLayer
             ColorA          = json["ColorA"]?.ToObject<uint>() ?? 0xFF303030,
             ColorB          = json["ColorB"]?.ToObject<uint>() ?? 0xFF406080,
             UseCharacterColors = json["UseCharacterColors"]?.ToObject<bool>() ?? true,
-            TintFromSkin    = json["TintFromSkin"]?.ToObject<bool>() ?? false,
             Opacity         = json["Opacity"]?.ToObject<float>() ?? 1f,
             Contrast        = json["Contrast"]?.ToObject<float>() ?? 0.5f,
             ColorVariation  = json["ColorVariation"]?.ToObject<float>() ?? 0.25f,

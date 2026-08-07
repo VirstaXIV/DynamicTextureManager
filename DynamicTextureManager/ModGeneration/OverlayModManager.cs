@@ -38,15 +38,13 @@ public sealed class OverlayModManager : IService, IDisposable
     private readonly Shaders.ShaderHandlerRegistry shaderHandlers;
     private readonly ModelUvReader         uvReader;
     private readonly Interop.HairColorReader hairColors;
-    private readonly Interop.SkinColorReader skinColors;
     private readonly DecalLibrary          decals;
 
     public OverlayModManager(PenumbraService penumbra, SourceFileProvider sourceFiles, ModWriter modWriter, SaveService saveService,
         Configuration config, DTextureStorage storage, DTextureChanged dTextureChanged, IFramework framework, TextureIO textureIO,
         TextureCompositor compositor, Shaders.ShaderHandlerRegistry shaderHandlers, ModelUvReader uvReader,
-        Interop.HairColorReader hairColors, Interop.SkinColorReader skinColors, DecalLibrary decals)
+        Interop.HairColorReader hairColors, DecalLibrary decals)
     {
-        this.skinColors = skinColors;
         this.decals = decals;
         this.penumbra        = penumbra;
         this.sourceFiles     = sourceFiles;
@@ -436,11 +434,8 @@ public sealed class OverlayModManager : IService, IDisposable
         // background build — the baked file freezes the colors captured now.
         var characterColors = new CharacterColors();
         if (plan.TextureJobs.Any(j => j.Layers.Concat(j.EffectLayers)
-                .Any(l => l is DTextures.Data.ProceduralSurfaceLayer { Enabled: true } p
-                 && (p.TintFromSkin || p.UseCharacterColors))))
+                .Any(l => l is DTextures.Data.ProceduralSurfaceLayer { Enabled: true, UseCharacterColors: true })))
         {
-            if (skinColors.TryGetLocalPlayerSkin(out var liveSkin))
-                characterColors = characterColors with { Skin = liveSkin };
             if (hairColors.TryGetLocalPlayerHair(out var liveHair))
                 characterColors = characterColors with
                 {
