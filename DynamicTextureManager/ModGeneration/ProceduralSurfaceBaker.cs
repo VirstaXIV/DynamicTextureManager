@@ -89,8 +89,8 @@ public static class ProceduralSurfaceBaker
         static string Tone(Vector3? v)
             => v is { } t ? FormattableString.Invariant($"{t.X:F3},{t.Y:F3},{t.Z:F3}") : "-";
 
-        var tones = layer.TintFromSkin || layer.UseCharacterColors
-            ? $"{Tone(characterColors.Skin)}|{Tone(characterColors.HairMain)}|{Tone(characterColors.HairHighlight)}"
+        var tones = layer.UseCharacterColors
+            ? $"{Tone(characterColors.HairMain)}|{Tone(characterColors.HairHighlight)}"
             : "none";
         var key   = $"{layer.ContentHash()}|{width}x{height}|{tones}";
         if (markingPattern != null)
@@ -648,12 +648,6 @@ public static class ProceduralSurfaceBaker
                 colorA = main;
             if (characterColors.HairHighlight is { } highlight)
                 colorB = highlight;
-        }
-
-        if (layer.TintFromSkin && characterColors.Skin is { } tone)
-        {
-            colorA = Vector3.Lerp(colorA, tone, 0.5f);
-            colorB = Vector3.Lerp(colorB, tone, 0.5f);
         }
 
         // World scale: pattern frequency from the ACTIVE kind's feature size, resolution-free.

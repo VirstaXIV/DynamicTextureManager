@@ -67,7 +67,6 @@ public sealed class CompositePreviewCache : IService, IDisposable
     private readonly ShaderHandlerRegistry _shaderHandlers;
     private readonly ITextureProvider      _textureProvider;
     private readonly DTextureChanged       _dTextureChanged;
-    private readonly Interop.SkinColorReader _skinColors;
     private readonly Interop.HairColorReader _hairColors;
 
     /// <summary>
@@ -88,10 +87,9 @@ public sealed class CompositePreviewCache : IService, IDisposable
 
     public CompositePreviewCache(TextureIO textureIO, TextureCompositor compositor, OverlayModManager overlayMods,
         ModelUvReader uvReader, SourceFileProvider sourceFiles, ShaderHandlerRegistry shaderHandlers,
-        ITextureProvider textureProvider, DTextureChanged dTextureChanged, Interop.SkinColorReader skinColors,
+        ITextureProvider textureProvider, DTextureChanged dTextureChanged,
         Interop.HairColorReader hairColors)
     {
-        _skinColors      = skinColors;
         _hairColors      = hairColors;
         _textureIO       = textureIO;
         _compositor      = compositor;
@@ -259,11 +257,8 @@ public sealed class CompositePreviewCache : IService, IDisposable
 
             // Live customize state is framework-thread only; the composite below runs in the
             // background, so the colors are captured here — matching what a build would bake.
-            if (layers.Concat(effectLayers).Any(l => l is DTextures.Data.ProceduralSurfaceLayer { Enabled: true } p
-                 && (p.TintFromSkin || p.UseCharacterColors)))
+            if (layers.Concat(effectLayers).Any(l => l is DTextures.Data.ProceduralSurfaceLayer { Enabled: true, UseCharacterColors: true }))
             {
-                if (_skinColors.TryGetLocalPlayerSkin(out var liveSkin))
-                    characterColors = characterColors with { Skin = liveSkin };
                 if (_hairColors.TryGetLocalPlayerHair(out var liveHair))
                     characterColors = characterColors with
                     {

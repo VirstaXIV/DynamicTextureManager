@@ -17,8 +17,7 @@ namespace DynamicTextureManager.ModGeneration;
 /// layers): captured on the framework thread before the composite runs in the background.
 /// Null components mean the character was unreadable — layer colors are used as stored.
 /// </summary>
-public readonly record struct CharacterColors(System.Numerics.Vector3? Skin, System.Numerics.Vector3? HairMain,
-    System.Numerics.Vector3? HairHighlight);
+public readonly record struct CharacterColors(System.Numerics.Vector3? HairMain, System.Numerics.Vector3? HairHighlight);
 
 /// <summary> Composites decal layers onto a base texture in RGBA space. </summary>
 public sealed class TextureCompositor(DecalLibrary decals) : IService
