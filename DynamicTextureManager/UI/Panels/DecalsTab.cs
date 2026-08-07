@@ -3346,37 +3346,31 @@ public sealed class DecalsTab(
 
         _extractRows.RemoveWhere(claimedRows.Contains);
 
-        // Slot order (1-16), both halves inline on one line — the per-decal editor already
-        // labels claimed rows "Slot N A/B", so this list now reads against the same map
-        // instead of a size-sorted shuffle. Extraction still selects per HALF independently;
-        // only the layout pairs them. A pair with neither half used anywhere in this id map
-        // is skipped entirely.
-        var swatchSize = new Vector2(Im.Style.FrameHeight * 1.6f);
+        // Slot order (1-16) in an actual table, both halves as their own columns — the
+        // per-decal editor already labels claimed rows "Slot N A/B", so this list now reads
+        // against the same map instead of a size-sorted shuffle. Extraction still selects
+        // per HALF independently; only the layout pairs them. A pair with neither half used
+        // anywhere in this id map is skipped. Fixed column widths (not content-sized) keep
+        // the swatches and slot numbers aligned down the whole list regardless of how long a
+        // row's texel/percentage text runs.
+        var previewWidth = (2 * Im.Style.FrameHeight + Im.Style.ItemInnerSpacing.X) * Im.Style.GlobalScale;
 
-        void DrawColumn(int row)
+        void DrawColumn(Im.TableDisposable extractTable, int row)
         {
             using var colId  = Im.Id.Push(row);
             var       claimed = claimedRows.Contains(row);
             var       picked  = _extractRows.Contains(row);
             var       count   = _rowUsageCounts.GetValueOrDefault(row);
 
+            extractTable.NextColumn();
             DrawRowHighlightEye(option, row,
                 "Highlights where this row dominantly renders on the character while hovered (redraws your character).\nA baked decal usually lives on a row the garment itself barely uses — often a slot's B half."u8);
-
             Im.Line.Same();
             var color   = rowDiffuse == null ? Vector3.One : rowDiffuse[row];
             var clamped = new Vector4(Math.Clamp(color.X, 0f, 1f), Math.Clamp(color.Y, 0f, 1f), Math.Clamp(color.Z, 0f, 1f), 1f);
-            Im.Color.Button("##rowColor"u8, clamped, size: swatchSize);
-            if (Im.Item.Visible)
-            {
-                var text      = row % 2 == 0 ? "A" : "B";
-                var textSize  = Im.Font.CalculateSize(text);
-                var center    = Im.Item.UpperLeftCorner + (Im.Item.Size - textSize) / 2f;
-                var textColor = ImSharp.Rgba32.ContrastColor(new Vector4(clamped.X, clamped.Y, clamped.Z, 0.7f));
-                Im.Window.DrawList.Text(center, textColor, text);
-            }
+            Im.Color.Button("##rowColor"u8, clamped);
 
-            Im.Line.Same();
+            extractTable.NextColumn();
             using (Im.Disabled(claimed))
             {
                 if (Im.Checkbox($"{count} texels ({100f * count / _statsTotalTexels:F1}%){(claimed ? "  — claimed" : string.Empty)}", ref picked))
@@ -3389,19 +3383,33 @@ public sealed class DecalsTab(
             }
         }
 
-        for (var pair = 0; pair < ColorTable.NumRows / 2; ++pair)
+        using (var extractTable = Im.Table.Begin("##extractRows"u8, 5, ImSharp.TableFlags.RowBackground))
         {
-            var rowA = pair * 2;
-            var rowB = rowA + 1;
-            if (!_rowUsageCounts.ContainsKey(rowA) && !_rowUsageCounts.ContainsKey(rowB))
-                continue;
+            if (extractTable)
+            {
+                extractTable.SetupColumn("Slot"u8, ImSharp.TableColumnFlags.WidthFixed, 55f * Im.Style.GlobalScale);
+                extractTable.SetupColumn("A"u8, ImSharp.TableColumnFlags.WidthFixed, previewWidth);
+                extractTable.SetupColumn(""u8, ImSharp.TableColumnFlags.WidthStretch);
+                extractTable.SetupColumn("B"u8, ImSharp.TableColumnFlags.WidthFixed, previewWidth);
+                extractTable.SetupColumn(""u8, ImSharp.TableColumnFlags.WidthStretch);
+                extractTable.HeaderRow();
 
-            using var id = Im.Id.Push(pair);
-            Im.Text($"Slot {pair + 1}");
-            Im.Line.Same();
-            DrawColumn(rowA);
-            Im.Line.Same(0, 16f * Im.Style.GlobalScale);
-            DrawColumn(rowB);
+                for (var pair = 0; pair < ColorTable.NumRows / 2; ++pair)
+                {
+                    var rowA = pair * 2;
+                    var rowB = rowA + 1;
+                    if (!_rowUsageCounts.ContainsKey(rowA) && !_rowUsageCounts.ContainsKey(rowB))
+                        continue;
+
+                    using var id = Im.Id.Push(pair);
+                    extractTable.NextColumn();
+                    Im.Cursor.FrameAlign();
+                    Im.Text($"Slot {pair + 1}");
+
+                    DrawColumn(extractTable, rowA);
+                    DrawColumn(extractTable, rowB);
+                }
+            }
         }
 
         Im.Checkbox("Largest Connected Region Only"u8, ref _extractLargestOnly);
