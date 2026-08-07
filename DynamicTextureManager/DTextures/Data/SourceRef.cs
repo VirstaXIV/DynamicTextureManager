@@ -31,7 +31,7 @@ public sealed class SourcePath
     /// <summary>
     /// Whether this source is an overlay part (nails, accents — see ModelUvReader.
     /// GetBodyOverlayMaterials) rather than a primary editable canvas: shown and viewable in
-    /// the Textures tab like any other source, but excluded from the Decals tab's material
+    /// the Sources section like any other source, but excluded from the Decals tab's material
     /// selector — decorating it directly there merges most of the body mesh into unpaintable
     /// "context" (framed around the tiny overlay geometry) and renders it sampling the wrong
     /// texture at the wrong UVs, which is confusing, not useful. Its texture is instead painted

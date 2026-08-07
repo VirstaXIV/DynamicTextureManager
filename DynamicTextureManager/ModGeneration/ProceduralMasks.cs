@@ -4,7 +4,7 @@ using System.Numerics;
 namespace DynamicTextureManager.ModGeneration;
 
 /// <summary>
-/// Deterministic procedural masks for texture-space adjustments (hair highlight modulation):
+/// Deterministic procedural masks for texture-space adjustments (the animated-effect pattern):
 /// seeded value noise with fBm octaves and directional UV gradients. Pure integer/float math
 /// with no library RNG, so the same parameters always produce the same bytes — two builds of
 /// the same dTexture stay byte-identical, and the preview cache matches the built files.

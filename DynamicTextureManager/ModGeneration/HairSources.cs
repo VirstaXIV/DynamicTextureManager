@@ -12,7 +12,7 @@ namespace DynamicTextureManager.ModGeneration;
 /// A hairstyle is presented as ONE source even when its model splits the strands across
 /// several materials: the user picks the primary (scalp) material, and the model's other
 /// hair materials ride along as hidden companion sources (Overlay = true — visible in the
-/// Textures tab and the 3D preview, absent from the material selector). Discovery reads the
+/// Sources section and the 3D preview, absent from the material selector). Discovery reads the
 /// model's own material list, the same mechanism the animated-highlight build uses.
 /// </summary>
 public static class HairSources
