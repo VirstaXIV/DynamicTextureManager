@@ -21,12 +21,12 @@
     "IconUrl": "https://raw.githubusercontent.com/VirstaXIV/DynamicTextureManager/master/images/icon.png",
     "Punchline": "Manager for dynamically adjusting textures",
     "AcceptsFeedback": true,
-    "LastUpdate": 1786046346,
+    "LastUpdate": 1786146279,
     "DownloadCount": 0,
     "DownloadLinkInstall": "https://github.com/VirstaXIV/DynamicTextureManager/releases/latest/download/latest.zip",
     "DownloadLinkUpdate": "https://github.com/VirstaXIV/DynamicTextureManager/releases/latest/download/latest.zip",
-    "DownloadLinkTesting": "https://github.com/VirstaXIV/DynamicTextureManager/releases/download/beta-0.9.8/latest.zip",
-    "TestingAssemblyVersion": "0.9.8.0",
+    "DownloadLinkTesting": "https://github.com/VirstaXIV/DynamicTextureManager/releases/download/beta-0.9.9/latest.zip",
+    "TestingAssemblyVersion": "0.9.9.0",
     "TestingDalamudApiLevel": 15
   }
 ]
