@@ -4,7 +4,7 @@
     <Author>Virsta</Author>
     <Name>Dynamic Texture Manager</Name>
     <MinimumDalamudVersion>14.0.0</MinimumDalamudVersion>
-    <Version>0.9.0</Version>
+    <Version>0.9.9</Version>
     <ApplicableVersion>any</ApplicableVersion>
     <Punchline>Manager for dynamically adjusting textures</Punchline>
     <Description>Helps set up custom textures to add custom decals / images on models by generating override textures.</Description>
@@ -15,8 +15,13 @@
     <PackageLicenseExpression>AGPL-3.0-or-later</PackageLicenseExpression>
     <IsPackable>false</IsPackable>
   </PropertyGroup>
+  <!-- Dalamud's ImGui bindings stay referenced (not Use_Dalamud_ImGui=false) because the
+       windows still subclass Dalamud.Interface.Windowing.Window, whose API surfaces the
+       binding types. No plugin code calls ImGui directly — flip this when the window
+       system moves to Luna's. -->
   <ItemGroup>
-    <ProjectReference Include="..\OtterGui\OtterGui.csproj" />
+    <ProjectReference Include="..\Luna\Luna\Luna.csproj" />
+    <ProjectReference Include="..\Luna\Luna.Generators\Luna.Generators.csproj" OutputItemType="Analyzer" ReferenceOutputAssembly="false" />
     <ProjectReference Include="..\Penumbra.Api\Penumbra.Api.csproj" />
     <ProjectReference Include="..\Penumbra.GameData\Penumbra.GameData.csproj" />
   </ItemGroup>

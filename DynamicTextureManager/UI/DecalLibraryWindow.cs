@@ -1,18 +1,17 @@
 using System;
 using System.Numerics;
-using Dalamud.Bindings.ImGui;
 using Dalamud.Interface.Windowing;
 using DynamicTextureManager.Services;
-using OtterGui.Raii;
-using OtterGui.Text;
+using ImSharp;
 
 namespace DynamicTextureManager.UI;
 
 /// <summary>
 /// Standalone window around <see cref="DecalLibraryPanel"/> — the resource library: decal
-/// images plus imported effect patterns, both stored and managed in one place. Normally
-/// opened from the main window's title bar; the Decals tab opens it as a picker, where
-/// clicking a decal (or importing a new one) hands it back to the tab and closes the window.
+/// images plus imported effect and marking patterns, all stored and managed in one place.
+/// Normally opened from the main window's title bar; the Decals tab opens it as a picker,
+/// where clicking a decal (or importing a new one) hands it back to the tab and closes the
+/// window.
 /// </summary>
 public class DecalLibraryWindow : Window
 {
@@ -51,41 +50,66 @@ public class DecalLibraryWindow : Window
         BringToFront();
     }
 
+    private bool _focusPatterns;
+
+    /// <summary> Open the library on the Marking Patterns tab (manage mode). </summary>
+    public void OpenPatterns()
+    {
+        _onPick        = null;
+        _focusPatterns = true;
+        IsOpen         = true;
+        BringToFront();
+    }
+
     public override void Draw()
     {
+        // The shared ImSharp context attaches on a framework tick after service
+        // construction — Im.* calls before that dereference an empty context.
+        if (!ImSharpConfiguration.IsInitialized)
+            return;
+
         if (_onPick == null)
         {
-            var focusEffects = _focusEffects;
-            _focusEffects = false;
-            using var tabs = ImUtf8.TabBar("##resourceTabs"u8);
+            var focusEffects  = _focusEffects;
+            var focusPatterns = _focusPatterns;
+            _focusEffects  = false;
+            _focusPatterns = false;
+            using var tabs = Im.TabBar.Begin("##resourceTabs"u8);
             if (tabs)
             {
-                using (var tab = ImUtf8.TabItem("Decals"u8))
+                using (var tab = tabs.Item("Decals"u8))
                 {
                     if (tab)
                         _panel.Draw();
                 }
 
-                using (var tab = ImUtf8.TabItem("Effect Patterns"u8,
-                           focusEffects ? ImGuiTabItemFlags.SetSelected : ImGuiTabItemFlags.None))
+                using (var tab = tabs.Item("Effect Patterns"u8,
+                           focusEffects ? TabItemFlags.SetSelected : TabItemFlags.None))
                 {
                     if (tab)
                         _panel.DrawEffects();
+                }
+
+                using (var tab = tabs.Item("Marking Patterns"u8,
+                           focusPatterns ? TabItemFlags.SetSelected : TabItemFlags.None))
+                {
+                    if (tab)
+                        _panel.DrawPatterns();
                 }
             }
 
             return;
         }
 
-        ImUtf8.TextWrapped(_pickerPrompt);
-        if (ImUtf8.SmallButton("Cancel"u8))
+        Im.TextWrapped(_pickerPrompt);
+        if (Im.SmallButton("Cancel"u8))
         {
             _onPick = null;
             IsOpen  = false;
             return;
         }
 
-        ImGui.Separator();
+        Im.Separator();
         _panel.Draw(entry =>
         {
             var pick = _onPick;

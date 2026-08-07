@@ -2,14 +2,14 @@ using System;
 using System.Collections.Generic;
 using System.Linq;
 using System.Numerics;
-using Dalamud.Bindings.ImGui;
 using Dalamud.Interface.ImGuiFileDialog;
 using Dalamud.Plugin.Services;
 using DynamicTextureManager.DTextures.Data;
 using DynamicTextureManager.ModGeneration;
 using DynamicTextureManager.Services;
-using OtterGui.Raii;
-using OtterGui.Text;
+using ImSharp;
+using Luna;
+using IService = Luna.IService;
 
 namespace DynamicTextureManager.UI;
 
@@ -19,7 +19,7 @@ namespace DynamicTextureManager.UI;
 /// manage mode and, with a pick callback, as the picker dialog the Decals tab opens.
 /// </summary>
 public sealed class DecalLibraryPanel(DecalLibrary decals, ITextureProvider textureProvider, TextureIO textureIO)
-    : OtterGui.Services.IService, IDisposable
+    : IService, IDisposable
 {
     private enum SortMode
     {
@@ -73,11 +73,11 @@ public sealed class DecalLibraryPanel(DecalLibrary decals, ITextureProvider text
         EnsureView();
         DrawTopBar();
         DrawTagFilter();
-        ImGui.Separator();
+        Im.Separator();
 
-        var avail = ImGui.GetContentRegionAvail();
-        var detailHeight = _selected != Guid.Empty ? 170 * ImUtf8.GlobalScale : 0;
-        using (var grid = ImUtf8.Child("##decalGrid"u8, new Vector2(avail.X, avail.Y - detailHeight)))
+        var avail = Im.ContentRegion.Available;
+        var detailHeight = _selected != Guid.Empty ? 170 * Im.Style.GlobalScale : 0;
+        using (var grid = Im.Child.Begin("##decalGrid"u8, new Vector2(avail.X, avail.Y - detailHeight)))
         {
             if (grid)
                 DrawGrid(onPick);
@@ -89,7 +89,7 @@ public sealed class DecalLibraryPanel(DecalLibrary decals, ITextureProvider text
 
     private void DrawTopBar()
     {
-        if (ImUtf8.Button("Import Decal..."u8))
+        if (Im.Button("Import Decal..."u8))
             _fileDialog.OpenFileDialog("Import Decal", "Images{.png,.jpg,.jpeg,.dds,.bmp,.tga}", (success, path) =>
             {
                 if (!success)
@@ -99,18 +99,18 @@ public sealed class DecalLibraryPanel(DecalLibrary decals, ITextureProvider text
                 if (LastImported != null)
                     _selected = LastImported.Id;
             });
-        ImUtf8.HoverTooltip("Import an image into the decal library. It is converted to PNG and can be stamped onto textures."u8);
+        Im.Tooltip.OnHover("Import an image into the decal library. It is converted to PNG and can be stamped onto textures."u8);
 
-        ImGui.SameLine();
-        ImGui.SetNextItemWidth(200 * ImUtf8.GlobalScale);
-        ImUtf8.InputText("##search"u8, ref _search, "Search..."u8);
+        Im.Line.Same();
+        Im.Item.SetNextWidthScaled(200);
+        Im.Input.Text("##search"u8, ref _search, "Search..."u8);
 
-        ImGui.SameLine();
-        ImGui.SetNextItemWidth(150 * ImUtf8.GlobalScale);
-        using var combo = ImUtf8.Combo("##sort"u8, SortLabel(_sort));
+        Im.Line.Same();
+        Im.Item.SetNextWidthScaled(150);
+        using var combo = Im.Combo.Begin("##sort"u8, SortLabel(_sort));
         if (combo)
             foreach (var mode in Enum.GetValues<SortMode>())
-                if (ImUtf8.Selectable(SortLabel(mode), mode == _sort))
+                if (Im.Selectable(SortLabel(mode), mode == _sort))
                     _sort = mode;
     }
 
@@ -119,14 +119,14 @@ public sealed class DecalLibraryPanel(DecalLibrary decals, ITextureProvider text
         if (_viewTags.Count == 0)
             return;
 
-        ImUtf8.Text("Tags:"u8);
+        Im.Text("Tags:"u8);
         foreach (var (tag, idx) in _viewTags.Select((t, i) => (t, i)))
         {
-            ImGui.SameLine();
-            using var id     = ImUtf8.PushId(idx);
+            Im.Line.Same();
+            using var id     = Im.Id.Push(idx);
             var       active = _tagFilter.Contains(tag);
-            using var color  = ImRaii.PushColor(ImGuiCol.Button, 0xFF885522u, active);
-            if (ImUtf8.SmallButton(tag))
+            using var color  = ImGuiColor.Button.Push(new Rgba32(0xFF885522u), active);
+            if (Im.SmallButton(tag))
             {
                 if (!_tagFilter.Add(tag))
                     _tagFilter.Remove(tag);
@@ -136,8 +136,8 @@ public sealed class DecalLibraryPanel(DecalLibrary decals, ITextureProvider text
 
         if (_tagFilter.Count > 0)
         {
-            ImGui.SameLine();
-            if (ImUtf8.SmallButton("Clear Filter"u8))
+            Im.Line.Same();
+            if (Im.SmallButton("Clear Filter"u8))
             {
                 _tagFilter.Clear();
                 ++_tagStamp;
@@ -167,30 +167,30 @@ public sealed class DecalLibraryPanel(DecalLibrary decals, ITextureProvider text
         var entries = _viewEntries;
         if (entries.Count == 0)
         {
-            ImUtf8.Text(decals.Decals.Count == 0 ? "No decals imported yet."u8 : "No decals match the current filter."u8);
+            Im.Text(decals.Decals.Count == 0 ? "No decals imported yet."u8 : "No decals match the current filter."u8);
             return;
         }
 
-        var cellSize  = 96 * ImUtf8.GlobalScale;
-        var spacing   = ImGui.GetStyle().ItemSpacing.X;
-        var availX    = ImGui.GetContentRegionAvail().X;
+        var cellSize  = 96 * Im.Style.GlobalScale;
+        var spacing   = Im.Style.ItemSpacing.X;
+        var availX    = Im.ContentRegion.Available.X;
         var perRow    = Math.Max(1, (int)((availX + spacing) / (cellSize + spacing)));
 
         foreach (var ((entry, path), idx) in entries.Select((e, i) => (e, i)))
         {
             if (idx % perRow != 0)
-                ImGui.SameLine();
+                Im.Line.Same();
 
-            using var id    = ImUtf8.PushId(idx);
-            using var group = ImUtf8.Group();
+            using var id    = Im.Id.Push(idx);
+            using var group = Im.Group();
 
             var wrap     = textureProvider.GetFromFile(path).GetWrapOrDefault();
             var selected = entry.Id == _selected;
-            using (var border = ImRaii.PushColor(ImGuiCol.Button, 0xFF885522u, selected))
+            using (var border = ImGuiColor.Button.Push(new Rgba32(0xFF885522u), selected))
             {
                 var clicked = wrap != null
-                    ? ImGui.ImageButton(wrap.Handle, new Vector2(cellSize - 12 * ImUtf8.GlobalScale))
-                    : ImUtf8.Button("?"u8, new Vector2(cellSize - 12 * ImUtf8.GlobalScale));
+                    ? Im.Image.Button(wrap.Id, new Vector2(cellSize - 12 * Im.Style.GlobalScale))
+                    : Im.Button("?"u8, new Vector2(cellSize - 12 * Im.Style.GlobalScale));
                 if (clicked)
                 {
                     if (onPick != null)
@@ -207,13 +207,13 @@ public sealed class DecalLibraryPanel(DecalLibrary decals, ITextureProvider text
             }
 
             var label = entry.Name.Length > 14 ? entry.Name[..13] + "…" : entry.Name;
-            ImUtf8.Text(label);
+            Im.Text(label);
 
             group.Dispose();
-            if (ImGui.IsItemHovered())
-                ImUtf8.HoverTooltip(onPick != null
-                    ? $"{entry.Name}\n{TagLine(entry)}Click to use this decal."
-                    : $"{entry.Name}\n{TagLine(entry)}Click to select and edit.");
+            if (onPick != null)
+                Im.Tooltip.OnHover(HoveredFlags.None, $"{entry.Name}\n{TagLine(entry)}Click to use this decal.");
+            else
+                Im.Tooltip.OnHover(HoveredFlags.None, $"{entry.Name}\n{TagLine(entry)}Click to select and edit.");
         }
     }
 
@@ -229,43 +229,43 @@ public sealed class DecalLibraryPanel(DecalLibrary decals, ITextureProvider text
             return;
         }
 
-        ImGui.Separator();
-        var thumbSize = 128 * ImUtf8.GlobalScale;
+        Im.Separator();
+        var thumbSize = 128 * Im.Style.GlobalScale;
         var wrap      = textureProvider.GetFromFile(decals.FilePath(entry.Id)).GetWrapOrDefault();
         if (wrap != null)
-            ImGui.Image(wrap.Handle, new Vector2(thumbSize));
+            Im.Image.Draw(wrap.Id, new Vector2(thumbSize));
         else
-            ImGui.Dummy(new Vector2(thumbSize));
+            Im.Dummy(new Vector2(thumbSize));
 
-        ImGui.SameLine();
-        using var group = ImUtf8.Group();
+        Im.Line.Same();
+        using var group = Im.Group();
 
-        ImGui.SetNextItemWidth(250 * ImUtf8.GlobalScale);
-        ImUtf8.InputText("##rename"u8, ref _renameBuffer);
-        ImGui.SameLine();
-        if (ImUtf8.SmallButton("Rename"u8) && _renameBuffer.Trim().Length > 0)
+        Im.Item.SetNextWidthScaled(250);
+        Im.Input.Text("##rename"u8, ref _renameBuffer);
+        Im.Line.Same();
+        if (Im.SmallButton("Rename"u8) && _renameBuffer.Trim().Length > 0)
             decals.Rename(entry.Id, _renameBuffer.Trim());
 
         // Tag chips with removal, plus an input to add new ones.
-        ImUtf8.Text("Tags:"u8);
+        Im.Text("Tags:"u8);
         foreach (var (tag, idx) in entry.Tags.Select((t, i) => (t, i)))
         {
-            ImGui.SameLine();
-            using var id = ImUtf8.PushId(idx);
-            if (ImUtf8.SmallButton($"{tag} ×"))
+            Im.Line.Same();
+            using var id = Im.Id.Push(idx);
+            if (Im.SmallButton($"{tag} ×"))
             {
                 decals.SetTags(entry.Id, entry.Tags.Where(t => !string.Equals(t, tag, StringComparison.OrdinalIgnoreCase)));
                 break;
             }
 
-            ImUtf8.HoverTooltip("Click to remove this tag."u8);
+            Im.Tooltip.OnHover("Click to remove this tag."u8);
         }
 
-        ImGui.SameLine();
-        ImGui.SetNextItemWidth(120 * ImUtf8.GlobalScale);
-        var addTag = ImUtf8.InputText("##addTag"u8, ref _tagBuffer, "add tag..."u8, ImGuiInputTextFlags.EnterReturnsTrue);
-        ImGui.SameLine();
-        if ((ImUtf8.SmallButton("+"u8) || addTag) && _tagBuffer.Trim().Length > 0)
+        Im.Line.Same();
+        Im.Item.SetNextWidthScaled(120);
+        var addTag = Im.Input.Text("##addTag"u8, ref _tagBuffer, "add tag..."u8, InputTextFlags.EnterReturnsTrue);
+        Im.Line.Same();
+        if ((Im.SmallButton("+"u8) || addTag) && _tagBuffer.Trim().Length > 0)
         {
             decals.SetTags(entry.Id, entry.Tags.Append(_tagBuffer.Trim()));
             _tagBuffer = string.Empty;
@@ -282,28 +282,28 @@ public sealed class DecalLibraryPanel(DecalLibrary decals, ITextureProvider text
                 _                      => "finish untouched",
             };
             var colors = preset.IdRemap ? $"{preset.MaxColors} colors" : "full color";
-            ImUtf8.TextWrapped($"Preset: {colors}, {finish}, opacity {preset.Opacity:F2}");
-            ImUtf8.HoverTooltip("Settings applied when this decal is attached to gear — saved from a placed decal with \"Save Settings to Library\"."u8);
-            ImGui.SameLine();
-            if (ImUtf8.SmallButton("Clear Preset"u8))
+            Im.TextWrapped($"Preset: {colors}, {finish}, opacity {preset.Opacity:F2}");
+            Im.Tooltip.OnHover("Settings applied when this decal is attached to gear — saved from a placed decal with \"Save Settings to Library\"."u8);
+            Im.Line.Same();
+            if (Im.SmallButton("Clear Preset"u8))
                 decals.SetPreset(entry.Id, null);
         }
         else
         {
-            ImUtf8.Text("No preset — attachments start from defaults."u8);
-            ImUtf8.HoverTooltip("Attach the decal to gear, adjust its colors and finish, then use \"Save Settings to Library\" on the layer to store them here."u8);
+            Im.Text("No preset — attachments start from defaults."u8);
+            Im.Tooltip.OnHover("Attach the decal to gear, adjust its colors and finish, then use \"Save Settings to Library\" on the layer to store them here."u8);
         }
 
-        ImUtf8.Text($"Added: {entry.CreatedDate.ToLocalTime():yyyy-MM-dd}");
+        Im.Text($"Added: {entry.CreatedDate.ToLocalTime():yyyy-MM-dd}");
 
-        ImGui.SameLine();
-        if (ImUtf8.SmallButton("Delete"u8) && ImGui.GetIO().KeyCtrl)
+        Im.Line.Same();
+        if (Im.SmallButton("Delete"u8) && Im.Io.KeyControl)
         {
             decals.Delete(entry.Id);
             _selected = Guid.Empty;
         }
 
-        ImUtf8.HoverTooltip("Hold Control and click to delete this decal from the library.\nAlready-built mods keep working — they bake the pixels in — but layers referencing it can no longer rebuild."u8);
+        Im.Tooltip.OnHover("Hold Control and click to delete this decal from the library.\nAlready-built mods keep working — they bake the pixels in — but layers referencing it can no longer rebuild."u8);
     }
 
     private static string SortLabel(SortMode mode)
@@ -341,7 +341,7 @@ public sealed class DecalLibraryPanel(DecalLibrary decals, ITextureProvider text
     {
         _fileDialog.Draw();
 
-        if (ImUtf8.Button("Import Effect Pattern..."u8))
+        if (Im.Button("Import Effect Pattern..."u8))
             _fileDialog.OpenFileDialog("Import Effect Pattern", "Images{.png,.jpg,.jpeg,.dds,.bmp,.tga}", (success, path) =>
             {
                 if (!success)
@@ -351,19 +351,19 @@ public sealed class DecalLibraryPanel(DecalLibrary decals, ITextureProvider text
                 if (imported != null)
                     _selectedEffect = imported.Id;
             });
-        ImUtf8.HoverTooltip(
+        Im.Tooltip.OnHover(
             "Import an image as a scrolling effect pattern for the Animated Effect. It is converted to PNG and stored with the decals.\nBrightness becomes the glow; the image should tile cleanly in both directions."u8);
 
-        ImGui.Separator();
-        ImUtf8.Text("Built into the plugin:"u8);
-        var cell = 72f * ImUtf8.GlobalScale;
+        Im.Separator();
+        Im.Text("Built into the plugin:"u8);
+        var cell = 72f * Im.Style.GlobalScale;
         foreach (var pattern in Enum.GetValues<ModGeneration.AnimatedHairBuilder.HairEffectPattern>())
         {
             if (pattern is ModGeneration.AnimatedHairBuilder.HairEffectPattern.DressGlitter)
                 continue;
 
-            using var id    = ImUtf8.PushId((int)pattern);
-            using var group = ImUtf8.Group();
+            using var id    = Im.Id.Push((int)pattern);
+            using var group = Im.Group();
             if (!_builtinWraps.TryGetValue((int)pattern, out var wrap))
             {
                 var size = ModGeneration.AnimatedHairBuilder.PatternDimension(pattern);
@@ -372,17 +372,16 @@ public sealed class DecalLibraryPanel(DecalLibrary decals, ITextureProvider text
                     ModGeneration.AnimatedHairBuilder.GeneratePattern(pattern, size), $"DTM Pattern {pattern}");
             }
 
-            ImGui.Image(wrap.Handle, new Vector2(cell));
-            ImUtf8.Text(ModGeneration.AnimatedHairBuilder.PatternLabel(pattern));
+            Im.Image.Draw(wrap.Id, new Vector2(cell));
+            Im.Text(ModGeneration.AnimatedHairBuilder.PatternLabel(pattern));
             group.Dispose();
-            if (ImGui.IsItemHovered())
-                ImUtf8.HoverTooltip("Part of the plugin — always available."u8);
-            ImGui.SameLine();
+            Im.Tooltip.OnHover("Part of the plugin — always available."u8);
+            Im.Line.Same();
         }
 
-        ImGui.NewLine();
-        ImGui.Separator();
-        ImUtf8.Text("From the game:"u8);
+        Im.Line.New();
+        Im.Separator();
+        Im.Text("From the game:"u8);
         if (!_gameGlitterTried)
         {
             _gameGlitterTried = true;
@@ -395,38 +394,37 @@ public sealed class DecalLibraryPanel(DecalLibrary decals, ITextureProvider text
 
         if (_gameGlitterWrap is { } game)
         {
-            using var group = ImUtf8.Group();
+            using var group = Im.Group();
             var aspect = game.Width / (float)game.Height;
-            ImGui.Image(game.Handle, new Vector2(cell * aspect, cell));
-            ImUtf8.Text("Glitter"u8);
+            Im.Image.Draw(game.Id, new Vector2(cell * aspect, cell));
+            Im.Text("Glitter"u8);
             group.Dispose();
-            if (ImGui.IsItemHovered())
-                ImUtf8.HoverTooltip("From the Neo Queen's Dress."u8);
+            Im.Tooltip.OnHover("From the Neo Queen's Dress."u8);
         }
         else
         {
-            ImUtf8.Text("(could not read the game texture)"u8);
+            Im.Text("(could not read the game texture)"u8);
         }
 
-        ImGui.Separator();
-        ImUtf8.Text("Imported:"u8);
+        Im.Separator();
+        Im.Text("Imported:"u8);
         if (decals.Effects.Count == 0)
         {
-            ImUtf8.Text("No effect patterns imported yet."u8);
+            Im.Text("No effect patterns imported yet."u8);
             return;
         }
 
         foreach (var (effect, idx) in decals.Effects.Select((e, i) => (e, i)))
         {
-            using var id    = ImUtf8.PushId(idx);
-            using var group = ImUtf8.Group();
+            using var id    = Im.Id.Push(idx);
+            using var group = Im.Group();
             var wrap     = textureProvider.GetFromFile(decals.EffectFilePath(effect.Id)).GetWrapOrDefault();
             var selected = effect.Id == _selectedEffect;
-            using (ImRaii.PushColor(ImGuiCol.Button, 0xFF885522u, selected))
+            using (ImGuiColor.Button.Push(new Rgba32(0xFF885522u), selected))
             {
                 var clicked = wrap != null
-                    ? ImGui.ImageButton(wrap.Handle, new Vector2(cell))
-                    : ImUtf8.Button("?"u8, new Vector2(cell));
+                    ? Im.Image.Button(wrap.Id, new Vector2(cell))
+                    : Im.Button("?"u8, new Vector2(cell));
                 if (clicked)
                 {
                     _selectedEffect = effect.Id;
@@ -435,33 +433,133 @@ public sealed class DecalLibraryPanel(DecalLibrary decals, ITextureProvider text
             }
 
             var label = effect.Name.Length > 12 ? effect.Name[..11] + "…" : effect.Name;
-            ImUtf8.Text(label);
+            Im.Text(label);
             group.Dispose();
-            if (ImGui.IsItemHovered())
-                ImUtf8.HoverTooltip($"{effect.Name}\nImported {effect.CreatedDate.ToLocalTime():yyyy-MM-dd} from {effect.OriginalFile}\nClick to select.");
-            ImGui.SameLine();
+            Im.Tooltip.OnHover(HoveredFlags.None,
+                $"{effect.Name}\nImported {effect.CreatedDate.ToLocalTime():yyyy-MM-dd} from {effect.OriginalFile}\nClick to select.");
+            Im.Line.Same();
         }
 
-        ImGui.NewLine();
+        Im.Line.New();
         if (_selectedEffect == Guid.Empty || decals.GetEffect(_selectedEffect) is not { } selectedEntry)
             return;
 
-        ImGui.Separator();
-        ImGui.SetNextItemWidth(250 * ImUtf8.GlobalScale);
-        ImUtf8.InputText("##effectRename"u8, ref _effectRename);
-        ImGui.SameLine();
-        if (ImUtf8.SmallButton("Rename"u8) && _effectRename.Trim().Length > 0)
+        Im.Separator();
+        Im.Item.SetNextWidthScaled(250);
+        Im.Input.Text("##effectRename"u8, ref _effectRename);
+        Im.Line.Same();
+        if (Im.SmallButton("Rename"u8) && _effectRename.Trim().Length > 0)
             decals.RenameEffect(selectedEntry.Id, _effectRename.Trim());
 
-        ImGui.SameLine();
-        if (ImUtf8.SmallButton("Delete"u8) && ImGui.GetIO().KeyCtrl)
+        Im.Line.Same();
+        if (Im.SmallButton("Delete"u8) && Im.Io.KeyControl)
         {
             decals.DeleteEffect(selectedEntry.Id);
             _selectedEffect = Guid.Empty;
         }
 
-        ImUtf8.HoverTooltip(
+        Im.Tooltip.OnHover(
             "Hold Control and click to delete this pattern from the library.\nBuilt mods keep working — they bake the pattern in — but animated effects referencing it fall back to their built-in pattern on the next build."u8);
+    }
+
+    #endregion
+
+    #region Marking patterns
+
+    private Guid   _selectedPattern = Guid.Empty;
+    private string _patternRename   = string.Empty;
+
+    /// <summary>
+    /// The marking-pattern side of the resource library: imported tileable images used as
+    /// custom markings on fur, scales and skin patterns — stored with the decals and
+    /// deletable here.
+    /// </summary>
+    public void DrawPatterns()
+    {
+        _fileDialog.Draw();
+
+        if (Im.Button("Import Pattern..."u8))
+            _fileDialog.OpenFileDialog("Import Marking Pattern", "Images{.png,.jpg,.jpeg,.dds,.bmp,.tga}", (success, path) =>
+            {
+                if (!success)
+                    return;
+
+                var imported = decals.ImportPattern(path);
+                if (imported != null)
+                    _selectedPattern = imported.Id;
+            });
+        Im.Tooltip.OnHover(
+            "Import an image as a marking pattern for fur, scales and skin patterns.\nBright areas take the highlight color; the image should tile cleanly in both directions."u8);
+
+        var missingExamples = ModGeneration.MarkingPatternExamples.Names
+            .Where(n => decals.Patterns.All(p => !string.Equals(p.Name, n, StringComparison.OrdinalIgnoreCase))).ToList();
+        if (missingExamples.Count > 0)
+        {
+            Im.Line.Same();
+            if (Im.Button("Add Examples"u8))
+                foreach (var name in missingExamples)
+                {
+                    using var image = ModGeneration.MarkingPatternExamples.Render(name);
+                    decals.ImportGeneratedPattern(image, name);
+                }
+
+            Im.Tooltip.OnHover("Adds a few ready-made patterns — use them as they are, or as a guide for your own images."u8);
+        }
+
+        Im.Separator();
+        if (decals.Patterns.Count == 0)
+        {
+            Im.Text("No patterns imported yet."u8);
+            return;
+        }
+
+        var cell = 72f * Im.Style.GlobalScale;
+        foreach (var (pattern, idx) in decals.Patterns.Select((p, i) => (p, i)))
+        {
+            using var id    = Im.Id.Push(idx);
+            using var group = Im.Group();
+            var wrap     = textureProvider.GetFromFile(decals.PatternFilePath(pattern.Id)).GetWrapOrDefault();
+            var selected = pattern.Id == _selectedPattern;
+            using (ImGuiColor.Button.Push(new Rgba32(0xFF885522u), selected))
+            {
+                var clicked = wrap != null
+                    ? Im.Image.Button(wrap.Id, new Vector2(cell))
+                    : Im.Button("?"u8, new Vector2(cell));
+                if (clicked)
+                {
+                    _selectedPattern = pattern.Id;
+                    _patternRename   = pattern.Name;
+                }
+            }
+
+            var label = pattern.Name.Length > 12 ? pattern.Name[..11] + "…" : pattern.Name;
+            Im.Text(label);
+            group.Dispose();
+            Im.Tooltip.OnHover(HoveredFlags.None,
+                $"{pattern.Name}\nImported {pattern.CreatedDate.ToLocalTime():yyyy-MM-dd} from {pattern.OriginalFile}\nClick to select.");
+            Im.Line.Same();
+        }
+
+        Im.Line.New();
+        if (_selectedPattern == Guid.Empty || decals.GetPattern(_selectedPattern) is not { } selectedEntry)
+            return;
+
+        Im.Separator();
+        Im.Item.SetNextWidthScaled(250);
+        Im.Input.Text("##patternRename"u8, ref _patternRename);
+        Im.Line.Same();
+        if (Im.SmallButton("Rename"u8) && _patternRename.Trim().Length > 0)
+            decals.RenamePattern(selectedEntry.Id, _patternRename.Trim());
+
+        Im.Line.Same();
+        if (Im.SmallButton("Delete"u8) && Im.Io.KeyControl)
+        {
+            decals.DeletePattern(selectedEntry.Id);
+            _selectedPattern = Guid.Empty;
+        }
+
+        Im.Tooltip.OnHover(
+            "Hold Control and click to delete this pattern from the library.\nBuilt mods keep working — they bake the pattern in — but layers referencing it lose their markings on the next build."u8);
     }
 
     #endregion

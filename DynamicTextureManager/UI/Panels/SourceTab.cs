@@ -2,17 +2,14 @@ using System;
 using System.Collections.Generic;
 using System.IO;
 using System.Linq;
-using Dalamud.Bindings.ImGui;
 using DynamicTextureManager.DTextures;
 using DynamicTextureManager.DTextures.Data;
 using DynamicTextureManager.Interop;
 using DynamicTextureManager.ModGeneration;
 using DynamicTextureManager.ModGeneration.Shaders;
 using DynamicTextureManager.Services;
-using OtterGui.Extensions;
-using OtterGui.Raii;
-using OtterGui.Services;
-using OtterGui.Text;
+using ImSharp;
+using IService = Luna.IService;
 
 namespace DynamicTextureManager.UI.Panels;
 
@@ -75,11 +72,11 @@ public sealed class SourceTab(
         }
 
         DrawCurrentSource(dTexture, _conflicts);
-        ImGui.Separator();
+        Im.Separator();
         DrawPlayerPicker(dTexture, _conflicts);
     }
 
-    /// <summary> Game paths other dTextures also target — both generated mods would override the same file. </summary>
+    /// <summary> Game paths other canvas groups also target — both generated mods would override the same file. </summary>
     private Dictionary<string, List<string>> BuildConflictMap(DTexture current)
     {
         var map = new Dictionary<string, List<string>>(StringComparer.OrdinalIgnoreCase);
@@ -89,7 +86,7 @@ public sealed class SourceTab(
             {
                 if (!map.TryGetValue(material.GamePath, out var names))
                     map[material.GamePath] = names = [];
-                names.Add(other.Name.Text);
+                names.Add($"{other.Name} (priority {overlayMods.EffectivePriority(other)})");
             }
         }
 
@@ -101,62 +98,59 @@ public sealed class SourceTab(
         var source = dTexture.Data.Source;
         if (source.IsEmpty)
         {
-            ImUtf8.Text("Nothing selected yet. Load your worn gear, skin or hair below and add the pieces to edit."u8);
+            Im.Text("Nothing here yet. Load your worn gear, skin or hair below and add a source — it becomes a canvas in this group."u8);
             return;
         }
 
         var units = _units;
 
-        ImUtf8.TextWrapped($"Selected Sources ({units.Count}) — edits always rebuild from the captured source files, so changes to the base mod carry over on the next build.");
+        Im.TextWrapped($"Canvases ({units.Count}) — every canvas rebuilds from its captured source, so changes to the base mod carry over on the next build.");
 
         string? remove = null;
-        using (var table = ImUtf8.Table("##sourceUnits"u8, 4, ImGuiTableFlags.SizingStretchProp | ImGuiTableFlags.RowBg))
+        using (var table = Im.Table.Begin("##sourceUnits"u8, 4, TableFlags.SizingStretchProp | TableFlags.RowBackground))
         {
             if (!table)
                 return;
 
-            ImUtf8.TableSetupColumn("Source"u8);
-            ImUtf8.TableSetupColumn("Based On"u8);
-            ImUtf8.TableSetupColumn("Materials"u8);
-            ImUtf8.TableSetupColumn(""u8, ImGuiTableColumnFlags.WidthFixed);
-            ImGui.TableHeadersRow();
+            table.SetupColumn("Canvas"u8);
+            table.SetupColumn("Source"u8);
+            table.SetupColumn("Materials"u8);
+            table.SetupColumn(""u8, TableColumnFlags.WidthFixed);
+            table.HeaderRow();
 
-            foreach (var (unit, idx) in units.WithIndex())
+            foreach (var (idx, unit) in units.Index())
             {
-                using var id      = ImUtf8.PushId(idx);
+                using var id      = Im.Id.Push(idx);
                 var       primary = unit.FirstOrDefault(m => !m.Overlay) ?? unit.First();
 
-                ImGui.TableNextColumn();
+                table.NextColumn();
                 var label = $"{SourceUnits.UnitLabel(primary.MdlGamePath, primary.GamePath)}: {primary.Label}";
                 if (primary.Overlay)
                 {
-                    ImUtf8.Text(label);
+                    Im.Text(label);
                 }
                 else
                 {
-                    if (ImUtf8.Selectable(label))
+                    if (Im.Selectable(label))
                         decalsTab.SelectMaterial(primary.GamePath);
-                    if (ImGui.IsItemHovered())
-                        ImUtf8.HoverTooltip("Click to edit this piece — its textures and model show in the preview column."u8);
+                    Im.Tooltip.OnHover("Click to edit this piece — its textures and model show in the preview column."u8);
                 }
 
                 foreach (var material in unit)
-                    DrawConflictMarker(material.GamePath, conflicts);
+                    DrawConflictMarker(dTexture, material.GamePath, conflicts);
 
-                ImGui.TableNextColumn();
+                table.NextColumn();
                 DrawModCell(primary.ModDirectory, primary.ModName, primary.ActualPath);
 
-                ImGui.TableNextColumn();
+                table.NextColumn();
                 var materialCount = unit.Count();
-                ImUtf8.Text(materialCount == 1 ? primary.GamePath : $"{materialCount} materials");
-                if (ImGui.IsItemHovered())
-                    ImUtf8.HoverTooltip(string.Join("\n", unit.Select(m => $"{m.Label}: {m.GamePath}")));
+                Im.Text(materialCount == 1 ? primary.GamePath : $"{materialCount} materials");
+                Im.Tooltip.OnHover(HoveredFlags.None, $"{string.Join("\n", unit.Select(m => $"{m.Label}: {m.GamePath}"))}");
 
-                ImGui.TableNextColumn();
-                if (ImUtf8.SmallButton("Remove"u8))
+                table.NextColumn();
+                if (Im.SmallButton("Remove"u8))
                     remove = unit.Key;
-                if (ImGui.IsItemHovered())
-                    ImUtf8.HoverTooltip("Remove this piece and everything belonging to it. Its colorset edits and decals are removed too."u8);
+                Im.Tooltip.OnHover("Remove this piece and everything belonging to it. Its colorset edits and decals are removed too."u8);
             }
         }
 
@@ -164,18 +158,17 @@ public sealed class SourceTab(
             RemoveUnit(dTexture, remove);
     }
 
-    /// <summary> An inline warning when another dTexture also targets this game path. </summary>
-    private static void DrawConflictMarker(string gamePath, Dictionary<string, List<string>> conflicts)
+    /// <summary> An inline warning when another canvas group also targets this game path. </summary>
+    private void DrawConflictMarker(DTexture current, string gamePath, Dictionary<string, List<string>> conflicts)
     {
         if (!conflicts.TryGetValue(gamePath, out var names))
             return;
 
-        ImGui.SameLine();
-        using (ImRaii.PushColor(ImGuiCol.Text, WarningColor))
-            ImUtf8.Text("[conflict]"u8);
-        if (ImGui.IsItemHovered())
-            ImUtf8.HoverTooltip(
-                $"Also targeted by: {string.Join(", ", names)}.\nBoth generated mods would override this material — only the one with the higher Penumbra priority takes effect.");
+        Im.Line.Same();
+        using (ImGuiColor.Text.Push(new Rgba32(WarningColor)))
+            Im.Text("[conflict]"u8);
+        Im.Tooltip.OnHover(HoveredFlags.None,
+            $"Also targeted by: {string.Join(", ", names)}.\nBoth canvas groups build mods overriding this material — the enabled one with the higher priority wins.\nThis group's priority is {overlayMods.EffectivePriority(current)}; adjust it on the Generated Mod line.");
     }
 
     /// <summary> Shows the owning mod of a file as a clickable link opening it in Penumbra, or "Vanilla". </summary>
@@ -183,51 +176,50 @@ public sealed class SourceTab(
     {
         if (modDirectory.Length == 0)
         {
-            ImUtf8.Text("Vanilla"u8);
-            if (ImGui.IsItemHovered())
-                ImUtf8.HoverTooltip("Unmodified game file."u8);
+            Im.Text("Vanilla"u8);
+            Im.Tooltip.OnHover("Unmodified game file."u8);
             return;
         }
 
-        if (ImUtf8.SmallButton($"{modName}##openMod"))
+        if (Im.SmallButton($"{modName}##openMod"))
             penumbra.OpenModInPenumbra(modDirectory);
-        if (ImGui.IsItemHovered())
-            ImUtf8.HoverTooltip($"Provided by mod \"{modName}\" ({modDirectory}).\nFile: {actualPath}\nClick to open this mod in Penumbra.");
+        Im.Tooltip.OnHover(HoveredFlags.None,
+            $"Provided by mod \"{modName}\" ({modDirectory}).\nFile: {actualPath}\nClick to open this mod in Penumbra.");
     }
 
     private void DrawPlayerPicker(DTexture dTexture, Dictionary<string, List<string>> conflicts)
     {
         if (!penumbra.Available)
         {
-            ImUtf8.Text("Penumbra is not available."u8);
+            Im.Text("Penumbra is not available."u8);
             return;
         }
 
-        if (ImUtf8.Button("Add Worn Gear..."u8))
+        if (Im.Button("Add Worn Gear..."u8))
         {
             LoadPlayer(PickerMode.Gear);
-            ImGui.OpenPopup("##sourcePicker"u8);
+            Im.Popup.Open("##sourcePicker"u8);
         }
 
-        ImUtf8.HoverTooltip("Pick one of the worn equipment pieces to add — read live from your character through Penumbra."u8);
+        Im.Tooltip.OnHover("Pick one of the worn equipment pieces to add — read live from your character through Penumbra."u8);
 
-        ImGui.SameLine();
-        if (ImUtf8.Button("Add Skin..."u8))
+        Im.Line.Same();
+        if (Im.Button("Add Skin..."u8))
         {
             LoadPlayer(PickerMode.Skin);
-            ImGui.OpenPopup("##sourcePicker"u8);
+            Im.Popup.Open("##sourcePicker"u8);
         }
 
-        ImUtf8.HoverTooltip("Add your character's bare body (or face).\nDecals on skin bake into the skin texture like tattoos and conform to the body."u8);
+        Im.Tooltip.OnHover("Add your character's bare body (or face).\nDecals on skin bake into the skin texture like tattoos and conform to the body."u8);
 
-        ImGui.SameLine();
-        if (ImUtf8.Button("Add Hair / Tail..."u8))
+        Im.Line.Same();
+        if (Im.Button("Add Hair / Tail..."u8))
         {
             LoadPlayer(PickerMode.Hair);
-            ImGui.OpenPopup("##sourcePicker"u8);
+            Im.Popup.Open("##sourcePicker"u8);
         }
 
-        ImUtf8.HoverTooltip(
+        Im.Tooltip.OnHover(
             "Add your character's current hairstyle, tail or ears — the pieces the game colors with your hair and highlight colors.\nThey have no color texture — the game blends your colors by the normal map, so edits adjust shine or animate highlights.\nFurred tails (Miqo'te, Hrothgar) qualify; scale tails (Au Ra) are skin-shaded and cannot be edited here. Miqo'te ears are part of the hairstyle and come with it."u8);
 
         DrawPickerPopup(dTexture, conflicts);
@@ -241,28 +233,28 @@ public sealed class SourceTab(
     {
         // Without a floor the popup sizes to its longest unwrappable word and error text
         // wraps into a one-word-per-line column.
-        ImGui.SetNextWindowSizeConstraints(new System.Numerics.Vector2(360, 0) * ImUtf8.GlobalScale,
-            new System.Numerics.Vector2(700, 600) * ImUtf8.GlobalScale);
-        using var popup = ImUtf8.Popup("##sourcePicker"u8);
+        Im.Window.SetNextSizeConstraints(new System.Numerics.Vector2(360, 0) * Im.Style.GlobalScale,
+            new System.Numerics.Vector2(700, 600) * Im.Style.GlobalScale);
+        using var popup = Im.Popup.Begin("##sourcePicker"u8);
         if (!popup)
             return;
 
         if (_error.Length > 0)
         {
-            ImUtf8.TextWrapped(_error);
+            Im.TextWrapped(_error);
             return;
         }
 
         if (_groups.Count == 0)
         {
-            ImUtf8.Text("Nothing found on your character."u8);
+            Im.Text("Nothing found on your character."u8);
             return;
         }
 
         var sourceMaterials = dTexture.Data.Source.Materials;
-        foreach (var (group, groupIdx) in _groups.WithIndex())
+        foreach (var (groupIdx, group) in _groups.Index())
         {
-            using var id      = ImUtf8.PushId(groupIdx);
+            using var id      = Im.Id.Push(groupIdx);
             var       primary = group.Materials.FirstOrDefault(m => !m.IsOverlayPart) ?? group.Materials[0];
             var added = group.Materials.Any(m => sourceMaterials.Any(s
                 => string.Equals(s.GamePath, m.GamePath, StringComparison.OrdinalIgnoreCase)));
@@ -275,31 +267,31 @@ public sealed class SourceTab(
 
             var mod   = primary.ModName.Length > 0 ? primary.ModName : "Vanilla";
             var label = $"{group.Label}  —  {mod}";
-            using (ImRaii.Disabled(added || fromOverlay))
+            using (Im.Disabled(added || fromOverlay))
             {
-                if (ImUtf8.Selectable(label))
+                if (Im.Selectable(label))
                 {
                     AddGroup(dTexture, group);
-                    ImGui.CloseCurrentPopup();
+                    Im.Popup.CloseCurrent();
                 }
             }
 
-            if (ImGui.IsItemHovered(ImGuiHoveredFlags.AllowWhenDisabled))
-                ImUtf8.HoverTooltip(fromOverlay
+            Im.Tooltip.OnHover(HoveredFlags.AllowWhenDisabled,
+                $"{(fromOverlay
                     ? "A generated overlay currently owns files of this piece — disable it and reload to add it."
                     : added
                         ? "Already part of this mod's source."
-                        : string.Join("\n", group.Materials.Select(m => $"{m.Label}: {m.GamePath}")));
+                        : string.Join("\n", group.Materials.Select(m => $"{m.Label}: {m.GamePath}")))}");
 
             if (added)
             {
-                ImGui.SameLine();
-                using (ImRaii.PushColor(ImGuiCol.Text, 0xFF40C040u))
-                    ImUtf8.Text("(added)"u8);
+                Im.Line.Same();
+                using (ImGuiColor.Text.Push(new Rgba32(0xFF40C040u)))
+                    Im.Text("(added)"u8);
             }
 
             foreach (var material in group.Materials)
-                DrawConflictMarker(material.GamePath, conflicts);
+                DrawConflictMarker(dTexture, material.GamePath, conflicts);
         }
     }
 
@@ -390,36 +382,126 @@ public sealed class SourceTab(
             var race     = EquipmentBodyRace(groups) ?? ModelUvReader.BodyMaterialRace(body[0].Material.GamePath);
             var topModel = ModelUvReader.BodyModelSetForRace(race)[0];
 
-            // The resource tree also surfaces skin materials the body does NOT render with
-            // (e.g. the vanilla _a material while a body mod is active) — those only show on
-            // stray gear-embedded patches, so decals on them are effectively invisible. Keep
-            // the materials the resolved body models actually reference.
-            var active = uvReader.ResolvedBodyMaterialNames(race);
-            var usable = body.Where(e => active.Contains(Path.GetFileName(e.Material.GamePath))).ToList();
-            if (usable.Count == 0)
-                usable = body;
-
-            // Several body materials painting the SAME diffuse texture are one canvas (body
-            // mods split torso/legs into materials sharing one full-body texture, and decals
-            // continue across that seam) — list the shared canvas once.
+            // The body's canvases derive from the materials the resolved SmallClothes models
+            // reference — NOT from tree discovery order. The tree also surfaces skin
+            // materials the body does not render with (the vanilla _a patches gear embeds
+            // while a body mod is active), can miss the real torso material entirely under
+            // covering gear, and lists absolute-pathed materials under their foreign race
+            // code, so names match with the wearer's race substituted on both sides. Every
+            // rendered model-referenced skin material is a canvas — hands/feet-only ones
+            // included (feet replacements, false-nail hands: their skin must keep taking
+            // the body bakes) — but ranked torso → legs → hands → feet, so a part mod can
+            // never read as the whole body mod: the torso stays the primary canvas and the
+            // unit's label. Model-referenced extras the tree never surfaced are only
+            // rebuilt for the torso/legs (the body proper, hidden by covering gear);
+            // hand/feet extras missing from the tree are the nail/claw plates the overlay
+            // scan below already offers, and stay overlay parts. Several materials
+            // painting the SAME diffuse texture are one canvas (body mods split torso/legs
+            // into materials sharing one full-body texture) — the shared canvas lists once.
+            var slots     = uvReader.ResolvedBodyMaterialSlots(race);
             var byDiffuse = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
-            var deduped   = usable.Where(e => e.Diffuse.Length == 0 || byDiffuse.Add(e.Diffuse)).ToList();
+            var deduped   = new List<(ResolvedMaterial Material, string Diffuse)>();
+            var matched   = new HashSet<int>();
+            foreach (var (name, mask) in slots
+                         .OrderBy(kvp => int.TrailingZeroCount(kvp.Value))
+                         .ThenBy(kvp => kvp.Key, StringComparer.OrdinalIgnoreCase)
+                         .Select(kvp => (kvp.Key, kvp.Value)))
+            {
+                var index = body.FindIndex(e => string.Equals(
+                    ModelUvReader.SubstituteBodyRace(Path.GetFileName(e.Material.GamePath), race), name,
+                    StringComparison.OrdinalIgnoreCase));
+                if (index >= 0)
+                    matched.Add(index);
+
+                var entry = index >= 0            ? body[index]
+                    : (mask & 0b0011) != 0        ? SynthesizeBodyMaterial(name, topModel)
+                                                  : null;
+                if (entry is { } e && (e.Diffuse.Length == 0 || byDiffuse.Add(e.Diffuse)))
+                    deduped.Add(e);
+            }
+
+            // Tree skin materials no resolved body model references, painting their own
+            // textures. The ones the VANILLA SmallClothes set renders with are the SAME
+            // body under an alternate material set — the vanilla-compat material
+            // bibo-family mods override so gear-embedded skin patches match (Muse's _a;
+            // worn false-nail gloves render their hand skin with it). Those join as
+            // BODY MIRRORS: not a canvas of their own — every body bake replays onto
+            // their texture set through the vanilla body layout, which every gear skin
+            // patch maps into. The rest (nail-plate-style extras) stay plain overlay
+            // parts. Ones sharing a canvas diffuse already render with the canvas
+            // texture and need no entry of their own.
+            var vanillaNames = uvReader.VanillaBodyMaterialNames(race);
+            var leftovers    = new List<ResolvedMaterial>();
+            if (deduped.Count > 0)
+                for (var i = 0; i < body.Count; ++i)
+                {
+                    if (matched.Contains(i) || body[i].Diffuse.Length == 0 || !byDiffuse.Add(body[i].Diffuse))
+                        continue;
+
+                    var mirror = vanillaNames.Contains(
+                        ModelUvReader.SubstituteBodyRace(Path.GetFileName(body[i].Material.GamePath), race));
+                    leftovers.Add(body[i].Material with
+                    {
+                        Label         = mirror ? "Gear Skin" : body[i].Material.Label,
+                        MdlGamePath   = topModel,
+                        MdlActualPath = string.Empty,
+                        IsOverlayPart = true,
+                        IsBodyMirror  = mirror,
+                    });
+                }
+
+            // The vanilla-compat set exists whether or not worn gear currently exposes it —
+            // rebuild missing mirrors from their conventional paths, so the outfit at add
+            // time never decides whether gear skin matches.
+            if (deduped.Count > 0)
+            {
+                var present = deduped.Select(e => e.Material).Concat(leftovers)
+                    .Select(m => ModelUvReader.SubstituteBodyRace(Path.GetFileName(m.GamePath), race))
+                    .ToHashSet(StringComparer.OrdinalIgnoreCase);
+                foreach (var name in vanillaNames.Where(n => !slots.ContainsKey(n) && !present.Contains(n)))
+                {
+                    if (SynthesizeBodyMaterial(name, topModel) is not { } entry
+                     || entry.Diffuse.Length == 0 || !byDiffuse.Add(entry.Diffuse))
+                        continue;
+
+                    leftovers.Add(entry.Material with { Label = "Gear Skin", IsOverlayPart = true, IsBodyMirror = true });
+                }
+            }
+
+            // Resolved models unreadable (nonstandard bodies) — the tree's view is all there is.
+            if (deduped.Count == 0)
+                deduped = body.Where(e => e.Diffuse.Length == 0 || byDiffuse.Add(e.Diffuse)).ToList();
 
             // The body is ONE unit: its skin canvases plus the overlay parts sharing the same
             // SmallClothes models (nails, claws, accents — materials with their OWN diffuse a
             // body tattoo can continue onto; colorset-only piercings and hair-shader pieces
-            // stay excluded, see ModelUvReader.GetBodyOverlayMaterials). Adding "Body" adds
-            // everything related to the bare body.
-            var bodySource = new SourcePath { GamePath = body[0].Material.GamePath, ActualPath = body[0].Material.ActualPath };
+            // stay excluded, see ModelUvReader.GetBodyOverlayMaterials), plus the FACE skin —
+            // body and face are one continuous surface, so full-coverage patterns and
+            // overlapping tattoos must continue across the neck seam instead of the face
+            // being its own competing canvas. Face materials keep the body's model key so
+            // the whole unit lists, selects and removes as one; their real geometry derives
+            // from the material path (see ModelUvReader.GetFaceMesh).
+            var bodySource = new SourcePath { GamePath = deduped[0].Material.GamePath, ActualPath = deduped[0].Material.ActualPath };
+            var faceMaterials = groups
+                .Where(g => g.Materials.Count > 0
+                 && g.Materials[0].MdlGamePath.Contains("/obj/face/", StringComparison.OrdinalIgnoreCase))
+                .SelectMany(g => g.Materials)
+                .Where(m => ModelUvReader.IsFaceSkinMaterial(m.GamePath) && SkinInfo(m).IsSkin && seen.Add(m.GamePath))
+                .Select(m => m with { MdlGamePath = topModel, MdlActualPath = string.Empty, IsOverlayPart = true, Label = "Face" });
+            var canvasNames = deduped
+                .Select(e => ModelUvReader.SubstituteBodyRace(Path.GetFileName(e.Material.GamePath), race))
+                .ToHashSet(StringComparer.OrdinalIgnoreCase);
             var bodyUnit = deduped
                 .Select(e => e.Material with { MdlGamePath = topModel, MdlActualPath = string.Empty })
-                .Concat(uvReader.GetBodyOverlayMaterials(bodySource).Select(o => ResolveOverlayMaterial(o, topModel)))
+                .Concat(uvReader.GetBodyOverlayMaterials(bodySource)
+                    .Where(o => !canvasNames.Contains(o.Name))
+                    .Select(o => ResolveOverlayMaterial(o, topModel)))
+                .Concat(leftovers)
+                .Concat(faceMaterials)
                 .ToList();
             ret.Add(new ResolvedModelGroup("Body", bodyUnit));
         }
 
-        // Skin means the BODY, one unit — the face is its own category and stays out of this
-        // picker (like hair is just the hair).
         return ret;
     }
 
@@ -488,6 +570,26 @@ public sealed class SourceTab(
         DynamicTextureManager.Log.Debug(
             $"Hair candidate {material.GamePath}: shader {mtrl.ShaderPackage.Name}, kind {kind}, keys [{string.Join(", ", mtrl.ShaderPackage.ShaderKeys.Select(k => $"0x{k.Key:X8}=0x{k.Value:X8}"))}]");
         return kind is MaterialKind.Hair;
+    }
+
+    /// <summary>
+    /// A body material the resolved models render with but the resource tree never surfaced —
+    /// covering gear can embed no torso skin patch, leaving the real body material without a
+    /// tree node while e.g. a feet replacement's still has one. Rebuilt from its conventional
+    /// path; null when it turns out not to be a skin material.
+    /// </summary>
+    private (ResolvedMaterial Material, string Diffuse)? SynthesizeBodyMaterial(string name, string topModel)
+    {
+        var gamePath = ModelUvReader.BodyMaterialGamePath(name, "v0001");
+        if (gamePath == null)
+            return null;
+
+        var actual   = penumbra.ResolvePlayerPath(gamePath);
+        var mod      = Path.IsPathRooted(actual) ? penumbra.IdentifyModOfFile(actual) : null;
+        var material = new ResolvedMaterial(gamePath, actual, OverlayLabel(name), mod?.ModDirectory ?? string.Empty,
+            mod?.ModName ?? string.Empty, topModel, string.Empty);
+        var (isSkin, diffuse) = SkinInfo(material);
+        return isSkin ? (material, diffuse) : null;
     }
 
     /// <summary> Turn a discovered overlay-part material into a pickable entry, resolving its actual file and owning mod. </summary>
@@ -575,6 +677,7 @@ public sealed class SourceTab(
                 MdlGamePath   = material.MdlGamePath,
                 MdlActualPath = material.MdlActualPath,
                 Overlay       = material.IsOverlayPart,
+                BodyMirror    = material.IsBodyMirror,
             });
 
             // A hairstyle brings its model's sibling materials along as hidden companions.

@@ -239,78 +239,21 @@ public static class SurfaceDecalBaker
     private static SurfaceProjection ComputeSurfaceProjectionUncached(MaterialMesh mesh, Vector3 anchor, Vector3 normal,
         Vector3 tangent, Vector3 bitangent, float maxWalkDistance)
     {
+        // The walk itself is shared with the procedural flow field — one implementation of
+        // the transported frame, two consumers (decal-plane coordinates here, flow there).
+        var field = SurfaceFlowField.TransportWalk(mesh, anchor, normal, tangent, bitangent, maxWalkDistance);
+
         var local   = new Vector2[mesh.VertexCount];
         var reached = new bool[mesh.VertexCount];
-        var (canonical, neighbors) = mesh.GetOrBuildAdjacency();
-
-        var seed = NearestVertex(mesh, anchor);
-        if (seed < 0)
-            return new SurfaceProjection { Local = local, Reached = reached };
-
-        var seedCanonical = canonical[seed];
-        var toSeed        = mesh.Positions[seedCanonical] - anchor;
-        var seedDist       = toSeed.Length();
-        if (seedDist > maxWalkDistance)
-            return new SurfaceProjection { Local = local, Reached = reached };
-
-        var bestDistance = new float[mesh.VertexCount];
-        Array.Fill(bestDistance, float.MaxValue);
-        var canonLocal    = new Vector2[mesh.VertexCount];
-        var canonTangent  = new Vector3[mesh.VertexCount];
-        var canonBitangent = new Vector3[mesh.VertexCount];
-        var canonReached  = new bool[mesh.VertexCount];
-
-        var planarSeed = toSeed - normal * Vector3.Dot(toSeed, normal);
-        canonLocal[seedCanonical]     = new Vector2(Vector3.Dot(planarSeed, tangent), Vector3.Dot(planarSeed, bitangent));
-        canonTangent[seedCanonical]   = tangent;
-        canonBitangent[seedCanonical] = bitangent;
-        canonReached[seedCanonical]   = true;
-        bestDistance[seedCanonical]   = seedDist;
-
-        var queue = new PriorityQueue<int, float>();
-        queue.Enqueue(seedCanonical, seedDist);
-
-        while (queue.TryDequeue(out var u, out var du))
-        {
-            if (du > bestDistance[u])
-                continue; // stale entry superseded by a shorter path already processed
-
-            var uTangent   = canonTangent[u];
-            var uBitangent = canonBitangent[u];
-            var uNormal    = mesh.Normals[u].LengthSquared() > 1e-8f ? Vector3.Normalize(mesh.Normals[u]) : normal;
-            var uLocal     = canonLocal[u];
-            var uPos       = mesh.Positions[u];
-
-            foreach (var v in neighbors[u])
-            {
-                var edge    = mesh.Positions[v] - uPos;
-                var edgeLen = edge.Length();
-                if (edgeLen < 1e-9f)
-                    continue;
-
-                var newDist = du + edgeLen;
-                if (newDist > maxWalkDistance || newDist >= bestDistance[v])
-                    continue;
-
-                var planar = edge - uNormal * Vector3.Dot(edge, uNormal);
-                canonLocal[v]     = uLocal + new Vector2(Vector3.Dot(planar, uTangent), Vector3.Dot(planar, uBitangent));
-                var vNormal       = mesh.Normals[v].LengthSquared() > 1e-8f ? Vector3.Normalize(mesh.Normals[v]) : uNormal;
-                var rotation      = MinimalRotation(uNormal, vNormal);
-                canonTangent[v]   = Vector3.Normalize(Vector3.Transform(uTangent, rotation));
-                canonBitangent[v] = Vector3.Normalize(Vector3.Transform(uBitangent, rotation));
-                canonReached[v]   = true;
-                bestDistance[v]   = newDist;
-                queue.Enqueue(v, newDist);
-            }
-        }
+        var (canonical, _) = mesh.GetOrBuildAdjacency();
 
         for (var i = 0; i < mesh.VertexCount; ++i)
         {
             var c = canonical[i];
-            if (!canonReached[c])
+            if (!field.Reached[c])
                 continue;
 
-            local[i]   = canonLocal[c];
+            local[i]   = field.Local[c];
             reached[i] = true;
         }
 
@@ -330,43 +273,6 @@ public static class SurfaceDecalBaker
     /// </summary>
     public static float WalkRadius(float worldWidth, float worldHeight)
         => 0.5f * MathF.Sqrt(worldWidth * worldWidth + worldHeight * worldHeight) * 2.5f + 0.03f;
-
-    /// <summary> The nearest raw vertex index to a point, by straight-line distance — the walk's seed. </summary>
-    private static int NearestVertex(MaterialMesh mesh, Vector3 point)
-    {
-        var best     = -1;
-        var bestDist = float.MaxValue;
-        for (var i = 0; i < mesh.Positions.Length; ++i)
-        {
-            var dist = (mesh.Positions[i] - point).LengthSquared();
-            if (dist < bestDist)
-            {
-                bestDist = dist;
-                best     = i;
-            }
-        }
-
-        return best;
-    }
-
-    /// <summary> The shortest-arc rotation that maps one direction onto another. </summary>
-    private static Quaternion MinimalRotation(Vector3 from, Vector3 to)
-    {
-        var dot = Vector3.Dot(from, to);
-        if (dot > 0.9999f)
-            return Quaternion.Identity;
-
-        if (dot < -0.9999f)
-        {
-            var axis = Vector3.Cross(from, MathF.Abs(from.X) < 0.9f ? Vector3.UnitX : Vector3.UnitY);
-            axis = Vector3.Normalize(axis);
-            return Quaternion.CreateFromAxisAngle(axis, MathF.PI);
-        }
-
-        var cross = Vector3.Cross(from, to);
-        var q     = new Quaternion(cross.X, cross.Y, cross.Z, 1f + dot);
-        return Quaternion.Normalize(q);
-    }
 
     /// <summary> Per-vertex decal-space projection, see <see cref="ComputeSurfaceProjection"/>. </summary>
     public sealed class SurfaceProjection

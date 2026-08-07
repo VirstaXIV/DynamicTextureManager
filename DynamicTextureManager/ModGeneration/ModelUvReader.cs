@@ -7,7 +7,7 @@ using System.Text.RegularExpressions;
 using Dalamud.Plugin.Services;
 using DynamicTextureManager.DTextures.Data;
 using DynamicTextureManager.Interop;
-using OtterGui.Services;
+using IService = Luna.IService;
 using Penumbra.GameData.Files;
 
 namespace DynamicTextureManager.ModGeneration;
@@ -45,6 +45,13 @@ public sealed class MaterialMesh
     public required bool[] TriangleEditable { get; init; }
 
     public required int PartCount { get; init; }
+
+    /// <summary>
+    /// Per-triangle source-model index for merged model sets — the body canvas keeps the
+    /// SmallClothes order (0 top/chest, 1 legs, 2 hands, 3 feet) even when a model fails to
+    /// load; single-model reads are all 0. Drives per-body-part weights in procedural bakes.
+    /// </summary>
+    public required byte[] TriangleUnit { get; init; }
 
     /// <summary>
     /// Shape keys in the model's own order (indices must line up with the game's enabled-
@@ -107,9 +114,14 @@ public sealed class MaterialMesh
             Connect(c2, c0);
         }
 
+        // Sorted so visit order never depends on hash-set iteration — geodesic walks
+        // tie-break on neighbor order, and builds must be byte-identical across runs.
         var neighbors = new List<int>[Positions.Length];
         for (var v = 0; v < Positions.Length; ++v)
+        {
             neighbors[v] = neighborSets[v] is { } set ? [.. set] : [];
+            neighbors[v].Sort();
+        }
 
         _adjacency = (canonical, neighbors);
         return _adjacency.Value;
@@ -171,6 +183,16 @@ public sealed class ModelUvReader(IDataManager dataManager, PenumbraService penu
     public static bool IsBodySkinMaterial(string materialGamePath)
         => BodySkinMaterialPattern.IsMatch(materialGamePath);
 
+    /// <summary>
+    /// Face skin materials. The face keeps its own model (unlike the body), but its material
+    /// path carries the correct race/face ids — faces are per-character, no race substitution.
+    /// </summary>
+    private static readonly Regex FaceSkinMaterialPattern =
+        new(@"^chara/human/(c\d{4})/obj/face/(f\d{4})/material/", RegexOptions.IgnoreCase | RegexOptions.Compiled);
+
+    public static bool IsFaceSkinMaterial(string materialGamePath)
+        => FaceSkinMaterialPattern.IsMatch(materialGamePath);
+
     /// <summary> Body material file name (mt_cXXXXbYYYY_*.mtrl) → its conventional game path; the race/body codes live in the name itself. </summary>
     private static readonly Regex BodyMaterialNamePattern =
         new(@"^mt_(c\d{4})(b\d{4})_", RegexOptions.IgnoreCase | RegexOptions.Compiled);
@@ -178,7 +200,7 @@ public sealed class ModelUvReader(IDataManager dataManager, PenumbraService penu
     private static readonly Regex MaterialVariantPattern =
         new(@"/material/(v\d{4})/", RegexOptions.IgnoreCase | RegexOptions.Compiled);
 
-    private static string? BodyMaterialGamePath(string materialFileName, string variant)
+    public static string? BodyMaterialGamePath(string materialFileName, string variant)
     {
         var match = BodyMaterialNamePattern.Match(materialFileName);
         return match.Success
@@ -192,7 +214,7 @@ public sealed class ModelUvReader(IDataManager dataManager, PenumbraService penu
     /// mt_c0201b0001_bibo.mtrl on a c0201 body. Matching must do the same, or the torso of a
     /// mixed-authoring body mod never matches its own material.
     /// </summary>
-    private static string SubstituteBodyRace(string materialFileName, string race)
+    public static string SubstituteBodyRace(string materialFileName, string race)
         => BodyMaterialNamePattern.IsMatch(materialFileName) ? $"mt_{race}{materialFileName[8..]}" : materialFileName;
 
     /// <summary> Resolve and read a game file: recorded actual path, then Penumbra resolution, then vanilla. </summary>
@@ -256,6 +278,12 @@ public sealed class ModelUvReader(IDataManager dataManager, PenumbraService penu
         if (IsBodySkinMaterial(source.GamePath) && GetBodyMesh(source) is { } bodyMesh)
             return bodyMesh;
 
+        // Face skin: the model derives from the material path itself. Must run before the
+        // generic branch — face sources travel inside the Body unit and record the body's
+        // model path as their unit key, which is not their geometry.
+        if (IsFaceSkinMaterial(source.GamePath) && GetFaceMesh(source) is { } faceMesh)
+            return faceMesh;
+
         if (source.MdlGamePath.Length == 0)
             return null;
 
@@ -314,32 +342,68 @@ public sealed class ModelUvReader(IDataManager dataManager, PenumbraService penu
 
     /// <summary>
     /// Material file names the resolved SmallClothes body models reference — i.e. the skin
-    /// materials the character's body actually renders with. A body material outside this set
-    /// (e.g. the vanilla _a material while a body mod is active) only shows on stray gear-
-    /// embedded patches, so decals on it are effectively invisible.
+    /// materials the character's body actually renders with — each mapped to a bitmask of the
+    /// SmallClothes slots referencing it (bit 0 top, 1 legs, 2 hands, 3 feet). Torso/legs bits
+    /// mark THE body canvas; a hands/feet-only material is a part (feet replacements, claws,
+    /// nails). A body material outside this set (e.g. the vanilla _a material while a body mod
+    /// is active) only shows on stray gear-embedded patches, so decals on it are effectively
+    /// invisible.
     /// </summary>
-    public HashSet<string> ResolvedBodyMaterialNames(string race)
+    public Dictionary<string, int> ResolvedBodyMaterialSlots(string race)
     {
-        var names = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
-        foreach (var gamePath in BodyModelSetForRace(race))
+        var slots = new Dictionary<string, int>(StringComparer.OrdinalIgnoreCase);
+        var set   = BodyModelSetForRace(race);
+        for (var i = 0; i < set.Length; ++i)
         {
             try
             {
-                var actual = penumbra.ResolvePlayerPath(gamePath);
+                var actual = penumbra.ResolvePlayerPath(set[i]);
                 var bytes = actual.Length > 0 && Path.IsPathRooted(actual) && File.Exists(actual)
                     ? File.ReadAllBytes(actual)
-                    : dataManager.GetFile(gamePath)?.Data;
+                    : dataManager.GetFile(set[i])?.Data;
                 if (bytes == null)
                     continue;
 
                 // Model material names carry their authoring race — normalize to the wearer's
                 // race, exactly like the game's load-time substitution.
                 foreach (var material in new MdlFile(bytes).Materials)
+                {
+                    var name = SubstituteBodyRace(Path.GetFileName(material), race);
+                    slots[name] = slots.GetValueOrDefault(name) | (1 << i);
+                }
+            }
+            catch (Exception ex)
+            {
+                DynamicTextureManager.Log.Warning($"Could not read materials of body model {set[i]}: {ex.Message}");
+            }
+        }
+
+        return slots;
+    }
+
+    /// <summary>
+    /// Material file names the UNMODDED SmallClothes body models reference (race-substituted)
+    /// — the vanilla body material family. A tree material in this set while the resolved
+    /// body renders with something else is the vanilla-compat set bibo-family mods override
+    /// for gear-embedded skin patches: the SAME body under an alternate material.
+    /// </summary>
+    public HashSet<string> VanillaBodyMaterialNames(string race)
+    {
+        var names = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+        foreach (var gamePath in BodyModelSetForRace(race))
+        {
+            try
+            {
+                var bytes = dataManager.GetFile(gamePath)?.Data;
+                if (bytes == null)
+                    continue;
+
+                foreach (var material in new MdlFile(bytes).Materials)
                     names.Add(SubstituteBodyRace(Path.GetFileName(material), race));
             }
             catch (Exception ex)
             {
-                DynamicTextureManager.Log.Warning($"Could not read materials of body model {gamePath}: {ex.Message}");
+                DynamicTextureManager.Log.Warning($"Could not read materials of vanilla body model {gamePath}: {ex.Message}");
             }
         }
 
@@ -376,22 +440,141 @@ public sealed class ModelUvReader(IDataManager dataManager, PenumbraService penu
 
     private readonly Dictionary<string, (long AtMs, (string GamePath, string Actual)[] Resolved, string Joined)> _bodyResolveCache = [];
 
-    /// <summary> Read and parse the resolved model set — only on cache misses. </summary>
-    private List<MdlFile> LoadBodyModels((string GamePath, string Actual)[] resolved)
+    /// <summary>
+    /// Read and parse the resolved model set — only on cache misses. Units keep the
+    /// SmallClothes slot index (0 top, 1 legs, 2 hands, 3 feet) even when a model fails
+    /// to load, so per-part weights stay stable.
+    /// </summary>
+    private (List<MdlFile> Models, List<byte> Units) LoadBodyModels((string GamePath, string Actual)[] resolved)
     {
         var models = new List<MdlFile>();
-        foreach (var (gamePath, actual) in resolved)
+        var units  = new List<byte>();
+        for (var i = 0; i < resolved.Length; ++i)
         {
+            var (gamePath, actual) = resolved[i];
             var bytes = actual.Length > 0 && Path.IsPathRooted(actual) && File.Exists(actual)
                 ? File.ReadAllBytes(actual)
                 : dataManager.GetFile(gamePath)?.Data;
             if (bytes != null)
+            {
                 models.Add(new MdlFile(bytes));
+                units.Add((byte)i);
+            }
             else
+            {
                 DynamicTextureManager.Log.Warning($"Could not load body model {gamePath} (file \"{actual}\").");
+            }
         }
 
-        return models;
+        return (models, units);
+    }
+
+    /// <summary>
+    /// The face model's geometry for a face skin material: model path derived from the
+    /// material path (chara/human/cX/obj/face/fY/model/cXfY_fac.mdl), only the source
+    /// material's own meshes editable — the face model also carries iris/brow/occlusion
+    /// meshes whose UVs live in other textures.
+    /// </summary>
+    private MaterialMesh? GetFaceMesh(SourcePath source)
+    {
+        var match = FaceSkinMaterialPattern.Match(source.GamePath);
+        if (!match.Success)
+            return null;
+
+        var race      = match.Groups[1].Value;
+        var face      = match.Groups[2].Value;
+        var bodyRace  = BodyTopModelPattern.Match(source.MdlGamePath) is { Success: true } body ? body.Groups[1].Value : race;
+        var modelPath = $"chara/human/{race}/obj/face/{face}/model/{race}{face}_fac.mdl";
+        var resolved  = penumbra.ResolvePlayerPath(modelPath);
+        var key       = $"face|{source.GamePath}|{resolved}|{bodyRace}";
+        if (_meshCache.TryGetValue(key, out var cached))
+            return cached;
+
+        MaterialMesh? mesh = null;
+        try
+        {
+            var bytes = LoadGameFile(modelPath);
+            if (bytes == null)
+            {
+                DynamicTextureManager.Log.Warning($"Could not load face model {modelPath} for its geometry.");
+            }
+            else
+            {
+                var fileName = Path.GetFileName(source.GamePath);
+                mesh = ReadMeshes([new MdlFile(bytes)],
+                    material => material.EndsWith(fileName, StringComparison.OrdinalIgnoreCase), fileName, modelPath);
+                if (mesh != null)
+                {
+                    if (!string.Equals(race, bodyRace, StringComparison.OrdinalIgnoreCase))
+                        ApplyRacialHeadAlignment(mesh, race, bodyRace);
+                    DynamicTextureManager.Log.Information(
+                        $"Face geometry of {source.GamePath}: {mesh.VertexCount} vertices, {mesh.TriangleCount} triangles.");
+                }
+            }
+        }
+        catch (Exception ex)
+        {
+            DynamicTextureManager.Log.Warning($"Could not read face geometry for {source.GamePath}: {ex.Message}");
+        }
+
+        _meshCache[key] = mesh;
+        return mesh;
+    }
+
+    private PbdFile? _pbd;
+    private bool     _pbdLoaded;
+
+    /// <summary>
+    /// A face authored for one race sitting on a body of another (the face path carries the
+    /// character's true race, body models resolve through the body race): raw model spaces
+    /// differ by the racial pre-bone deformer the game applies at runtime — the face sat "a
+    /// bit forward and down" of the neck. Apply the head bone's deform inverse, mapping the
+    /// face into the body's raw space, so preview and world-space pattern agree with the
+    /// body. Single-bone (j_kao) is a rigid approximation — exactly the offset in question.
+    /// </summary>
+    private void ApplyRacialHeadAlignment(MaterialMesh mesh, string faceRace, string bodyRace)
+    {
+        try
+        {
+            if (!_pbdLoaded)
+            {
+                _pbdLoaded = true;
+                var bytes = LoadGameFile("chara/xls/boneDeformer/human.pbd");
+                if (bytes != null)
+                    _pbd = new PbdFile(bytes);
+            }
+
+            if (_pbd == null)
+                return;
+
+            // The well-defined deform chain runs base-model → derived-skeleton (the game
+            // deforms c0201-authored bodies onto a c0801 skeleton); the face already lives
+            // in the derived space, so its inverse brings it back to the body's raw space.
+            // The NECK bone governs the junction ring on both sides — the head bone's deform
+            // overshoots by its extra head-relative motion (verified ~1.5 cm too high).
+            var deformer = _pbd.GetRacialDeformer(
+                (Penumbra.GameData.Enums.GenderRace)int.Parse(faceRace[1..]),
+                (Penumbra.GameData.Enums.GenderRace)int.Parse(bodyRace[1..]));
+            if (!deformer.DeformMatrices.TryGetValue("j_kubi", out var matrix)
+             && !deformer.DeformMatrices.TryGetValue("j_kao", out matrix))
+                return;
+
+            var inverse = matrix.Invert();
+            for (var v = 0; v < mesh.Positions.Length; ++v)
+            {
+                mesh.Positions[v] = inverse.Apply(mesh.Positions[v]);
+                var normal = inverse.Apply(mesh.Normals[v]) - inverse.Translation;
+                if (normal.LengthSquared() > 1e-12f)
+                    mesh.Normals[v] = Vector3.Normalize(normal);
+            }
+
+            DynamicTextureManager.Log.Information(
+                $"Face aligned into the body's raw space via the racial head deformer ({faceRace} -> {bodyRace}).");
+        }
+        catch (Exception ex)
+        {
+            DynamicTextureManager.Log.Warning($"Could not align the face to the body race: {ex.Message}");
+        }
     }
 
     private MaterialMesh? GetBodyMesh(SourcePath source)
@@ -404,7 +587,7 @@ public sealed class ModelUvReader(IDataManager dataManager, PenumbraService penu
         MaterialMesh? mesh = null;
         try
         {
-            var models = LoadBodyModels(resolved);
+            var (models, units) = LoadBodyModels(resolved);
             var (sourceName, _, editableNames) = ComputeEditableBodyMaterials(source, race, models);
 
             // The merged mesh's GamePath is deliberately the material path: it must not look
@@ -412,7 +595,27 @@ public sealed class ModelUvReader(IDataManager dataManager, PenumbraService penu
             // gear's variant mask to the nude body.
             mesh = ReadMeshes(models,
                 material => editableNames.Contains(SubstituteBodyRace(Path.GetFileName(material), race)), sourceName,
-                source.GamePath, includeContext: true);
+                source.GamePath, includeContext: true, modelUnits: units);
+
+            // Vanilla-compat set: gear-embedded skin patches render with the VANILLA body
+            // material, and bibo-family mods override its textures so gear matches (Muse's
+            // _a) — worn false-nail gloves render their hand skin with it. The resolved
+            // (modded) body models never reference it, but the UNMODDED SmallClothes set
+            // does, and every gear skin patch maps into that layout: bake through the
+            // vanilla set and any worn piece matches.
+            if (mesh == null)
+            {
+                var vanilla = LoadBodyModels(Array.ConvertAll(BodyModelSetForRace(race), p => (p, string.Empty)));
+                var (vanillaName, _, vanillaEditable) = ComputeEditableBodyMaterials(source, race, vanilla.Models);
+                mesh = ReadMeshes(vanilla.Models,
+                    material => vanillaEditable.Contains(SubstituteBodyRace(Path.GetFileName(material), race)), vanillaName,
+                    source.GamePath, includeContext: true, modelUnits: vanilla.Units);
+                if (mesh != null)
+                    DynamicTextureManager.Log.Information(
+                        $"Body geometry of {source.GamePath} comes from the VANILLA SmallClothes set ({race}) — "
+                      + "no resolved body model references it (vanilla-compat material).");
+            }
+
             if (mesh != null)
                 DynamicTextureManager.Log.Information(
                     $"Body geometry of {source.GamePath}: {mesh.VertexCount} vertices, {mesh.TriangleCount} triangles "
@@ -483,7 +686,7 @@ public sealed class ModelUvReader(IDataManager dataManager, PenumbraService penu
         try
         {
             var (race, resolved, _) = ResolveBodyModels(source);
-            var models = LoadBodyModels(resolved);
+            var (models, _) = LoadBodyModels(resolved);
             var (_, variant, editableNames) = ComputeEditableBodyMaterials(source, race, models);
 
             foreach (var name in models.SelectMany(m => m.Materials).Select(Path.GetFileName).Distinct(StringComparer.OrdinalIgnoreCase)
@@ -568,7 +771,7 @@ public sealed class ModelUvReader(IDataManager dataManager, PenumbraService penu
     /// marked non-editable — dimmed orientation geometry whose UVs belong to a different texture.
     /// </summary>
     private static MaterialMesh? ReadMeshes(IReadOnlyList<MdlFile> models, Func<string, bool> isEditableMaterial,
-        string materialLabel, string meshGamePath, bool includeContext = false)
+        string materialLabel, string meshGamePath, bool includeContext = false, IReadOnlyList<byte>? modelUnits = null)
     {
         var positions = new List<Vector3>();
         var normals   = new List<Vector3>();
@@ -576,11 +779,14 @@ public sealed class ModelUvReader(IDataManager dataManager, PenumbraService penu
         var indices   = new List<int>();
         var triMasks  = new List<uint>();
         var editable  = new List<bool>();
+        var triUnits  = new List<byte>();
         var shapes    = new List<(string Name, (int IndexPosition, int NewVertex)[] Swaps)>();
         var editableTriangles = 0;
 
-        foreach (var mdl in models)
+        for (var modelIndex = 0; modelIndex < models.Count; ++modelIndex)
         {
+            var mdl  = models[modelIndex];
+            var unit = modelUnits != null && modelIndex < modelUnits.Count ? modelUnits[modelIndex] : (byte)0;
             if (!mdl.Valid || mdl.LodCount == 0)
                 continue;
 
@@ -644,6 +850,7 @@ public sealed class ModelUvReader(IDataManager dataManager, PenumbraService penu
                     indices.Add(vertexOffset + c);
                     triMasks.Add(mask);
                     editable.Add(meshEditable);
+                    triUnits.Add(unit);
                     if (meshEditable)
                         ++editableTriangles;
                 }
@@ -671,6 +878,7 @@ public sealed class ModelUvReader(IDataManager dataManager, PenumbraService penu
             TriangleAttributeMasks = triMasks.ToArray(),
             TriangleParts          = parts,
             TriangleEditable       = editable.ToArray(),
+            TriangleUnit           = triUnits.ToArray(),
             PartCount              = partCount,
             GamePath               = meshGamePath,
         };

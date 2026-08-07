@@ -15,6 +15,22 @@ public abstract class TextureLayer
 
     public abstract string LayerType { get; }
 
+    /// <summary> Whether this layer bakes on the 3D surface and needs the material's mesh geometry. </summary>
+    public virtual bool NeedsMeshGeometry
+        => false;
+
+    /// <summary> Whether this layer also edits the material's sibling textures (normal/mask). </summary>
+    public virtual bool HasSiblingEffects
+        => false;
+
+    /// <summary> Whether this layer's sibling effect writes the normal map. </summary>
+    public virtual bool WantsNormalEffect
+        => false;
+
+    /// <summary> Whether this layer's sibling effect writes the mask map. </summary>
+    public virtual bool WantsMaskEffect
+        => false;
+
     protected abstract void SerializeInto(JObject json);
 
     public JObject Serialize()
@@ -46,9 +62,10 @@ public abstract class TextureLayer
 
         TextureLayer? ret = type switch
         {
-            DecalLayer.Type     => DecalLayer.LoadDecal(json),
-            HairShineLayer.Type => HairShineLayer.LoadShine(json),
-            _                   => null,
+            DecalLayer.Type              => DecalLayer.LoadDecal(json),
+            HairShineLayer.Type          => HairShineLayer.LoadShine(json),
+            ProceduralSurfaceLayer.Type  => ProceduralSurfaceLayer.LoadProcedural(json),
+            _                            => null,
         };
         if (ret == null)
         {
@@ -188,8 +205,14 @@ public sealed class DecalLayer : TextureLayer
     public bool HasMaterialEffects
         => NormalSmooth > 0f || Finish != DecalFinishMode.Keep;
 
+    public override bool HasSiblingEffects
+        => HasMaterialEffects;
+
+    public override bool WantsNormalEffect
+        => NormalSmooth > 0f;
+
     /// <summary> Whether the finish setting wants a mask-map write. </summary>
-    public bool WantsMaskEffect
+    public override bool WantsMaskEffect
         => Finish != DecalFinishMode.Keep;
 
     /// <summary>
@@ -198,6 +221,9 @@ public sealed class DecalLayer : TextureLayer
     /// with the actual geometry and continues across UV seams.
     /// </summary>
     public bool Surface;
+
+    public override bool NeedsMeshGeometry
+        => Surface;
 
     /// <summary> Projection anchor on the mesh, in bind-pose model space. </summary>
     public float AnchorX, AnchorY, AnchorZ;

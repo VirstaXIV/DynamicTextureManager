@@ -2,8 +2,8 @@ using System;
 using System.Collections.Generic;
 using System.Threading.Tasks;
 using Dalamud.Plugin;
-using OtterGui.Log;
-using OtterGui.Services;
+using Luna;
+using IService = Luna.IService;
 using Penumbra.Api.Enums;
 using Penumbra.Api.Helpers;
 using Penumbra.Api.IpcSubscribers;
@@ -19,8 +19,7 @@ public sealed class PenumbraService : IDisposable, IService
 {
     public const int RequiredBreakingVersion = 5;
 
-    private readonly IDalamudPluginInterface _pluginInterface;
-    private readonly Logger                  _log;
+    private readonly LunaLogger _log;
 
     private readonly EventSubscriber                 _initializedEvent;
     private readonly EventSubscriber                 _disposedEvent;
@@ -42,7 +41,6 @@ public sealed class PenumbraService : IDisposable, IService
     private readonly GetGameObjectResourceTrees    _getGameObjectResourceTrees;
     private readonly ResolvePlayerPath             _resolvePlayerPath;
     private readonly ConvertTextureData            _convertTextureData;
-    private readonly ConvertTextureFile            _convertTextureFile;
     private readonly RedrawObject                  _redrawObject;
     private readonly RedrawAll                     _redrawAll;
     private readonly OpenMainWindow                _openMainWindow;
@@ -65,9 +63,8 @@ public sealed class PenumbraService : IDisposable, IService
     /// <summary> Fired when a mod directory is moved in Penumbra, with old and new directory names. </summary>
     public event Action<string, string>? ModMoved;
 
-    public PenumbraService(IDalamudPluginInterface pi, Logger log)
+    public PenumbraService(IDalamudPluginInterface pi, LunaLogger log)
     {
-        _pluginInterface = pi;
         _log             = log;
 
         _apiVersion                 = new ApiVersion(pi);
@@ -85,7 +82,6 @@ public sealed class PenumbraService : IDisposable, IService
         _getGameObjectResourceTrees = new GetGameObjectResourceTrees(pi);
         _resolvePlayerPath          = new ResolvePlayerPath(pi);
         _convertTextureData         = new ConvertTextureData(pi);
-        _convertTextureFile         = new ConvertTextureFile(pi);
         _redrawObject               = new RedrawObject(pi);
         _redrawAll                  = new RedrawAll(pi);
         _openMainWindow             = new OpenMainWindow(pi);
@@ -201,9 +197,6 @@ public sealed class PenumbraService : IDisposable, IService
     /// <summary> Let Penumbra BC-compress raw RGBA data and write it as a .tex (or other) file. </summary>
     public Task ConvertTextureData(byte[] rgbaData, int width, string outputFile, TextureType textureType, bool mipMaps = true)
         => _convertTextureData.Invoke(rgbaData, width, outputFile, textureType, mipMaps);
-
-    public Task ConvertTextureFile(string inputFile, string outputFile, TextureType textureType, bool mipMaps = true)
-        => _convertTextureFile.Invoke(inputFile, outputFile, textureType, mipMaps);
 
     public void RedrawObject(int gameObjectIndex)
         => _redrawObject.Invoke(gameObjectIndex);

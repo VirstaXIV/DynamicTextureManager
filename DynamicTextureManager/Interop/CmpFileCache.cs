@@ -1,6 +1,6 @@
 using System;
 using Dalamud.Plugin.Services;
-using OtterGui.Services;
+using IService = Luna.IService;
 
 namespace DynamicTextureManager.Interop;
 

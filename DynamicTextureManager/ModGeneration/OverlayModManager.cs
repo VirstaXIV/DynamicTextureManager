@@ -8,7 +8,7 @@ using DynamicTextureManager.DTextures;
 using DynamicTextureManager.Events;
 using DynamicTextureManager.Interop;
 using DynamicTextureManager.Services;
-using OtterGui.Services;
+using IService = Luna.IService;
 using Penumbra.Api.Enums;
 using Penumbra.GameData.Files.MaterialStructs;
 
@@ -139,8 +139,9 @@ public sealed class OverlayModManager : IService, IDisposable
     }
 
     /// <summary> On dTexture deletion, optionally delete its generated mod. Never resaves the deleted dTexture. </summary>
-    private void OnDTextureChanged(DTextureChanged.Type type, DTexture dTexture, DTextures.History.ITransaction? _)
+    private void OnDTextureChanged(in DTextureChanged.Arguments args)
     {
+        var (type, dTexture, _) = args;
         if (type is not DTextureChanged.Type.Deleted || !config.DeleteModWithDTexture)
             return;
 
@@ -429,12 +430,30 @@ public sealed class OverlayModManager : IService, IDisposable
             return Fail($"Build failed: {ex.Message}");
         }
 
+        // Live customize state must be read here on the framework thread, never from the
+        // background build — the baked file freezes the colors captured now.
+        var characterColors = new CharacterColors();
+        if (plan.TextureJobs.Any(j => j.Layers.Concat(j.EffectLayers)
+                .Any(l => l is DTextures.Data.ProceduralSurfaceLayer { Enabled: true, UseCharacterColors: true })))
+        {
+            if (hairColors.TryGetLocalPlayerHair(out var liveHair))
+                characterColors = characterColors with
+                {
+                    HairMain = liveHair.Main,
+                    // Highlights disabled leaves no second color — lighten the main a touch
+                    // so fur crests still separate from the base.
+                    HairHighlight = liveHair.HighlightsEnabled
+                        ? liveHair.Highlight
+                        : System.Numerics.Vector3.Min(liveHair.Main * 1.35f + new System.Numerics.Vector3(0.06f), System.Numerics.Vector3.One),
+                };
+        }
+
         LastResult = plan.TextureJobs.Count > 0 ? "Building textures..." : "Building...";
         _ = Task.Run(async () =>
         {
             try
             {
-                var written = await BuildAndWriteAsync(dTexture, modDirectory, plan, commitWhenEmpty: cleaning).ConfigureAwait(false);
+                var written = await BuildAndWriteAsync(dTexture, modDirectory, plan, characterColors, commitWhenEmpty: cleaning).ConfigureAwait(false);
                 await framework.RunOnFrameworkThread(() =>
                 {
                     if (written == 0 && !cleaning)
@@ -553,7 +572,7 @@ public sealed class OverlayModManager : IService, IDisposable
 
             // Surface-projected layers bake through the material's bind-pose mesh.
             MaterialMesh? mesh = null;
-            if (layers.Any(l => l is DTextures.Data.DecalLayer { Surface: true, Enabled: true }))
+            if (layers.Any(l => l.Enabled && l.NeedsMeshGeometry))
             {
                 var owner = CompositePlanner.FindTextureOwner(dTexture.Data, gamePath, shaderHandlers, sourceFiles);
                 mesh = owner != null ? uvReader.GetMesh(owner) : null;
@@ -600,7 +619,7 @@ public sealed class OverlayModManager : IService, IDisposable
             var layers   = dTexture.Data.Textures.GetValueOrDefault(gamePath) ?? [];
             var diskPath = GetOrCaptureTextureSource(dTexture, gamePath);
             MaterialMesh? mesh = null;
-            if (layers.Any(l => l is DTextures.Data.DecalLayer { Surface: true, Enabled: true }))
+            if (layers.Any(l => l.Enabled && l.NeedsMeshGeometry))
             {
                 var owner = CompositePlanner.FindTextureOwner(dTexture.Data, gamePath, shaderHandlers, sourceFiles);
                 mesh = owner != null ? uvReader.GetMesh(owner) : null;
@@ -915,7 +934,8 @@ public sealed class OverlayModManager : IService, IDisposable
     /// cleanup that deletes the mod's stale files); an ACCIDENTALLY empty result — every job
     /// failed to decode — must never commit, or it would wipe a previously good mod.
     /// </summary>
-    private async Task<int> BuildAndWriteAsync(DTexture dTexture, string modDirectory, BuildPlan plan, bool commitWhenEmpty = false)
+    private async Task<int> BuildAndWriteAsync(DTexture dTexture, string modDirectory, BuildPlan plan,
+        CharacterColors characterColors, bool commitWhenEmpty = false)
     {
         using var build   = modWriter.StartBuild(modDirectory);
         var       written = 0;
@@ -936,7 +956,7 @@ public sealed class OverlayModManager : IService, IDisposable
                 continue;
 
             DynamicTextureManager.Log.Debug($"Building {job.GamePath} at {decoded.Width}x{decoded.Height} (source {(job.DiskPath == null ? "vanilla" : $"\"{job.DiskPath}\"")}).");
-            var rgba = compositor.CompositeFull(decoded, job.Layers, job.EffectLayers, job.EffectSlot, job.Mesh);
+            var rgba = compositor.CompositeFull(decoded, job.Layers, job.EffectLayers, job.EffectSlot, job.Mesh, characterColors);
 
             if (plan.AnimatedJobs.Any(a => string.Equals(a.NormalGamePath, job.GamePath, StringComparison.OrdinalIgnoreCase)
                                         || string.Equals(a.MaskGamePath, job.GamePath, StringComparison.OrdinalIgnoreCase)))
@@ -1081,7 +1101,7 @@ public sealed class OverlayModManager : IService, IDisposable
             return (PenumbraApiEc.Success, " — could not determine your collection, enable it in Penumbra manually");
 
         var enableEc   = penumbra.TrySetMod(collection.Id, dirName, true);
-        var priorityEc = penumbra.TrySetModPriority(collection.Id, dirName, config.OverlayPriority);
+        var priorityEc = penumbra.TrySetModPriority(collection.Id, dirName, EffectivePriority(dTexture));
         if (enableEc is not PenumbraApiEc.Success and not PenumbraApiEc.NothingChanged)
         {
             DynamicTextureManager.Log.Warning($"Could not enable mod {dirName} in collection {collection.Name}: {enableEc}.");
@@ -1091,11 +1111,43 @@ public sealed class OverlayModManager : IService, IDisposable
         if (priorityEc is not PenumbraApiEc.Success and not PenumbraApiEc.NothingChanged)
             DynamicTextureManager.Log.Warning($"Could not set priority of mod {dirName}: {priorityEc}.");
 
-        return (PenumbraApiEc.Success, $" — enabled in collection \"{collection.Name}\" (priority {config.OverlayPriority})");
+        return (PenumbraApiEc.Success, $" — enabled in collection \"{collection.Name}\" (priority {EffectivePriority(dTexture)})");
+    }
+
+    /// <summary> The generated mod's Penumbra priority: the group's own value, else the global default. </summary>
+    public int EffectivePriority(DTexture dTexture)
+        => dTexture.Data.ModPriority ?? config.OverlayPriority;
+
+    /// <summary> Store a new priority for the group's mod and push it to Penumbra when built. </summary>
+    public void SetModPriority(DTexture dTexture, int? priority)
+    {
+        dTexture.Data.ModPriority = priority;
+        saveService.QueueSave(dTexture);
+
+        var dir = dTexture.Data.OutputModDirectory;
+        if (!penumbra.Available || dir.Length == 0)
+            return;
+
+        try
+        {
+            var (valid, _, collection) = penumbra.GetCollectionForObject(0);
+            if (!valid)
+                return;
+
+            var ec = penumbra.TrySetModPriority(collection.Id, dir, EffectivePriority(dTexture));
+            if (ec is not PenumbraApiEc.Success and not PenumbraApiEc.NothingChanged)
+                DynamicTextureManager.Log.Warning($"Could not set priority of mod {dir}: {ec}.");
+            else
+                penumbra.RedrawObject(0);
+        }
+        catch (Exception ex)
+        {
+            DynamicTextureManager.Log.Warning($"Could not set priority of mod {dir}: {ex.Message}");
+        }
     }
 
     private static string ModName(DTexture dTexture)
-        => $"DTM - {dTexture.Name.Text}";
+        => $"DTM - {dTexture.Name}";
 
     private bool Fail(string message)
     {
