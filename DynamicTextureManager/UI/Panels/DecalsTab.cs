@@ -614,8 +614,10 @@ public sealed class DecalsTab(
             layer.SurfaceLimitToPart = false;
         if (preset != null)
         {
-            // The preset may opt out of colorset mode, but never forces it onto a diffuse target.
-            layer.IdRemap        &= preset.IdRemap;
+            // Colorset eligibility always follows THIS target, never the preset: a decal
+            // saved from a diffuse-only piece of gear must not carry that limitation onto a
+            // different piece whose id map fully supports colorset remap. Everything else
+            // the preset carries is a plain overridable default.
             layer.MaxColors       = preset.MaxColors;
             layer.ColorMerge      = preset.ColorMerge;
             layer.AlphaThreshold  = preset.AlphaThreshold;
