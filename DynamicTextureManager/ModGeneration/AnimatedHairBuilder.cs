@@ -334,7 +334,7 @@ public static class AnimatedHairBuilder
             var fy = y % periodY;
             var wx = fx / periodX;
             var wy = fy / periodY;
-            float S(float ox, float oy) => ProceduralMasks.Fbm(seed, new System.Numerics.Vector2(fx + ox, fy + oy), octaves);
+            float S(float ox, float oy) => ProceduralFields.Fbm(seed, new System.Numerics.Vector2(fx + ox, fy + oy), octaves);
             return S(0, 0) * (1 - wx) * (1 - wy)
                  + S(-periodX, 0) * wx * (1 - wy)
                  + S(0, -periodY) * (1 - wx) * wy
