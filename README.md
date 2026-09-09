@@ -71,7 +71,10 @@ formulas and reverse-engineered shader facts the implementation is built on:
 - [Colorset Decals and the ID Map](https://github.com/VirstaXIV/DynamicTextureManager/wiki/Colorset-Decals-and-the-ID-Map)
 - [Surface Projection and Decal Baking](https://github.com/VirstaXIV/DynamicTextureManager/wiki/Surface-Projection-and-Decal-Baking)
 - [The Procedural Surface Baker](https://github.com/VirstaXIV/DynamicTextureManager/wiki/The-Procedural-Surface-Baker)
+- [The Flow Field](https://github.com/VirstaXIV/DynamicTextureManager/wiki/The-Flow-Field)
+- [Models, UVs and Race Paths](https://github.com/VirstaXIV/DynamicTextureManager/wiki/Models,-UVs-and-Race-Paths)
 - [The Composite and Build Pipeline](https://github.com/VirstaXIV/DynamicTextureManager/wiki/The-Composite-and-Build-Pipeline)
+- [Mod Lifecycle and Penumbra Sync](https://github.com/VirstaXIV/DynamicTextureManager/wiki/Mod-Lifecycle-and-Penumbra-Sync)
 - [The Animated Effect](https://github.com/VirstaXIV/DynamicTextureManager/wiki/The-Animated-Effect)
 - [The 3D Preview System](https://github.com/VirstaXIV/DynamicTextureManager/wiki/The-3D-Preview-System)
 
