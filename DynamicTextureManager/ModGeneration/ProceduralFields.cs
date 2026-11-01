@@ -4,18 +4,63 @@ using System.Numerics;
 namespace DynamicTextureManager.ModGeneration;
 
 /// <summary>
-/// Deterministic noise primitives for the procedural surface generators, extending
-/// <see cref="ProceduralMasks"/> into 3D: seeded value noise, fBm, domain warping and
-/// cellular (Worley) noise. Same hard rule — pure integer/float math with no library RNG,
+/// Deterministic noise primitives — 2D texture-space (the animated-effect pattern) and 3D
+/// world-space (the procedural surface generators): seeded value noise, fBm, domain warping
+/// and cellular (Worley) noise. One hard rule — pure integer/float math with no library RNG,
 /// so the same parameters always produce the same bytes and previews match built files.
 /// The 3D world-space variants are the backbone: evaluated at mesh surface positions they
-/// need no UV parametrization and cannot show seams between UV islands.
+/// need no UV parametrization and cannot show seams between UV islands. The 2D variants are
+/// exactly the z = 0 plane of the same hash, sampled in normalized UV space so results stay
+/// resolution-independent.
 /// </summary>
 public static class ProceduralFields
 {
+    /// <summary> Seeded integer-avalanche hash of a 2D lattice point, uniform in [0,1] — the z = 0 plane of the 3D hash. </summary>
+    public static float Hash01(int seed, int x, int y)
+        => Hash01(seed, x, y, 0);
+
     /// <summary> Seeded integer-avalanche hash of a 3D lattice point, uniform in [0,1]. </summary>
     public static float Hash01(int seed, int x, int y, int z)
         => (Hash(seed, x, y, z) & 0xFFFFFF) / 16777215f;
+
+    /// <summary> 2D lattice value noise in [0,1], smoothstep-interpolated between hashed corners. </summary>
+    public static float ValueNoise(int seed, Vector2 p)
+    {
+        var x0 = (int)MathF.Floor(p.X);
+        var y0 = (int)MathF.Floor(p.Y);
+        var tx = SmoothStep(p.X - x0);
+        var ty = SmoothStep(p.Y - y0);
+
+        var a = Hash01(seed, x0, y0);
+        var b = Hash01(seed, x0 + 1, y0);
+        var c = Hash01(seed, x0, y0 + 1);
+        var d = Hash01(seed, x0 + 1, y0 + 1);
+
+        var top    = a + (b - a) * tx;
+        var bottom = c + (d - c) * tx;
+        return top + (bottom - top) * ty;
+    }
+
+    /// <summary>
+    /// 2D fractal value noise: octaves at doubling frequency and halving amplitude, each with
+    /// its own derived seed, normalized back to [0,1].
+    /// </summary>
+    public static float Fbm(int seed, Vector2 p, int octaves)
+    {
+        octaves = Math.Clamp(octaves, 1, 8);
+        var sum       = 0f;
+        var amplitude = 1f;
+        var total     = 0f;
+        for (var i = 0; i < octaves; ++i)
+        {
+            sum       += ValueNoise(seed + i * 1013, p) * amplitude;
+            total     += amplitude;
+            amplitude *= 0.5f;
+            p         *= 2f;
+        }
+
+        return sum / total;
+    }
 
     private static uint Hash(int seed, int x, int y, int z)
     {
