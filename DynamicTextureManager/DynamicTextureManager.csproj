@@ -3,7 +3,7 @@
   <PropertyGroup>
     <Author>Virsta</Author>
     <Name>Dynamic Texture Manager</Name>
-    <MinimumDalamudVersion>14.0.0</MinimumDalamudVersion>
+    <MinimumDalamudVersion>15.0.0</MinimumDalamudVersion>
     <Version>0.9.9</Version>
     <ApplicableVersion>any</ApplicableVersion>
     <Punchline>Manager for dynamically adjusting textures</Punchline>
