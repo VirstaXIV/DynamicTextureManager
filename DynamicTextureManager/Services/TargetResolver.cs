@@ -3,8 +3,8 @@ using System.Collections.Generic;
 using System.Linq;
 using DynamicTextureManager.Interop;
 using IService = Luna.IService;
+using Penumbra.Api;
 using Penumbra.Api.Enums;
-using Penumbra.Api.Helpers;
 
 namespace DynamicTextureManager.Services;
 

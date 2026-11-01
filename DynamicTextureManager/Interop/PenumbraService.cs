@@ -4,8 +4,8 @@ using System.Threading.Tasks;
 using Dalamud.Plugin;
 using Luna;
 using IService = Luna.IService;
+using Penumbra.Api;
 using Penumbra.Api.Enums;
-using Penumbra.Api.Helpers;
 using Penumbra.Api.IpcSubscribers;
 
 namespace DynamicTextureManager.Interop;
